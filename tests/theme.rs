@@ -81,8 +81,10 @@ fn empty_colorterm_falls_back_to_compatible_tier() {
 
 #[test]
 fn unrecognized_colorterm_falls_back_to_compatible_tier() {
-    // Common near-miss values (e.g. `24bit`) are still not `truecolor`; the skill names only
-    // that one literal value, so anything else — however truecolor-adjacent — degrades.
+    // SKILL.md's own precedence text names only the literal `truecolor` (examples-ratatui.md's
+    // demo snippet additionally accepts `24bit`, but the skill package's own conflict rule
+    // has SKILL.md win — see the `detect` doc comment in theme.rs). `24bit` is deliberately
+    // asserted Compatible here, pinning that reading.
     assert_eq!(detect(Some("24bit"), None), Tier::Compatible);
     assert_eq!(detect(Some("256color"), None), Tier::Compatible);
     assert_eq!(detect(Some("yes"), None), Tier::Compatible);
@@ -91,19 +93,25 @@ fn unrecognized_colorterm_falls_back_to_compatible_tier() {
 // ---- glyph degradation per tier (skill: Capability tiers table) ----
 
 #[test]
-fn toggle_switch_glyph_degrades_between_tiers() {
-    assert_eq!(full::TOGGLE_ON, "─●");
-    assert_eq!(full::TOGGLE_OFF, "○─");
-    assert_eq!(compatible::TOGGLE_ON, "[on]");
-    assert_eq!(compatible::TOGGLE_OFF, "[off]");
+fn toggle_switch_glyphs_degrade_between_tiers() {
+    // One `Span` carries one color, and the skill's toggle is two-tone in both tiers (full:
+    // track vs. knob; compatible: brackets vs. word), so the glyphs are parts to be assembled
+    // into separately-styled spans, not pre-joined strings — see the `full`/`compatible` doc
+    // comments in theme.rs.
+    assert_eq!(full::TOGGLE_TRACK, '─');
+    assert_eq!(full::TOGGLE_KNOB_ON, '●');
+    assert_eq!(full::TOGGLE_KNOB_OFF, '○');
+    assert_eq!(compatible::TOGGLE_BRACKET_OPEN, '[');
+    assert_eq!(compatible::TOGGLE_BRACKET_CLOSE, ']');
+    assert_eq!(compatible::TOGGLE_WORD_ON, "on");
+    assert_eq!(compatible::TOGGLE_WORD_OFF, "off");
 }
 
 #[test]
-fn shared_glyphs_are_identical_regardless_of_tier() {
-    // Capability tiers table: borders, status dot, caret, edit glyph, disclosure, done mark,
-    // spinner, ellipsis, toast bar, scrollbar all render "same" on both tiers — there is
-    // exactly one definition of each in `glyph`, so this pins the literal values rather than
-    // a tier comparison.
+fn shared_glyphs_match_skill_literal_values() {
+    // These have exactly one definition in `glyph` (no tier split) — Capability tiers table
+    // marks them "same" — so this pins the literal values rather than comparing across tiers;
+    // there's nothing to compare, since the type itself only offers one value.
     assert_eq!(glyph::STATUS_DOT_ACTIVE, '●');
     assert_eq!(glyph::STATUS_DOT_INACTIVE, '○');
     assert_eq!(glyph::STATUS_DOT_HOLLOW, '◌');
@@ -117,6 +125,10 @@ fn shared_glyphs_are_identical_regardless_of_tier() {
     assert_eq!(glyph::TOAST_BAR, '┃');
     assert_eq!(glyph::SCROLLBAR_TRACK, '┊');
     assert_eq!(glyph::SCROLLBAR_THUMB, '┃');
+    assert_eq!(glyph::TAB_OVERFLOW_PREV, '‹');
+    assert_eq!(glyph::TAB_OVERFLOW_NEXT, '›');
+    assert_eq!(glyph::ALERT_MARKER, '!');
+    assert_eq!(glyph::ALERT_MARKER_INFO, 'i');
     assert_eq!(glyph::SPINNER_FRAMES, ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']);
 }
 
@@ -135,15 +147,30 @@ fn toast_bg_blends_sunken_over_known_background_full_tier() {
 }
 
 #[test]
+fn toast_bg_rounds_half_away_from_zero_at_exact_boundary() {
+    // base=BG_SUNKEN(17,17,27), under=(3,3,1): r/g land exactly on 13.5, b exactly on 20.5 —
+    // genuine .5 boundaries, pinning the rounding direction rather than leaving it incidental.
+    assert_eq!(toast_bg(Tier::Full, Some(Color::Rgb(3, 3, 1))), Color::Rgb(14, 14, 21));
+}
+
+#[test]
 fn toast_bg_snaps_to_nearest_xterm256_on_compatible_tier() {
     assert_eq!(toast_bg(Tier::Compatible, None), Color::Indexed(234));
     assert_eq!(toast_bg(Tier::Compatible, Some(Color::Rgb(0, 0, 0))), Color::Indexed(233));
 }
 
 #[test]
-fn toast_bg_treats_non_rgb_underlay_as_unknown() {
+fn toast_bg_treats_non_rgb_underlay_as_unknown_full_tier() {
     // Indexed/named/Reset colors carry no extractable RGB — the skill's "unknown / reset
-    // under-bg counts as BG" fallback applies to all of them, not just literal Reset.
-    assert_eq!(toast_bg(Tier::Full, Some(Color::Reset)), toast_bg(Tier::Full, None));
-    assert_eq!(toast_bg(Tier::Full, Some(Color::Indexed(42))), toast_bg(Tier::Full, None));
+    // under-bg counts as BG" fallback applies to all of them, not just literal Reset. Pinned
+    // to the literal result (not compared against `toast_bg(.., None)`) so an implementation
+    // that ignores `under` entirely couldn't pass vacuously.
+    assert_eq!(toast_bg(Tier::Full, Some(Color::Reset)), Color::Rgb(20, 20, 32));
+    assert_eq!(toast_bg(Tier::Full, Some(Color::Indexed(42))), Color::Rgb(20, 20, 32));
+}
+
+#[test]
+fn toast_bg_treats_non_rgb_underlay_as_unknown_compatible_tier() {
+    assert_eq!(toast_bg(Tier::Compatible, Some(Color::Reset)), Color::Indexed(234));
+    assert_eq!(toast_bg(Tier::Compatible, Some(Color::Indexed(42))), Color::Indexed(234));
 }

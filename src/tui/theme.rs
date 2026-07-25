@@ -17,6 +17,13 @@ pub enum Tier {
 /// everything else (unset, empty, any other value) falls back to `Compatible`. Kept free of
 /// `std::env` so it's directly testable without process-global state; see `detect_from_env`
 /// for the real startup path.
+///
+/// SKILL.md's own precedence text names only the literal `truecolor`; the `examples-
+/// ratatui.md` reference snippet in the same skill additionally accepts `24bit`. Per the
+/// package's own conflict rule (AUDIT.md: "when this file and SKILL.md disagree, SKILL.md
+/// wins") and SKILL.md's self-declaration as "the contract", this follows SKILL.md's literal
+/// wording rather than the demo file — flagging the inconsistency for skill maintenance
+/// instead of resolving it unilaterally in either direction.
 pub fn detect(colorterm: Option<&str>, override_tier: Option<Tier>) -> Tier {
     if let Some(tier) = override_tier {
         return tier;
@@ -37,9 +44,20 @@ pub fn detect_from_env(override_tier: Option<Tier>) -> Tier {
 pub mod full {
     use ratatui::style::Color;
 
-    pub const BG: Color = Color::Rgb(30, 30, 46);
+    /// Backs `BG` / `BG_SUNKEN` below and the toast blend's base values (see `toast_bg` in
+    /// the parent module) — the single source for both, so the blend can't silently decay
+    /// into a plausible-but-wrong color the way extracting components back out of a
+    /// `Color::Rgb` via a fallible pattern match could.
+    pub(super) const BG_RGB: (u8, u8, u8) = (30, 30, 46);
+    pub(super) const BG_SUNKEN_RGB: (u8, u8, u8) = (17, 17, 27);
+
+    const fn rgb((r, g, b): (u8, u8, u8)) -> Color {
+        Color::Rgb(r, g, b)
+    }
+
+    pub const BG: Color = rgb(BG_RGB);
     pub const BG_RAISED: Color = Color::Rgb(24, 24, 37);
-    pub const BG_SUNKEN: Color = Color::Rgb(17, 17, 27);
+    pub const BG_SUNKEN: Color = rgb(BG_SUNKEN_RGB);
     pub const BG_HOVER: Color = Color::Rgb(40, 40, 56);
     pub const LINE: Color = Color::Rgb(49, 50, 68);
     pub const LINE_STRONG: Color = Color::Rgb(69, 71, 90);
@@ -53,14 +71,29 @@ pub mod full {
     pub const DANGER: Color = Color::Rgb(243, 139, 168);
     pub const INFO: Color = Color::Rgb(116, 199, 236);
 
-    /// Toggle-switch value glyph (Capability tiers table: "Toggle switch").
-    pub const TOGGLE_ON: &str = "─●";
-    pub const TOGGLE_OFF: &str = "○─";
+    /// Toggle-switch glyphs (Capability tiers table: "Toggle switch"; Toggle row component).
+    /// Full tier is a two-tone slide switch — track always `LINE`, "on" knob `ACCENT`, "off"
+    /// knob `TEXT_DIM` — so the parts are separate constants for per-span styling: one
+    /// `Span` can only carry one color, and the reference (`examples-ratatui.md` §Toggle row)
+    /// builds exactly these three pieces rather than one pre-joined string.
+    pub const TOGGLE_TRACK: char = '─';
+    pub const TOGGLE_KNOB_ON: char = '●';
+    pub const TOGGLE_KNOB_OFF: char = '○';
 }
 
 /// xterm-256 palette, plus the glyphs that only render on the `compatible` tier. Colors are
-/// the skill's own nearest-256 picks (Palette table), not derived at runtime — see
-/// `nearest_xterm256` below for the general case used by the toast blend.
+/// the skill's own nearest-256 picks (Palette table), not derived at runtime. `nearest_xterm256`
+/// below is a separate, general-purpose Euclidean quantizer used only for the toast blend's
+/// arbitrary output — it is NOT guaranteed to reproduce this table (verified: disagrees with
+/// the table on 5 of 15 roles, e.g. `ACCENT` snaps to 74 here vs. the table's 75) because the
+/// table's xterm-256 column isn't itself distance-metric-derived. Don't use one to justify the
+/// other.
+///
+/// `BG` / `BG_RAISED` / `BG_SUNKEN` exist here for completeness and construction, but DNA
+/// rule 3 says the `compatible` tier does NOT paint them as ordinary surface fills — only
+/// `BG_HOVER` (selected-row tint) and `BG_SUNKEN` (toast glass-blend, via `toast_bg`) are
+/// painted. Widget code choosing a background must gate on that; these constants alone don't
+/// encode it.
 pub mod compatible {
     use ratatui::style::Color;
 
@@ -80,17 +113,33 @@ pub mod compatible {
     pub const DANGER: Color = Color::Indexed(211);
     pub const INFO: Color = Color::Indexed(117);
 
-    /// Toggle-switch value glyph (Capability tiers table: "Toggle switch").
-    pub const TOGGLE_ON: &str = "[on]";
-    pub const TOGGLE_OFF: &str = "[off]";
+    /// Toggle-switch glyphs (Capability tiers table: "Toggle switch"; Toggle row component).
+    /// Compatible tier is `[on]`/`[off]` — brackets always `TEXT_DIM`, the word `ACCENT` for
+    /// "on" / `TEXT_DIM` for "off" — so brackets and word are separate constants, matching
+    /// the full-tier decomposition above and letting a caller color each piece correctly
+    /// without inlining a bracket literal (DNA rule 10).
+    pub const TOGGLE_BRACKET_OPEN: char = '[';
+    pub const TOGGLE_BRACKET_CLOSE: char = ']';
+    pub const TOGGLE_WORD_ON: &str = "on";
+    pub const TOGGLE_WORD_OFF: &str = "off";
 }
 
 /// Glyphs that render identically on both tiers (Capability tiers table marks these "same"),
-/// plus the always-lowercase key glyphs from Keyboard grammar. Panel/border corners are
-/// deliberately absent: `ratatui::widgets::BorderType::Rounded` /
-/// `ratatui::symbols::border::ROUNDED` already give the exact `╭─╮ ╰─╯ │` set (DNA rule 2),
-/// and hand-written sub-cell block glyphs are `ratatui::symbols::block`/`bar::NINE_LEVELS`
-/// per the modernization checklist — redefining either here would just be a stale duplicate.
+/// plus the always-lowercase key glyphs from Keyboard grammar. Two cloudy-tui glyphs are
+/// deliberately absent because ratatui already provides the exact composite (verified against
+/// `ratatui-core` 0.1.2 source, not assumed): panel/border corners (`BorderType::Rounded` /
+/// `symbols::border::ROUNDED`, DNA rule 2) and sub-cell block glyphs (`symbols::block`/
+/// `bar::NINE_LEVELS`, modernization checklist). The tooltip leader and stacked-hints rail
+/// (`└ ├ │`) are likewise absent — `symbols::line::{BOTTOM_LEFT, VERTICAL_RIGHT, VERTICAL}`
+/// already give those exact glyphs.
+///
+/// `TOAST_BAR` and `SCROLLBAR_TRACK`/`SCROLLBAR_THUMB` below DO get their own constants even
+/// though the bare glyphs also live in `symbols::line` (`THICK_VERTICAL` = `┃`,
+/// `LIGHT_QUADRUPLE_DASH_VERTICAL` = `┊`): ratatui's own `symbols::scrollbar::VERTICAL` preset
+/// pairs the wrong glyphs for this contract (`line::VERTICAL` = `│` track / `block::FULL` = `█`
+/// thumb, plus arrow caps the contract doesn't have), so the `┊`/`┃` pairing cloudy-tui
+/// actually wants has no matching built-in `Set` to defer to and is curated here instead. The
+/// toast bar has no ratatui `Set` at all to begin with (toast isn't a ratatui widget).
 pub mod glyph {
     // Status dot (component: Status dot).
     pub const STATUS_DOT_ACTIVE: char = '●';
@@ -108,9 +157,23 @@ pub mod glyph {
     pub const DONE_MARK: char = '✓';
     pub const ELLIPSIS: char = '…';
 
+    /// Toast left-bar (DNA rule 2, Toast component). Curated separately from
+    /// `SCROLLBAR_THUMB` below even though both are `┃` — see the module doc comment.
     pub const TOAST_BAR: char = '┃';
+    /// Scrollbar (component: Scrollbar) — deliberately NOT `ratatui::symbols::scrollbar::
+    /// VERTICAL`, whose track/thumb pair (`│`/`█`) doesn't match this contract.
     pub const SCROLLBAR_TRACK: char = '┊';
     pub const SCROLLBAR_THUMB: char = '┃';
+
+    /// Tab bar Overflow form (component: Tab bar → Overflow): only the active tab label
+    /// renders, with these markers indicating a prev/next tab exists (`TEXT_FAINT`).
+    pub const TAB_OVERFLOW_PREV: char = '‹';
+    pub const TAB_OVERFLOW_NEXT: char = '›';
+
+    /// Banner / Footer alert prefix glyph: `!` for a WARNING/DANGER alert, `i` for an INFO
+    /// alert (both components).
+    pub const ALERT_MARKER: char = '!';
+    pub const ALERT_MARKER_INFO: char = 'i';
 
     /// Progress bar (component: Progress bar). `█`/`░` are `ratatui::symbols::block::FULL` /
     /// `ratatui::symbols::shade::LIGHT`; the flow variant has no ratatui equivalent.
@@ -144,11 +207,11 @@ pub mod glyph {
 /// primitive and no color-distance API (ratatui-patterns limitations.md: "alpha-blend /
 /// translucency" and "xterm-256 nearest-color quantization" are both listed gaps).
 pub fn toast_bg(tier: Tier, under: Option<Color>) -> Color {
-    let (base_r, base_g, base_b) = rgb_tuple(full::BG_SUNKEN);
     let (under_r, under_g, under_b) = match under {
         Some(Color::Rgb(r, g, b)) => (r, g, b),
-        _ => rgb_tuple(full::BG),
+        _ => full::BG_RGB,
     };
+    let (base_r, base_g, base_b) = full::BG_SUNKEN_RGB;
 
     let r = blend_channel(base_r, under_r);
     let g = blend_channel(base_g, under_g);
@@ -160,15 +223,6 @@ pub fn toast_bg(tier: Tier, under: Option<Color>) -> Color {
     }
 }
 
-/// Extracts `(r, g, b)` from one of this module's own `full::*` constants, which are always
-/// the `Rgb` variant — the fallback keeps the function total without a panic.
-const fn rgb_tuple(c: Color) -> (u8, u8, u8) {
-    match c {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    }
-}
-
 fn blend_channel(base: u8, under: u8) -> u8 {
     (0.75 * f32::from(base) + 0.25 * f32::from(under)).round() as u8
 }
@@ -176,6 +230,13 @@ fn blend_channel(base: u8, under: u8) -> u8 {
 /// Nearest xterm-256 index for an RGB triple: the 6×6×6 color cube (levels `0, 95, 135, 175,
 /// 215, 255`) versus the 24-step grayscale ramp (`8 + 10*n`), picking whichever is closer in
 /// squared Euclidean distance.
+///
+/// This is a general approximation, not a lookup into the palette table above: verified
+/// against all 15 named roles, it disagrees with the table's own picks for `LINE`,
+/// `LINE_STRONG`, `TEXT_DIM`, `TEXT_FAINT`, and `ACCENT` (the table's xterm-256 column isn't
+/// itself Euclidean-nearest, so no distance metric fully reproduces it — don't "correct" this
+/// function toward the table's values). It exists solely for the toast blend's arbitrary
+/// output, where no lookup table exists to consult instead.
 fn nearest_xterm256(r: u8, g: u8, b: u8) -> Color {
     const CUBE_LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
 
@@ -228,7 +289,9 @@ mod tests {
 
     #[test]
     fn nearest_xterm256_picks_cube_for_saturated_input() {
-        // Pure red sits exactly on a cube vertex; the grayscale ramp can't get close.
+        // Pure red sits exactly on a cube vertex; the grayscale ramp can't get close. This
+        // input is outside `toast_bg`'s reachable output range (r,g in [13,77], b in [20,84])
+        // — it exercises the cube branch directly, not caller behavior.
         assert_eq!(nearest_xterm256(255, 0, 0), Color::Indexed(196));
     }
 }
