@@ -1,0 +1,27 @@
+# cp into: ./rustfmt.toml
+#
+# Token-efficient rustfmt config — shrinks formatted Rust for LLM context
+# (~3-5% fewer tokens vs default rustfmt, measured on a real codebase). The win
+# is from removing wrapping/structure, NOT whitespace (the tokenizer already
+# compresses whitespace). Full option reference: references/rust/rustfmt-docs.md
+#
+# APPLY WITH NIGHTLY: uses unstable options -> `cargo +nightly fmt`. Stable
+# `cargo fmt` errors on the (nightly) keys. For a stable-only config (~75% of the
+# win) delete the (nightly) lines and `unstable_features`.
+#
+# WIDTH KNOB (dominant lever; readability cost rises with width):
+#   100 = rustfmt default   120 = mild   140 = wide (set here)   200 = max squeeze, hard to read
+
+unstable_features = true            # (nightly) gate for the options below
+
+# --- dominant levers (STABLE) — ~90% of the savings ---
+max_width = 140                     # wider lines => fewer wraps => fewer newline+indent tokens
+use_small_heuristics = "Max"        # scale every width heuristic to max_width
+fn_params_layout = "Compressed"     # pack params per line instead of one-per-line
+
+# --- small additional savers (NIGHTLY) ---
+trailing_comma = "Never"            # drop the trailing-comma token in vertical lists
+fn_single_line = true               # collapse trivial single-expr fn bodies onto one line
+where_single_line = true            # single-predicate `where` clauses on one line
+imports_granularity = "Crate"       # merge same-crate `use` trees
+match_arm_blocks = false            # no extra braces around wrapped match arms
