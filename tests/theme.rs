@@ -82,9 +82,9 @@ fn empty_colorterm_falls_back_to_compatible_tier() {
 #[test]
 fn unrecognized_colorterm_falls_back_to_compatible_tier() {
     // SKILL.md's own precedence text names only the literal `truecolor` (examples-ratatui.md's
-    // demo snippet additionally accepts `24bit`, but the skill package's own conflict rule
-    // has SKILL.md win — see the `detect` doc comment in theme.rs). `24bit` is deliberately
-    // asserted Compatible here, pinning that reading.
+    // demo snippet additionally accepts `24bit`, but SKILL.md declares itself "the contract"
+    // over the examples files — see the `detect` doc comment in theme.rs). `24bit` is
+    // deliberately asserted Compatible here, pinning that reading.
     assert_eq!(detect(Some("24bit"), None), Tier::Compatible);
     assert_eq!(detect(Some("256color"), None), Tier::Compatible);
     assert_eq!(detect(Some("yes"), None), Tier::Compatible);

@@ -19,11 +19,13 @@ pub enum Tier {
 /// for the real startup path.
 ///
 /// SKILL.md's own precedence text names only the literal `truecolor`; the `examples-
-/// ratatui.md` reference snippet in the same skill additionally accepts `24bit`. Per the
-/// package's own conflict rule (AUDIT.md: "when this file and SKILL.md disagree, SKILL.md
-/// wins") and SKILL.md's self-declaration as "the contract", this follows SKILL.md's literal
-/// wording rather than the demo file — flagging the inconsistency for skill maintenance
-/// instead of resolving it unilaterally in either direction.
+/// ratatui.md` reference snippet in the same skill additionally accepts `24bit`. SKILL.md
+/// itself resolves that: "This file is the contract. Component code lives in the
+/// `examples-ratatui.md` / ... files next to it" — so this follows SKILL.md's literal
+/// wording rather than the demo file (which independently drifts from SKILL.md elsewhere too,
+/// e.g. its `toast_bg`/`blend` snippet ignores the "unknown/reset under-bg counts as BG"
+/// rule) — flagging the inconsistency for skill maintenance instead of resolving it
+/// unilaterally in either direction.
 pub fn detect(colorterm: Option<&str>, override_tier: Option<Tier>) -> Tier {
     if let Some(tier) = override_tier {
         return tier;
