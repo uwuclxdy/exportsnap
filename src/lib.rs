@@ -2,4 +2,5 @@
 //! `tests/` exercise it as an external crate.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod app;
 pub mod tui;

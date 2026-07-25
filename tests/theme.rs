@@ -3,8 +3,13 @@
 //! cloudy-tui skill's Palette / Capability tiers / Toast tables, not against this crate.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use exportsnap::tui::theme::{Tier, compatible, detect, full, glyph, toast_bg};
+use exportsnap::tui::theme::{Palette, Tier, TierSources, compatible, detect, full, glyph, toast_bg};
 use ratatui::style::Color;
+
+/// Every source absent — the base every precedence test varies one level away from.
+fn no_sources() -> TierSources<'static> {
+    TierSources::default()
+}
 
 // ---- palette: exact hex + xterm-256 values (skill: Palette table) ----
 
@@ -49,34 +54,48 @@ fn compatible_tier_palette_matches_skill_table() {
 // ---- tier selection matrix (skill: Capability tiers → Theme selection precedence) ----
 
 #[test]
-fn override_wins_over_truecolor_colorterm() {
-    assert_eq!(detect(Some("truecolor"), Some(Tier::Compatible)), Tier::Compatible);
+fn cli_level_beats_config_level() {
+    // Both levels set and disagreeing, so whichever wins is the one the assertion names —
+    // neither could pass by falling through to the env level, which disagrees with both.
+    assert_eq!(
+        detect(TierSources { cli: Some(Tier::Compatible), config: Some(Tier::Full), colorterm: Some("truecolor") }),
+        Tier::Compatible
+    );
+    assert_eq!(detect(TierSources { cli: Some(Tier::Full), config: Some(Tier::Compatible), colorterm: None }), Tier::Full);
 }
 
 #[test]
-fn override_wins_over_absent_colorterm() {
-    assert_eq!(detect(None, Some(Tier::Full)), Tier::Full);
+fn config_level_beats_env_detection() {
+    assert_eq!(detect(TierSources { config: Some(Tier::Compatible), colorterm: Some("truecolor"), ..no_sources() }), Tier::Compatible);
+    assert_eq!(detect(TierSources { config: Some(Tier::Full), colorterm: Some("dumb"), ..no_sources() }), Tier::Full);
+}
+
+#[test]
+fn cli_level_beats_env_detection_with_no_config() {
+    assert_eq!(detect(TierSources { cli: Some(Tier::Compatible), colorterm: Some("truecolor"), ..no_sources() }), Tier::Compatible);
+    assert_eq!(detect(TierSources { cli: Some(Tier::Full), ..no_sources() }), Tier::Full);
 }
 
 #[test]
 fn truecolor_colorterm_selects_full_tier() {
-    assert_eq!(detect(Some("truecolor"), None), Tier::Full);
+    assert_eq!(detect(TierSources { colorterm: Some("truecolor"), ..no_sources() }), Tier::Full);
 }
 
 #[test]
 fn truecolor_colorterm_is_case_insensitive() {
-    assert_eq!(detect(Some("TrueColor"), None), Tier::Full);
-    assert_eq!(detect(Some("TRUECOLOR"), None), Tier::Full);
+    for value in ["TrueColor", "TRUECOLOR"] {
+        assert_eq!(detect(TierSources { colorterm: Some(value), ..no_sources() }), Tier::Full);
+    }
 }
 
 #[test]
 fn absent_colorterm_falls_back_to_compatible_tier() {
-    assert_eq!(detect(None, None), Tier::Compatible);
+    assert_eq!(detect(no_sources()), Tier::Compatible);
 }
 
 #[test]
 fn empty_colorterm_falls_back_to_compatible_tier() {
-    assert_eq!(detect(Some(""), None), Tier::Compatible);
+    assert_eq!(detect(TierSources { colorterm: Some(""), ..no_sources() }), Tier::Compatible);
 }
 
 #[test]
@@ -85,9 +104,60 @@ fn unrecognized_colorterm_falls_back_to_compatible_tier() {
     // demo snippet additionally accepts `24bit`, but SKILL.md declares itself "the contract"
     // over the examples files — see the `detect` doc comment in theme.rs). `24bit` is
     // deliberately asserted Compatible here, pinning that reading.
-    assert_eq!(detect(Some("24bit"), None), Tier::Compatible);
-    assert_eq!(detect(Some("256color"), None), Tier::Compatible);
-    assert_eq!(detect(Some("yes"), None), Tier::Compatible);
+    for value in ["24bit", "256color", "yes"] {
+        assert_eq!(detect(TierSources { colorterm: Some(value), ..no_sources() }), Tier::Compatible);
+    }
+}
+
+#[test]
+fn theme_names_map_to_tiers_and_anything_else_is_rejected() {
+    assert_eq!(Tier::from_name("full"), Some(Tier::Full));
+    assert_eq!(Tier::from_name("compatible"), Some(Tier::Compatible));
+    assert_eq!(Tier::from_name("Full"), None);
+    assert_eq!(Tier::from_name("truecolor"), None);
+    assert_eq!(Tier::from_name(""), None);
+}
+
+// ---- palette resolver (skill: Palette table; DNA rule 10) ----
+
+#[test]
+fn palette_resolves_every_role_from_the_full_tier_module() {
+    let palette = Palette::new(Tier::Full);
+    assert_eq!(palette.bg, Color::Rgb(30, 30, 46));
+    assert_eq!(palette.bg_raised, Color::Rgb(24, 24, 37));
+    assert_eq!(palette.bg_sunken, Color::Rgb(17, 17, 27));
+    assert_eq!(palette.bg_hover, Color::Rgb(40, 40, 56));
+    assert_eq!(palette.line, Color::Rgb(49, 50, 68));
+    assert_eq!(palette.line_strong, Color::Rgb(69, 71, 90));
+    assert_eq!(palette.text, Color::Rgb(205, 214, 244));
+    assert_eq!(palette.text_dim, Color::Rgb(166, 173, 200));
+    assert_eq!(palette.text_faint, Color::Rgb(127, 132, 156));
+    assert_eq!(palette.accent, Color::Rgb(67, 171, 229));
+    assert_eq!(palette.accent_2, Color::Rgb(217, 119, 87));
+    assert_eq!(palette.success, Color::Rgb(166, 227, 161));
+    assert_eq!(palette.warning, Color::Rgb(249, 226, 175));
+    assert_eq!(palette.danger, Color::Rgb(243, 139, 168));
+    assert_eq!(palette.info, Color::Rgb(116, 199, 236));
+}
+
+#[test]
+fn palette_resolves_every_role_from_the_compatible_tier_module() {
+    let palette = Palette::new(Tier::Compatible);
+    assert_eq!(palette.bg, Color::Indexed(235));
+    assert_eq!(palette.bg_raised, Color::Indexed(234));
+    assert_eq!(palette.bg_sunken, Color::Indexed(233));
+    assert_eq!(palette.bg_hover, Color::Indexed(236));
+    assert_eq!(palette.line, Color::Indexed(238));
+    assert_eq!(palette.line_strong, Color::Indexed(240));
+    assert_eq!(palette.text, Color::Indexed(189));
+    assert_eq!(palette.text_dim, Color::Indexed(145));
+    assert_eq!(palette.text_faint, Color::Indexed(102));
+    assert_eq!(palette.accent, Color::Indexed(75));
+    assert_eq!(palette.accent_2, Color::Indexed(173));
+    assert_eq!(palette.success, Color::Indexed(151));
+    assert_eq!(palette.warning, Color::Indexed(223));
+    assert_eq!(palette.danger, Color::Indexed(211));
+    assert_eq!(palette.info, Color::Indexed(117));
 }
 
 // ---- glyph degradation per tier (skill: Capability tiers table) ----

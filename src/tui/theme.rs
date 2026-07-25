@@ -12,11 +12,38 @@ pub enum Tier {
     Compatible,
 }
 
-/// Pure tier decision (cloudy-tui skill: Capability tiers → Theme selection precedence).
-/// `override_tier` wins outright; otherwise `$COLORTERM=truecolor` selects `Full` and
-/// everything else (unset, empty, any other value) falls back to `Compatible`. Kept free of
-/// `std::env` so it's directly testable without process-global state; see `detect_from_env`
-/// for the real startup path.
+impl Tier {
+    /// Maps a `--theme=` argument or a config `[theme] name` value to a tier. `None` for
+    /// anything else, so a caller reports an unrecognized value instead of silently falling
+    /// back to a tier the user didn't ask for.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "full" => Some(Self::Full),
+            "compatible" => Some(Self::Compatible),
+            _ => None,
+        }
+    }
+}
+
+/// The three tier sources, in the contract's precedence order (cloudy-tui skill: Capability
+/// tiers → Theme selection precedence). Named fields rather than positional arguments so the
+/// two adjacent `Option<Tier>` levels can't be swapped at a call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TierSources<'a> {
+    /// `--theme=full | compatible`. Highest precedence.
+    pub cli: Option<Tier>,
+    /// `[theme] name = "..."`. No config loader exists yet, so callers pass `None`.
+    pub config: Option<Tier>,
+    /// `$COLORTERM`. Lowest precedence.
+    pub colorterm: Option<&'a str>,
+}
+
+/// Pure tier decision (cloudy-tui skill: Capability tiers → Theme selection precedence):
+/// CLI flag beats config file beats env detection, where `$COLORTERM=truecolor` selects
+/// `Full` and everything else (unset, empty, any other value) falls back to `Compatible`.
+/// Kept free of `std::env` so it's directly testable without process-global state; see
+/// [`detect_from_env`] for the real startup path.
 ///
 /// SKILL.md's own precedence text names only the literal `truecolor`; the `examples-
 /// ratatui.md` reference snippet in the same skill additionally accepts `24bit`. SKILL.md
@@ -26,19 +53,108 @@ pub enum Tier {
 /// e.g. its `toast_bg`/`blend` snippet ignores the "unknown/reset under-bg counts as BG"
 /// rule) — flagging the inconsistency for skill maintenance instead of resolving it
 /// unilaterally in either direction.
-pub fn detect(colorterm: Option<&str>, override_tier: Option<Tier>) -> Tier {
-    if let Some(tier) = override_tier {
+pub fn detect(sources: TierSources<'_>) -> Tier {
+    if let Some(tier) = sources.cli.or(sources.config) {
         return tier;
     }
-    match colorterm {
+    match sources.colorterm {
         Some(value) if value.eq_ignore_ascii_case("truecolor") => Tier::Full,
         _ => Tier::Compatible,
     }
 }
 
-/// Reads `$COLORTERM` and applies [`detect`]. Call once at startup.
-pub fn detect_from_env(override_tier: Option<Tier>) -> Tier {
-    detect(std::env::var("COLORTERM").ok().as_deref(), override_tier)
+/// Reads `$COLORTERM` and applies [`detect`] to it under the two explicit overrides. Call
+/// once at startup.
+pub fn detect_from_env(cli: Option<Tier>, config: Option<Tier>) -> Tier {
+    detect(TierSources { cli, config, colorterm: std::env::var("COLORTERM").ok().as_deref() })
+}
+
+/// Every palette role resolved for one tier (cloudy-tui skill: Palette table), so widget code
+/// never branches on [`Tier`] to pick a color. The [`full`] and [`compatible`] modules stay
+/// the single source of truth; this only selects between them.
+///
+/// `bg` / `bg_raised` / `bg_sunken` are the surface roles DNA rule 3 leaves unpainted on the
+/// `compatible` tier. Paint the base one through [`Palette::surface`], which already resolves
+/// that; the bare fields are the color values, not a licence to fill with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub bg: Color,
+    pub bg_raised: Color,
+    pub bg_sunken: Color,
+    pub bg_hover: Color,
+    pub line: Color,
+    pub line_strong: Color,
+    pub text: Color,
+    pub text_dim: Color,
+    pub text_faint: Color,
+    pub accent: Color,
+    pub accent_2: Color,
+    pub success: Color,
+    pub warning: Color,
+    pub danger: Color,
+    pub info: Color,
+    /// Private so widget code can't reach past [`Palette::surface`] and branch on the tier
+    /// itself — resolving tier-dependent choices here is the whole point of this type.
+    tier: Tier,
+}
+
+impl Palette {
+    /// The base surface fill, or `None` on a tier that paints no surface fills (DNA rule 3:
+    /// on `compatible`, `BG` / `BG_RAISED` / `BG_SUNKEN` inherit the terminal's own
+    /// background and elevation falls to borders + color).
+    ///
+    /// Distinct from the [`Palette::bg`] field, which is the color value itself and stays
+    /// usable on both tiers — the compact banner paints it as a *foreground* over a semantic
+    /// wash, which is a legible-text choice, not a surface fill.
+    #[must_use]
+    pub const fn surface(&self) -> Option<Color> {
+        match self.tier {
+            Tier::Full => Some(self.bg),
+            Tier::Compatible => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn new(tier: Tier) -> Self {
+        match tier {
+            Tier::Full => Self {
+                bg: full::BG,
+                bg_raised: full::BG_RAISED,
+                bg_sunken: full::BG_SUNKEN,
+                bg_hover: full::BG_HOVER,
+                line: full::LINE,
+                line_strong: full::LINE_STRONG,
+                text: full::TEXT,
+                text_dim: full::TEXT_DIM,
+                text_faint: full::TEXT_FAINT,
+                accent: full::ACCENT,
+                accent_2: full::ACCENT_2,
+                success: full::SUCCESS,
+                warning: full::WARNING,
+                danger: full::DANGER,
+                info: full::INFO,
+                tier,
+            },
+            Tier::Compatible => Self {
+                bg: compatible::BG,
+                bg_raised: compatible::BG_RAISED,
+                bg_sunken: compatible::BG_SUNKEN,
+                bg_hover: compatible::BG_HOVER,
+                line: compatible::LINE,
+                line_strong: compatible::LINE_STRONG,
+                text: compatible::TEXT,
+                text_dim: compatible::TEXT_DIM,
+                text_faint: compatible::TEXT_FAINT,
+                accent: compatible::ACCENT,
+                accent_2: compatible::ACCENT_2,
+                success: compatible::SUCCESS,
+                warning: compatible::WARNING,
+                danger: compatible::DANGER,
+                info: compatible::INFO,
+                tier,
+            },
+        }
+    }
 }
 
 /// 24-bit palette, plus the glyphs that only render on the `full` tier (cloudy-tui skill:
