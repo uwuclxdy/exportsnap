@@ -13,6 +13,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier};
+use ratatui::text::Span;
 
 /// ` exportsnap` (11 cells) + `  •  ` (5 cells) — where the first tab label starts.
 const FIRST_TAB_COLUMN: u16 = 16;
@@ -166,6 +167,98 @@ fn overflow_markers_track_which_neighbours_exist() {
     assert_eq!(header_row(&on_tab(Tab::Settings), 50), " exportsnap  •  ‹   settings                      ");
 }
 
+// ---- header: width floor (skill: Tab bar → Overflow; Patterns → Density) ----
+
+#[test]
+fn the_header_floor_is_the_widest_tab_label_plus_its_overflow_chrome() {
+    // The derivation, spelled out so a longer tab label reds here first: 16 lead + the `‹`
+    // marker + the 3-cell gap = 20 cells of chrome left of the active label, and `chat media`
+    // is the widest label at 10. A new label past 10 cells moves the floor, and with it every
+    // literal row below.
+    //
+    // Measured in cells, the unit the floor is built from — a char count would name the wrong
+    // label the first time one carries a wide character.
+    let widest = Tab::ALL.into_iter().max_by_key(|tab| Span::raw(tab.label()).width()).unwrap();
+
+    assert_eq!(widest.label(), "chat media");
+    assert_eq!(Span::raw(widest.label()).width(), 10);
+    assert_eq!(header::min_width(), 30);
+}
+
+#[test]
+fn every_active_label_renders_whole_at_the_floor() {
+    // Exactly at the floor the trailing `   ›` run is the only thing the clip takes — the
+    // active label, brand and leading marker all survive whole, for the widest label and the
+    // narrowest alike.
+    // Compared as one batch so a mutation shows every tab it broke, not just the first.
+    let rendered: Vec<String> = Tab::ALL.into_iter().map(|tab| header_row(&on_tab(tab), 30)).collect();
+
+    assert_eq!(
+        rendered,
+        [
+            " exportsnap  •      overview  ",
+            " exportsnap  •  ‹   memories  ",
+            " exportsnap  •  ‹   chat media",
+            " exportsnap  •  ‹   history   ",
+            " exportsnap  •  ‹   account   ",
+            " exportsnap  •  ‹   settings  ",
+        ]
+    );
+}
+
+#[test]
+fn the_banner_takes_the_header_row_one_cell_below_the_floor() {
+    // A clipped active label would name the wrong tab, so the row says the terminal is too
+    // small instead. The body is untouched — the panel still owns row 1.
+    let terminal = draw(&on_tab(Tab::ChatMedia), 29, 20);
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
+    assert!(row(buffer, 1).starts_with("╭─ CHAT MEDIA "), "{:?}", row(buffer, 1));
+}
+
+#[test]
+fn the_header_banner_tints_its_whole_row() {
+    // Same full-width wash the body banner carries: this is the banner, not a header that
+    // happens to spell the copy.
+    let terminal = draw(&App::new(Tier::Full), 29, 20);
+    let buffer = terminal.backend().buffer();
+    let palette = Palette::new(Tier::Full);
+
+    for x in 0..29 {
+        let style = buffer[(x, 0)].style();
+        assert_eq!(style.bg, Some(palette.warning), "column {x}");
+        assert_eq!(style.fg, Some(palette.bg), "column {x}");
+    }
+}
+
+#[test]
+fn a_frame_under_both_floors_carries_exactly_one_banner() {
+    // Width below the header floor and height below the compact floor at once. The header row
+    // is the one already lost, so it says it, and the body keeps every row it has.
+    let terminal = draw(&App::new(Tier::Full), 29, 13);
+    let buffer = terminal.backend().buffer();
+    let palette = Palette::new(Tier::Full);
+
+    // The wash is the banner's tell, so counting the rows that carry it counts the banners.
+    let washed: Vec<u16> = (0..13).filter(|&y| buffer[(0, y)].style().bg == Some(palette.warning)).collect();
+    assert_eq!(washed, [0], "rows carrying the banner wash");
+
+    assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
+    assert!(row(buffer, 1).starts_with("╭─ OVERVIEW "), "{:?}", row(buffer, 1));
+}
+
+#[test]
+fn the_height_banner_still_takes_the_body_at_the_width_floor() {
+    // One cell wider and the two floors stop overlapping: the header renders for real and the
+    // compact banner goes back to the top of the body where the contract puts it.
+    let terminal = draw(&App::new(Tier::Full), 30, 13);
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(row(buffer, 0), " exportsnap  •      overview  ");
+    assert_eq!(row(buffer, 1), " ! terminal too small · enlar…");
+}
+
 #[test]
 fn overflow_markers_are_text_faint() {
     let terminal = draw(&on_tab(Tab::ChatMedia), 50, 20);
@@ -312,9 +405,10 @@ fn the_compact_banner_truncates_with_a_trailing_ellipsis_one_cell_narrower() {
 fn the_compact_banner_survives_a_width_that_cuts_the_multibyte_separator() {
     // `·` sits at bytes 22..24 of the copy, so a byte-index truncation would slice `[..23]`
     // at this width and panic. Rendering it through the real draw path is the end-to-end
-    // counterpart of the unit test on the truncator.
+    // counterpart of the unit test on the truncator. 24 cells is under the header floor too,
+    // so this is the header's banner — the one row the frame's single banner gets.
     let terminal = draw(&App::new(Tier::Full), 24, 13);
-    assert_eq!(row(terminal.backend().buffer(), 1), " ! terminal too small ·…");
+    assert_eq!(row(terminal.backend().buffer(), 0), " ! terminal too small ·…");
 }
 
 #[test]
@@ -446,8 +540,9 @@ fn the_header_keeps_its_brand_and_active_label_once_they_fit() {
             if width >= 16 {
                 assert!(rendered.starts_with(" exportsnap  •  "), "{tab:?} at width {width}: {rendered:?}");
             }
-            // 16 lead + the widest overflow form (`‹` + gap + `chat media` + gap + `›`) = 34.
-            if width >= 34 {
+            // The floor is the header's own claim about where labels stop clipping, so an
+            // understated one reds right here rather than shipping a lying header row.
+            if width >= header::min_width() {
                 assert!(rendered.contains(tab.label()), "{tab:?} at width {width}: {rendered:?}");
             }
         }

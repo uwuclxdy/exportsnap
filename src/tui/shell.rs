@@ -29,12 +29,23 @@ pub fn render(frame: &mut Frame, app: &App) {
     let [header_area, body_area, footer_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
 
-    frame.render_widget(header::render(palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width), header_area);
+    // Below the header's own floor the tab strip can only render a clipped active label, so
+    // the row would name the wrong tab. It gives up its row to the size banner instead —
+    // off-contract placement (the Banner section puts it atop the body), taken because that
+    // row is already lost while the body's are not.
+    let header_fits = header_area.width >= header::min_width();
+
+    if header_fits {
+        frame.render_widget(header::render(palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width), header_area);
+    } else {
+        frame.render_widget(compact_banner(palette, header_area.width), header_area);
+    }
     frame.render_widget(footer::render(palette, app.is_quit_armed()), footer_area);
 
     // Recomputed from the live frame size every draw, so it self-clears on resize rather than
-    // living on as a stored notification.
-    let panel_area = if area.height < COMPACT_HEIGHT {
+    // living on as a stored notification. At most one banner per frame (skill: Banner), so a
+    // frame short on both axes says it once, in the header's row.
+    let panel_area = if header_fits && area.height < COMPACT_HEIGHT {
         let [banner_area, rest] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body_area);
         frame.render_widget(compact_banner(palette, banner_area.width), banner_area);
         rest
@@ -58,10 +69,10 @@ fn panel(palette: &Palette, title: &str) -> Block<'static> {
     ]))
 }
 
-/// Full-width `WARNING` wash — the tint is what separates a banner from the glyph-only footer
-/// alert. The contract names the tint and the leading ` ! ` glyph but not the text color on
-/// top of the fill, so the row takes `BG` for legibility, matching the dark-on-semantic
-/// treatment the contract uses for its inverse blocks.
+/// Full-width `WARNING` wash, for either size floor — the tint is what separates a banner
+/// from the glyph-only footer alert. The contract names the tint and the leading ` ! ` glyph
+/// but not the text color on top of the fill, so the row takes `BG` for legibility, matching
+/// the dark-on-semantic treatment the contract uses for its inverse blocks.
 ///
 /// Do NOT "restore" the ` ! ` glyph to the semantic color the Banner section names: on a
 /// `WARNING` fill that paints `WARNING` on `WARNING` and the marker vanishes into its own
@@ -120,6 +131,11 @@ mod tests {
         let text = banner_text();
         assert_eq!(text.chars().count(), 47);
         assert_eq!(text.len(), 48);
+
+        // `truncate_prose` counts chars and calls them cells, which holds only while the copy
+        // is one cell per char. Two rows ride on that now — the compact body row and the
+        // header row below its width floor — so the precondition is pinned, not assumed.
+        assert_eq!(Span::raw(&text).width(), 47);
     }
 
     #[test]
