@@ -487,6 +487,37 @@ class TestListings(RedactorCase):
         self.assertEqual(listing["patterns"][0]["examples"], ["******************-media.jpg"])
         self.assertNotIn("zzqqusernamemarker", self.all_output_text())
 
+    def test_every_real_export_schema_filename_survives_verbatim(self):
+        # A word missing from NAME_VOCABULARY renames the file a parser looks for,
+        # and two mangled names can collide onto one mirror (snap_ads / snap_pro),
+        # which also makes any --mask-keys-under rule against them ambiguous.
+        names = [
+            "account.json",
+            "account_history.json",
+            "bitmoji.json",
+            "chat_history.json",
+            "custom_sticker.json",
+            "email_campaign_history.json",
+            "feature_emails.json",
+            "friends.json",
+            "location_history.json",
+            "memories_history.json",
+            "ranking.json",
+            "snap_ads.json",
+            "snap_history.json",
+            "snap_pro.json",
+            "snapchat_ai.json",
+            "snapchat_plus.json",
+            "story_history.json",
+            "terms_history.json",
+            "user_profile.json",
+        ]
+        for name in names:
+            self.write_json(name, {"Field": "value"})
+        self.run_tool()
+        mirrored = sorted(path.name for path in (self.dst / "json").glob("*.json"))
+        self.assertEqual(mirrored, sorted(names))
+
     def test_non_ascii_filename_chars_are_payload_not_separators(self):
         self.write_json("data.json", {"a": 1})
         self.write_media("chat_media", ["привет-media.jpg"])

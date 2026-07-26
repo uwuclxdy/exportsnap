@@ -280,6 +280,17 @@ NAME_VOCABULARY = frozenset(
         "html",
         "files",
         "data",
+        "bitmoji",
+        "custom",
+        "email",
+        "emails",
+        "campaign",
+        "feature",
+        "ads",
+        "pro",
+        "snapchat",
+        "ai",
+        "plus",
     }
 )
 
