@@ -1,0 +1,40 @@
+[
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*overview",
+    "send": "\u001b[C",
+    "timeout": 15,
+    "note": "first frame rendered and overview is the active tab; then right arrow. HARD SIZE FLOOR: width >= 79 and height >= 2. Below width 79 the tab strip collapses to the overflow form, where a tab switch re-styles no cells and ratatui emits only the label's changed characters, so every expect below is chopped and times out. At height 1 the header row is not rendered at all - the single row goes to the footer. Run at 120x30 for headroom."
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*memories",
+    "send": "\u001b[C",
+    "note": "right arrow advanced one tab; arrow again"
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*chat media",
+    "send": "\u001b4",
+    "delay": 0.3,
+    "note": "alt+4 positional jump, sent as ESC + digit. It skips a tab, so no arrow key could satisfy the next expect."
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*history",
+    "send": "\u001b7",
+    "delay": 0.4,
+    "note": "alt+7 must be INERT - only six tabs exist. An inert key changes no cell, so ratatui writes no content at all and there is nothing to expect on; the next two steps are what prove it."
+  },
+  {
+    "send": "\u001b[C",
+    "delay": 0.3,
+    "note": "right arrow. Had alt+7 jumped anywhere, this lands off account and the next expect times out."
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*account",
+    "send": "q",
+    "note": "account confirms alt+7 left the active tab on history. First q arms the 2-step quit and must NOT exit."
+  },
+  {
+    "expect": " ! (?:\u001b\\[[0-9;:]*m)+press q again to quit",
+    "send": "q",
+    "note": "the hint bar is replaced in place by the footer alert: marker glyph, then a separate SGR, then the copy. The second q exits. HOW TO GATE THIS RUN: require the printed final line to be exactly EXIT:0 AND stderr to contain no '[step N] TIMEOUT'. Do NOT gate on tui-drive.py's own process exit code - it returns `child.exitstatus or 0`, and a timed-out step only breaks the loop, so a failed flow and an app that never quit both yield process rc 0."
+  }
+]
