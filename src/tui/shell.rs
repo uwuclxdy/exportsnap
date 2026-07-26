@@ -133,8 +133,12 @@ mod tests {
         assert_eq!(text.len(), 48);
 
         // `truncate_prose` counts chars and calls them cells, which holds only while the copy
-        // is one cell per char. Two rows ride on that now — the compact body row and the
-        // header row below its width floor — so the precondition is pinned, not assumed.
+        // is one cell per char. Two rows ride on that now: the compact body row and the header
+        // row below its width floor. A wide glyph costs both the trailing `…`, which the
+        // char-count cut pushes past the edge where it is dropped, and the full-width wash,
+        // which holes at the glyph's continuation cell. ratatui resets that cell after writing
+        // the symbol, so the hole lands at any width, not only where the row overruns. Pinned
+        // rather than assumed, since the wash is what separates a banner from a footer alert.
         assert_eq!(Span::raw(&text).width(), 47);
     }
 
