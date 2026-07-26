@@ -1,12 +1,14 @@
-//! Framework-free export domain: the json a Snapchat "My Data" dump ships, read off disk and
-//! turned into types the rest of the crate can trust.
+//! Framework-free export domain: the zips a Snapchat "My Data" dump arrives as and the json they
+//! hold, read off disk and turned into types the rest of the crate can trust.
 //!
-//! [`schema`] transcribes the wire, [`model`] validates it. [`ExportJson`] is the whole `json/`
-//! dir in one value; the six files phases 2-4 build on arrive as `model` types, the other
-//! thirteen as typed [`schema`] passthroughs until a screen needs more from them.
+//! [`self::zip`] finds the `mydata~*` parts and unpacks them. [`schema`] transcribes the wire,
+//! [`model`] validates it. [`ExportJson`] is the whole `json/` dir in one value; the six files
+//! phases 2-4 build on arrive as `model` types, the other thirteen as typed [`schema`]
+//! passthroughs until a screen needs more from them.
 
 pub mod model;
 pub mod schema;
+pub mod zip;
 
 use std::error::Error;
 use std::fmt;
