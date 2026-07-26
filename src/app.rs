@@ -6,6 +6,7 @@ use std::io;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::tui::screens::overview::Overview;
 use crate::tui::shell;
 use crate::tui::theme::{Palette, Tier};
 
@@ -82,17 +83,31 @@ pub struct App {
     active: Tab,
     quit_armed: bool,
     running: bool,
+    overview: Overview,
 }
 
 impl App {
     #[must_use]
-    pub const fn new(tier: Tier) -> Self {
-        Self { palette: Palette::new(tier), active: Tab::Overview, quit_armed: false, running: true }
+    pub fn new(tier: Tier) -> Self {
+        Self { palette: Palette::new(tier), active: Tab::Overview, quit_armed: false, running: true, overview: Overview::unloaded() }
+    }
+
+    /// Hands the overview screen a real read of the source dir. `main` calls this before the first
+    /// frame; [`Self::new`] on its own draws the unloaded state.
+    #[must_use]
+    pub fn with_overview(mut self, overview: Overview) -> Self {
+        self.overview = overview;
+        self
     }
 
     #[must_use]
     pub const fn palette(&self) -> &Palette {
         &self.palette
+    }
+
+    #[must_use]
+    pub const fn overview(&self) -> &Overview {
+        &self.overview
     }
 
     #[must_use]

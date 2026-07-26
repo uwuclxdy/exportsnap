@@ -4,8 +4,10 @@
 //! [`self::zip`] finds the `mydata~*` parts and unpacks them. [`schema`] transcribes the wire,
 //! [`model`] validates it. [`ExportJson`] is the whole `json/` dir in one value; the six files
 //! phases 2-4 build on arrive as `model` types, the other thirteen as typed [`schema`]
-//! passthroughs until a screen needs more from them.
+//! passthroughs until a screen needs more from them. [`env`] covers the other half of what a run
+//! depends on: the optional tools installed and the room left on disk.
 
+pub mod env;
 pub mod model;
 pub mod schema;
 pub mod zip;

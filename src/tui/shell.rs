@@ -4,16 +4,28 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
-use ratatui::symbols::line;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Padding};
+use ratatui::widgets::Block;
 
+use super::screens::overview;
 use super::theme::{Palette, glyph};
+use super::widgets::{PanelStyle, panel};
 use super::{footer, header};
-use crate::app::App;
+use crate::app::{App, Tab};
 
 /// Below this height the layout stops fitting (cloudy-tui skill: Patterns → Density).
-const COMPACT_HEIGHT: u16 = 14;
+pub(crate) const COMPACT_HEIGHT: u16 = 14;
+
+/// The header owns exactly one row and the footer exactly one, at every size (cloudy-tui skill:
+/// App shell; Footer alert replaces the hint bar in place rather than stacking above it).
+///
+/// These three are `pub(crate)` and are what the vertical [`Layout`] below is actually built from,
+/// so a screen can derive how many rows its panel is guaranteed instead of restating the shell's
+/// geometry as its own literals — see [`crate::tui::screens::overview`]'s height invariant. A
+/// coupling assertion between two hardcoded numbers checks nothing, so these must stay the single
+/// source rather than a copy that agrees today.
+pub(crate) const HEADER_ROWS: u16 = 1;
+pub(crate) const FOOTER_ROWS: u16 = 1;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -27,7 +39,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let [header_area, body_area, footer_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        Layout::vertical([Constraint::Length(HEADER_ROWS), Constraint::Fill(1), Constraint::Length(FOOTER_ROWS)]).areas(area);
 
     // Below the header's own floor the tab strip can only render a clipped active label, so
     // the row would name the wrong tab. It gives up its row to the size banner instead —
@@ -53,20 +65,13 @@ pub fn render(frame: &mut Frame, app: &App) {
         body_area
     };
 
-    frame.render_widget(panel(palette, app.active().label()), panel_area);
-}
-
-/// The screen's sole content panel, so it takes `LINE_STRONG` (it owns the cursor) and, being
-/// the first panel on the body, an `ACCENT_2` title.
-fn panel(palette: &Palette, title: &str) -> Block<'static> {
-    let border = Style::new().fg(palette.line_strong);
-
-    Block::bordered().border_type(BorderType::Rounded).border_style(border).padding(Padding::new(1, 1, 0, 0)).title(Line::from(vec![
-        // ratatui puts a title flush against the corner; this dash restores the contract's
-        // `╭─ TITLE ─` break and carries the border token, because chrome owns every dash.
-        Span::styled(line::HORIZONTAL, border),
-        Span::styled(format!(" {} ", title.to_uppercase()), Style::new().fg(palette.accent_2).bold().italic()),
-    ]))
+    match app.active() {
+        Tab::Overview => overview::render(frame, palette, app.overview(), panel_area),
+        // The other five tabs are still the empty shell: one placeholder panel named after the
+        // tab. It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the
+        // cursor) and, being the first panel on the body, an `ACCENT_2` title.
+        tab => frame.render_widget(panel(palette, tab.label(), PanelStyle { first: true, focused: true }), panel_area),
+    }
 }
 
 /// Full-width `WARNING` wash, for either size floor — the tint is what separates a banner

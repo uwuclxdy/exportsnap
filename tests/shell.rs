@@ -74,13 +74,15 @@ fn on_tab(tab: Tab) -> App {
 
 #[test]
 fn renders_header_body_panel_and_hint_bar() {
-    let terminal = draw(&App::new(Tier::Full), 52, 6);
+    // Driven on `memories` rather than `overview`: the overview tab owns its own panels now, so
+    // the shell's placeholder panel — the thing this pins — only survives on the other five.
+    let terminal = draw(&on_tab(Tab::Memories), 52, 6);
     assert_eq!(
         grid(terminal.backend().buffer()),
         [
-            " exportsnap  •      overview   ›                    ",
+            " exportsnap  •  ‹   memories   ›                    ",
             " ! terminal too small · enlarge for full layout     ",
-            "╭─ OVERVIEW ───────────────────────────────────────╮",
+            "╭─ MEMORIES ───────────────────────────────────────╮",
             "│                                                  │",
             "╰──────────────────────────────────────────────────╯",
             " ←→ switch   q quit                                 ",
@@ -131,8 +133,8 @@ fn the_underline_moves_with_the_active_tab() {
 #[test]
 fn no_underline_row_sits_beneath_the_tab_bar() {
     // The active label carries the underline as a text attribute; row 1 is already the panel.
-    let terminal = draw(&App::new(Tier::Full), 100, 20);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ OVERVIEW "));
+    let terminal = draw(&on_tab(Tab::Memories), 100, 20);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ MEMORIES "));
 }
 
 // ---- header: right-edge suppression (skill: App shell → right-edge suppression priority) ----
@@ -236,7 +238,7 @@ fn the_header_banner_tints_its_whole_row() {
 fn a_frame_under_both_floors_carries_exactly_one_banner() {
     // Width below the header floor and height below the compact floor at once. The header row
     // is the one already lost, so it says it, and the body keeps every row it has.
-    let terminal = draw(&App::new(Tier::Full), 29, 13);
+    let terminal = draw(&on_tab(Tab::Memories), 29, 13);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -245,7 +247,7 @@ fn a_frame_under_both_floors_carries_exactly_one_banner() {
     assert_eq!(washed, [0], "rows carrying the banner wash");
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
-    assert!(row(buffer, 1).starts_with("╭─ OVERVIEW "), "{:?}", row(buffer, 1));
+    assert!(row(buffer, 1).starts_with("╭─ MEMORIES "), "{:?}", row(buffer, 1));
 }
 
 #[test]
@@ -273,8 +275,10 @@ fn overflow_markers_are_text_faint() {
 
 #[test]
 fn the_panel_title_names_the_active_tab_in_uppercase() {
+    // `overview` is absent on purpose: it is the one tab with a real screen behind it, and its own
+    // two panel titles are pinned in `tests/overview.rs`. The other five are still the shell's
+    // placeholder panel, which is what names itself after the tab.
     for (tab, title) in [
-        (Tab::Overview, "╭─ OVERVIEW ─"),
         (Tab::Memories, "╭─ MEMORIES ─"),
         (Tab::ChatMedia, "╭─ CHAT MEDIA ─"),
         (Tab::History, "╭─ HISTORY ─"),
@@ -288,12 +292,12 @@ fn the_panel_title_names_the_active_tab_in_uppercase() {
 
 #[test]
 fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
-    let terminal = draw(&App::new(Tier::Full), 60, 20);
+    let terminal = draw(&on_tab(Tab::Memories), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
     let title = buffer[(PANEL_TITLE_COLUMN + 1, 1)].style();
-    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "O");
+    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "M");
     assert_eq!(title.fg, Some(palette.accent_2));
     assert!(title.add_modifier.contains(Modifier::BOLD));
     assert!(title.add_modifier.contains(Modifier::ITALIC));
@@ -305,9 +309,10 @@ fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
 
 #[test]
 fn the_title_style_never_bleeds_into_the_border_break_dashes() {
-    // Chrome owns every `─` cell: the dash before ` OVERVIEW ` and the first one after it both
-    // carry the border token, with no title color, bold or italic on them.
-    let terminal = draw(&App::new(Tier::Full), 60, 20);
+    // Chrome owns every `─` cell: the dash before ` MEMORIES ` and the first one after it both
+    // carry the border token, with no title color, bold or italic on them. ` MEMORIES ` is the
+    // same 10 cells ` OVERVIEW ` was, so the two columns below are unchanged.
+    let terminal = draw(&on_tab(Tab::Memories), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -385,8 +390,8 @@ fn the_compact_banner_appears_below_fourteen_rows() {
 
 #[test]
 fn the_compact_banner_is_gone_at_fourteen_rows() {
-    let terminal = draw(&App::new(Tier::Full), 60, 14);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ OVERVIEW "));
+    let terminal = draw(&on_tab(Tab::Memories), 60, 14);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ MEMORIES "));
 }
 
 #[test]
@@ -446,7 +451,11 @@ fn the_panel_border_and_title_follow_the_tier_too() {
     for (tier, accent_2, line_strong) in
         [(Tier::Full, Color::Rgb(217, 119, 87), Color::Rgb(69, 71, 90)), (Tier::Compatible, Color::Indexed(173), Color::Indexed(240))]
     {
-        let terminal = draw(&App::new(tier), 60, 20);
+        let mut app = App::new(tier);
+        while app.active() != Tab::Memories {
+            press(&mut app, KeyCode::Right);
+        }
+        let terminal = draw(&app, 60, 20);
         let buffer = terminal.backend().buffer();
 
         assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].style().fg, Some(accent_2), "{tier:?} panel title");
