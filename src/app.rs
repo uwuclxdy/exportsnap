@@ -138,9 +138,24 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        // Deliberately case-sensitive, unlike `q` below: `ctrl+shift+c` arrives as `Char('C')`
-        // and is the terminal's own copy binding, not ours to claim.
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // `ctrl+shift+c` is the terminal's own copy binding, not ours to claim, and it reaches us
+        // in more than one shape. Under the kitty keyboard protocol it is the CSI-u base codepoint
+        // `Char('c')` carrying SHIFT alongside CONTROL; add the `report alternate keys` flag and
+        // crossterm's `parse_csi_u_encoded_key_code` swaps in the shifted codepoint and clears
+        // SHIFT, leaving `Char('C')` + CONTROL. Windows sends `Char('C')` + both while shift is
+        // held. The case check and the SHIFT rejection each carry a shape the other misses; every
+        // other modifier still falls through, since "quit immediately, from anywhere" has to
+        // survive a stray alt or super.
+        //
+        // Two deliberate limits. The legacy encoding offers nothing to reject — the chord arrives
+        // as the bare byte 0x03, indistinguishable from plain `ctrl+c`. And `Char('C')` + CONTROL
+        // has a second producer: Windows uppercases the char under caps lock and never reports
+        // caps as a modifier, so caps-lock `ctrl+c` is the same `KeyEvent` as the alternate-keys
+        // copy chord and gets dropped with it. Resolved toward not quitting, because stealing the
+        // copy chord is the worse failure — that user still leaves via `q q`, which the Windows
+        // parser routes around the case fixup. Doing better needs a signal crossterm does not
+        // carry.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::SHIFT) {
             self.running = false;
             return;
         }

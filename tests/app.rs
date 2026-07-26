@@ -203,6 +203,8 @@ fn disarming_then_pressing_q_again_only_rearms() {
 
 #[test]
 fn ctrl_c_quits_immediately() {
+    // Also the shape legacy-encoded `ctrl+shift+c` arrives in — the terminal sends the bare byte
+    // 0x03 for both — so this must keep quitting however the copy chord is guarded below.
     let mut app = app();
     press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(!app.is_running());
@@ -212,6 +214,7 @@ fn ctrl_c_quits_immediately() {
 fn ctrl_c_still_quits_with_extra_modifiers_held() {
     // "quit immediately, from anywhere" — the binding tests for CONTROL rather than equality,
     // so a stray alt or super held alongside must not swallow the one guaranteed way out.
+    // SHIFT is the one exception, carved out below.
     let mut app = app();
     press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::ALT);
     assert!(!app.is_running());
@@ -222,6 +225,58 @@ fn bare_c_does_not_quit() {
     let mut app = app();
     press(&mut app, KeyCode::Char('c'));
     assert!(app.is_running());
+}
+
+// The terminal's own copy chord reaches crossterm in three shapes, each read off
+// `crossterm-0.29.0/src/event/sys/unix/parse.rs` and `.../windows/parse.rs`. One test per shape,
+// because the guard rejects each of them on a different clause.
+
+#[test]
+fn ctrl_shift_c_leaves_the_app_running() {
+    // Kitty protocol, `disambiguate escape codes` only: `CSI 99;6u` is the base codepoint `c` with
+    // mask 6, and `parse_modifiers` turns that into CONTROL|SHIFT. Not an uppercased `Char('C')` —
+    // the SHIFT rejection is what carries this one.
+    let mut app = app();
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert!(app.is_running(), "the copy chord must never quit");
+    assert_eq!(app.active(), Tab::Overview, "it must not move the tab either");
+}
+
+#[test]
+fn ctrl_shift_c_with_alternate_keys_reported_leaves_the_app_running() {
+    // Kitty protocol with `report alternate keys` on: `CSI 99:67;6u` carries the shifted codepoint
+    // too, and `parse_csi_u_encoded_key_code` substitutes it and then *clears* SHIFT — so this
+    // shape arrives as `Char('C')` + CONTROL alone. Only the case check rejects it; widen the
+    // guard to `'c' | 'C'` and the copy chord quits with the SHIFT rejection fully intact.
+    //
+    // The same `KeyEvent` is what Windows produces for plain `ctrl+c` with caps lock on, so this
+    // pins that as not-quitting too. Deliberate, not collateral — the guard's comment carries the
+    // reasoning and `q q` is that user's way out.
+    let mut app = app();
+    press_with(&mut app, KeyCode::Char('C'), KeyModifiers::CONTROL);
+    assert!(app.is_running(), "the copy chord must never quit");
+    assert_eq!(app.active(), Tab::Overview);
+}
+
+#[test]
+fn ctrl_shift_c_in_the_windows_shape_leaves_the_app_running() {
+    // The Windows console reports the char uppercased *and* keeps SHIFT in the modifier set, so
+    // this shape is the one both clauses catch. Pinned so neither can be dropped unnoticed.
+    let mut app = app();
+    press_with(&mut app, KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert!(app.is_running(), "the copy chord must never quit, whichever case it arrives in");
+    assert_eq!(app.active(), Tab::Overview);
+}
+
+#[test]
+fn ctrl_shift_c_does_not_confirm_an_armed_quit() {
+    // It falls through to the disarm, so an armed `q` must not be confirmed by the copy chord.
+    let mut app = app();
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.is_quit_armed());
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert!(app.is_running());
+    assert!(!app.is_quit_armed());
 }
 
 // ---- event filtering ----
