@@ -8,6 +8,7 @@
 //! depends on: the optional tools installed and the room left on disk.
 
 pub mod env;
+pub mod manifest;
 pub mod model;
 pub mod schema;
 pub mod zip;
