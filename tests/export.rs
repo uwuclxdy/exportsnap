@@ -190,12 +190,57 @@ fn media_kind_keeps_the_words_it_knows_and_carries_the_ones_it_does_not() {
     assert_eq!(MediaKind::from_wire("IMAGE"), MediaKind::Image);
     assert_eq!(MediaKind::from_wire("VIDEO"), MediaKind::Video);
     assert_eq!(MediaKind::from_wire("PHOTO"), MediaKind::Other("PHOTO".to_owned()));
-    // Lowercase is a different word, not the same one: the export shouts its enums.
-    assert_eq!(MediaKind::from_wire("text"), MediaKind::Other("text".to_owned()));
 
     for word in ["TEXT", "MEDIA", "STATUS", "NOTE", "STICKER", "IMAGE", "VIDEO", "PHOTO"] {
         assert_eq!(MediaKind::from_wire(word).as_wire(), word);
     }
+}
+
+#[test]
+fn the_word_is_matched_without_regard_to_case_and_other_still_keeps_its_spelling() {
+    // Title case is memories' spelling and shouting is chat's and snap's; both name one variant.
+    assert_eq!(MediaKind::from_wire("Image"), MediaKind::Image);
+    assert_eq!(MediaKind::from_wire("Video"), MediaKind::Video);
+    assert_eq!(MediaKind::from_wire("text"), MediaKind::Text);
+    assert_eq!(MediaKind::from_wire("sTiCkEr"), MediaKind::Sticker);
+
+    // A placed word comes back in the canonical spelling, never the caller's.
+    assert_eq!(MediaKind::from_wire("Image").as_wire(), "IMAGE");
+    // An unplaced one keeps its own, case included, because the spelling is all that is known.
+    assert_eq!(MediaKind::from_wire("Photo"), MediaKind::Other("Photo".to_owned()));
+    assert_eq!(MediaKind::from_wire("Photo").as_wire(), "Photo");
+    assert_eq!(MediaKind::from_wire(""), MediaKind::Other(String::new()));
+}
+
+/// The three real `Media Type` vocabularies, one file at a time
+/// (`docs/design.md`, observed export shape; n=1).
+#[test]
+fn every_media_type_word_the_real_export_writes_lands_where_it_belongs() {
+    // chat_history.json. `SHARE` and the whole `STATUS…` family are their own words: the match is
+    // against the whole word and never a prefix, so none of them folds into `Status`.
+    for (word, expected) in [
+        ("TEXT", MediaKind::Text),
+        ("MEDIA", MediaKind::Media),
+        ("NOTE", MediaKind::Note),
+        ("STICKER", MediaKind::Sticker),
+        ("STATUS", MediaKind::Status),
+        ("SHARE", MediaKind::Other("SHARE".to_owned())),
+        ("STATUSSAVETOCAMERAROLL", MediaKind::Other("STATUSSAVETOCAMERAROLL".to_owned())),
+        ("STATUSPARTICIPANTADDED", MediaKind::Other("STATUSPARTICIPANTADDED".to_owned())),
+        ("STATUSERASEDSNAPMESSAGE", MediaKind::Other("STATUSERASEDSNAPMESSAGE".to_owned())),
+        ("STATUSNAMECHANGED", MediaKind::Other("STATUSNAMECHANGED".to_owned())),
+    ] {
+        assert_eq!(MediaKind::from_wire(word), expected, "chat_history.json writes {word}");
+    }
+
+    // snap_history.json.
+    assert_eq!(MediaKind::from_wire("IMAGE"), MediaKind::Image);
+    assert_eq!(MediaKind::from_wire("VIDEO"), MediaKind::Video);
+
+    // memories_history.json, title case. These two are the reason the match ignores case at all:
+    // `export::memories` buckets by the kind, and `Other` buckets as unknown.
+    assert_eq!(MediaKind::from_wire("Image"), MediaKind::Image);
+    assert_eq!(MediaKind::from_wire("Video"), MediaKind::Video);
 }
 
 #[test]

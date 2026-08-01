@@ -5,10 +5,13 @@
 //! [`model`] validates it. [`ExportJson`] is the whole `json/` dir in one value; the six files
 //! phases 2-4 build on arrive as `model` types, the other thirteen as typed [`schema`]
 //! passthroughs until a screen needs more from them. [`env`] covers the other half of what a run
-//! depends on: the optional tools installed and the room left on disk.
+//! depends on: the optional tools installed and the room left on disk. [`memories`] joins the
+//! media on disk to the entries `memories_history.json` names and enrolls the result in
+//! [`manifest`].
 
 pub mod env;
 pub mod manifest;
+pub mod memories;
 pub mod model;
 pub mod schema;
 pub mod zip;

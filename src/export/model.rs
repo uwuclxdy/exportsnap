@@ -223,7 +223,7 @@ impl fmt::Display for Timestamp {
 /// check here, and width is not what catches it — `"1-"` is two characters wide. What rejects it
 /// is [`fixed_width`]'s ascii-digit check, since neither `-` nor `:` is a digit. Relaxing that
 /// check reopens this hole.
-fn split_three(text: &str, sep: char) -> Option<(&str, &str, &str)> {
+pub(crate) fn split_three(text: &str, sep: char) -> Option<(&str, &str, &str)> {
     let (first, rest) = text.split_once(sep)?;
     let (second, third) = rest.split_once(sep)?;
     Some((first, second, third))
@@ -231,14 +231,14 @@ fn split_three(text: &str, sep: char) -> Option<(&str, &str, &str)> {
 
 /// Parses exactly `width` ascii digits. The digit check is what rejects `"+1"`, `"-1"` and
 /// leading whitespace, all of which `str::parse` would otherwise accept.
-fn fixed_width<T: std::str::FromStr>(text: &str, width: usize) -> Option<T> {
+pub(crate) fn fixed_width<T: std::str::FromStr>(text: &str, width: usize) -> Option<T> {
     if text.len() != width || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     text.parse().ok()
 }
 
-fn in_range<T: PartialOrd>(value: T, low: T, high: T) -> Option<T> {
+pub(crate) fn in_range<T: PartialOrd>(value: T, low: T, high: T) -> Option<T> {
     (value >= low && value <= high).then_some(value)
 }
 
@@ -345,11 +345,18 @@ string_newtype!(ConversationId);
 
 /// The `Media Type` word, kept open because the observed export is n=1.
 ///
-/// The named variants are the words the redactor preserves verbatim, so they are the only ones a
-/// fixture can confirm. Memories' values fall outside that allowlist and arrive redacted, which
-/// says their real words are unknown here — not that they differ from the chat and snap words,
-/// which the fixture cannot show either way. So `Other` is not a fallback for something this
-/// parser should have known: it is the honest carrier for a word no observed export enumerates.
+/// **Matching is ascii-case-insensitive, and the three files carrying this key are why.**
+/// `chat_history.json` and `snap_history.json` shout their words (`TEXT`, `MEDIA`, `IMAGE`,
+/// `VIDEO`), while `memories_history.json` writes `Image` and `Video` in title case. A
+/// case-sensitive match sent every memory entry to [`Self::Other`], which is precisely the field
+/// [`crate::export::memories`] keys its day-and-kind buckets off.
+///
+/// `Other` is not a fallback for a word this parser should have known: it is the honest carrier for
+/// one no observed export enumerates. `chat_history.json` alone carries `SHARE` and a whole
+/// `STATUS…` family (`STATUSSAVETOCAMERAROLL`, `STATUSPARTICIPANTADDED`, `STATUSERASEDSNAPMESSAGE`,
+/// `STATUSNAMECHANGED`). Those are distinct words rather than spellings of [`Self::Status`] — the
+/// comparison is against the whole word, never a prefix — so each lands in `Other` carrying its own
+/// text.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MediaKind {
     Text,
@@ -363,21 +370,20 @@ pub enum MediaKind {
 }
 
 impl MediaKind {
+    /// Every word this parser places, each spelled as [`Self::as_wire`] gives it back.
+    const KNOWN: [Self; 7] = [Self::Text, Self::Media, Self::Status, Self::Note, Self::Sticker, Self::Image, Self::Video];
+
+    /// The variant for `raw`, matched without regard to ascii case; see the type's docs for why.
     #[must_use]
     pub fn from_wire(raw: &str) -> Self {
-        match raw {
-            "TEXT" => Self::Text,
-            "MEDIA" => Self::Media,
-            "STATUS" => Self::Status,
-            "NOTE" => Self::Note,
-            "STICKER" => Self::Sticker,
-            "IMAGE" => Self::Image,
-            "VIDEO" => Self::Video,
-            other => Self::Other(other.to_owned()),
-        }
+        Self::KNOWN.into_iter().find(|known| raw.eq_ignore_ascii_case(known.as_wire())).unwrap_or_else(|| Self::Other(raw.to_owned()))
     }
 
-    /// The word as the export spells it.
+    /// The word in the canonical shouted spelling.
+    ///
+    /// Not a round trip of [`Self::from_wire`]'s input for a word this parser places:
+    /// `from_wire("Image").as_wire()` is `"IMAGE"`. Only [`Self::Other`] hands back the original
+    /// text, because there the spelling is the whole of what is known.
     #[must_use]
     pub fn as_wire(&self) -> &str {
         match self {
