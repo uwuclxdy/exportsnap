@@ -574,8 +574,9 @@ fn an_overlay_whose_aspect_mismatches_the_main_is_scaled_to_fit_centred_rather_t
     // scaling the overlay TO the frame would distort the caption. Contain scales it within the
     // frame instead, preserving its aspect and centring it — the user's pick on 2026-08-04
     // (agent call contain-vs-skip, recorded in docs/design.md) — and the caption is never
-    // dropped. No observed pair triggers this: all 161 real pairs are same-aspect, where contain
-    // and fill are pixel-identical.
+    // dropped. No observed pair triggers this: all 161 real pairs are same-aspect, and on their
+    // shapes contain and fill agree to within one unpainted row or column (13 pairs leave a
+    // single line; the modal shapes round exactly — see docs/domain-knowledge.md).
     const MAIN_W: u32 = 1232;
     const MAIN_H: u32 = 656;
     const OVERLAY_W: u32 = 827;
