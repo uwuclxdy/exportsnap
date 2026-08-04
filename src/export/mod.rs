@@ -41,12 +41,18 @@ use serde_json::error::Category;
 
 use crate::export::model::ParseError;
 
-/// The files a real export's `json/` dir holds, all 19 of them.
+/// The union of every schema filename seen in a real export's `json/` dir, across two observed
+/// exports (2026-07-26 and 2026-08-04).
 ///
-/// Snapchat's schema filenames are fixed and identical for every user, so this list is a
-/// contract, not a sample. It is mirrored by the redactor's
-/// `test_every_real_export_schema_filename_survives_verbatim`.
-pub const SCHEMA_FILES: [&str; 19] = [
+/// Each export held 19 files, but the SETS differed by two names: the second dropped
+/// `memories_history.json` and added `in_app_reports.json`, both present below. Membership is
+/// decided by which data categories the user ticked when requesting the export, so this list is a
+/// union of observations, never a contract, and a third export can both drop a name already here
+/// and add one neither export has shown. [`read_schema`] already treats every file as optional, so
+/// a name from this list missing off a given export's `json/` dir is expected, not a failure. It is
+/// mirrored by the redactor's `test_every_real_export_schema_filename_survives_verbatim`, which
+/// pins the same union.
+pub const SCHEMA_FILES: [&str; 20] = [
     "account.json",
     "account_history.json",
     "bitmoji.json",
@@ -55,6 +61,7 @@ pub const SCHEMA_FILES: [&str; 19] = [
     "email_campaign_history.json",
     "feature_emails.json",
     "friends.json",
+    "in_app_reports.json",
     "location_history.json",
     "memories_history.json",
     "ranking.json",

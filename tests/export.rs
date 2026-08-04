@@ -337,16 +337,48 @@ fn a_section_whose_element_shape_is_unknown_does_not_fail_the_load() {
 }
 
 #[test]
-fn the_schema_file_list_is_the_nineteen_snapchat_ships() {
-    assert_eq!(SCHEMA_FILES.len(), 19);
+fn schema_files_is_sorted_deduplicated_and_names_every_observed_file() {
+    // No fixed count here: membership is a union of what's been observed, not a contract
+    // (`docs/design.md`), so a length pinned as a magic number would rot on the next observation.
     let mut sorted = SCHEMA_FILES;
     sorted.sort_unstable();
     assert_eq!(sorted, SCHEMA_FILES, "SCHEMA_FILES must stay sorted");
     let unique: std::collections::BTreeSet<_> = SCHEMA_FILES.iter().collect();
-    assert_eq!(unique.len(), 19);
-    assert!(SCHEMA_FILES.contains(&"memories_history.json"));
-    assert!(SCHEMA_FILES.contains(&"snap_ads.json"));
-    assert!(SCHEMA_FILES.contains(&"snap_pro.json"));
+    assert_eq!(unique.len(), SCHEMA_FILES.len(), "SCHEMA_FILES must hold no duplicate");
+
+    // The full literal, pinned unconditionally. `fixtures/` is gitignored and untracked, so
+    // every fixture-backed test below this one skips in CI — this is the only SCHEMA_FILES check
+    // that runs there, and the only one that catches a member's SPELLING drifting rather than
+    // just its arity or sort order. The two-place edit this forces on a newly observed name IS
+    // the point, not a cost to apologise for: the red is the prompt to ask whether the new name
+    // is real before absorbing it, the same role `ItemKind::ALL`/`ItemStatus::ALL` play at
+    // `tests/manifest.rs:615-617`. `memories_history.json` and `in_app_reports.json` are the two
+    // names the 2026-07-26 and 2026-08-04 exports disagree on; every other name below is shared.
+    assert_eq!(
+        SCHEMA_FILES,
+        [
+            "account.json",
+            "account_history.json",
+            "bitmoji.json",
+            "chat_history.json",
+            "custom_sticker.json",
+            "email_campaign_history.json",
+            "feature_emails.json",
+            "friends.json",
+            "in_app_reports.json",
+            "location_history.json",
+            "memories_history.json",
+            "ranking.json",
+            "snap_ads.json",
+            "snap_history.json",
+            "snap_pro.json",
+            "snapchat_ai.json",
+            "snapchat_plus.json",
+            "story_history.json",
+            "terms_history.json",
+            "user_profile.json",
+        ]
+    );
 }
 
 // ---- the loader's own failure modes (no fixtures needed) ----
@@ -439,7 +471,9 @@ fn every_json_file_in_the_fixture_tree_parses_as_json() {
         }
     }
     seen.sort();
-    // 19 schema files + the two media listings + the redaction report.
+    // This fixture tree holds 19 schema files (the 2026-07-26 export's set, on disk right now)
+    // + the two media listings + the redaction report — a count of THIS fixture, not of
+    // `SCHEMA_FILES`, which is a 20-name union no single export's tree ever holds all of.
     assert_eq!(seen.len(), 22, "found {seen:?}");
     assert!(seen.contains(&PathBuf::from("_redaction_report.json")));
     assert!(seen.contains(&PathBuf::from("listings/chat_media.json")));
@@ -447,16 +481,23 @@ fn every_json_file_in_the_fixture_tree_parses_as_json() {
 }
 
 #[test]
-fn the_fixture_json_dir_holds_exactly_the_schema_files() {
+fn the_fixture_json_dir_holds_only_known_schema_files() {
+    // Subset, not equality: which names appear is the requester's category choice
+    // (`docs/design.md`, n=2), so a fixture built from one export legitimately omits names
+    // another export contributed to the union — the fixture on disk right now is the OLDER
+    // export, so it holds no `in_app_reports.json` and that is expected, not a gap to fill.
     let dir = json_dir_or_skip!();
     let mut names: Vec<String> =
         fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
-    names.sort();
-    assert_eq!(names, SCHEMA_FILES);
+    names.sort(); // keeps a failure's `{name}` message deterministic across runs
+    assert!(!names.is_empty(), "the fixture json dir must not be empty");
+    for name in &names {
+        assert!(SCHEMA_FILES.contains(&name.as_str()), "{name} is not a known schema file");
+    }
 }
 
 #[test]
-fn loading_the_fixture_dir_fills_every_one_of_the_nineteen() {
+fn loading_the_fixture_dir_fills_every_modelled_field() {
     let dir = json_dir_or_skip!();
     let loaded = load_fixture(&dir);
     assert!(loaded.account.is_some());

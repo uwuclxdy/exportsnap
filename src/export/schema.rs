@@ -1,4 +1,6 @@
-//! Serde mirrors of the 19 json files a Snapchat export ships under `mydata~<id>/json/`.
+//! Serde mirrors of the json files a Snapchat export can hold under `mydata~<id>/json/`. Not
+//! every name is mirrored: [`crate::export::SCHEMA_FILES`] is the union across every export
+//! observed so far, and `in_app_reports.json` has no struct here yet.
 //!
 //! One struct per file, named after the file. This layer is a transcription, not a domain: it
 //! holds whatever the wire holds, and [`crate::export::model`] is where values become validated

@@ -226,7 +226,7 @@ impl Counts {
 
 /// The counts the summary panel reports.
 ///
-/// Every count is optional because `ExportJson` holds every one of the 19 files optionally: a
+/// Every count is optional because `ExportJson` holds every file it models optionally: a
 /// `json/` that arrived without `chat_history.json` must not report `0` chats, which is a confident
 /// wrong answer where the truth is "that section is not here". `Some(0)` is the section being
 /// present and genuinely empty, and only that renders a zero.

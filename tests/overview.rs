@@ -274,7 +274,7 @@ fn the_memories_row_is_not_part_of_the_numeric_column() {
 
 #[test]
 fn a_section_absent_from_the_json_reads_as_no_value_not_as_zero() {
-    // `ExportJson` holds all 19 files optionally, so a `json/` that arrived without
+    // `ExportJson` holds every file it models optionally, so a `json/` that arrived without
     // `chat_history.json` must not claim zero chats — that is a confident wrong answer where the
     // truth is "that section is not here". No extraction driver exists yet, so every `json/` on
     // disk got there by a manual or interrupted unzip and this is reachable today.
