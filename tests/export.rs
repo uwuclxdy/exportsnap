@@ -182,6 +182,11 @@ fn a_rejected_coordinate_pair_names_its_kind() {
 
 #[test]
 fn media_kind_keeps_the_words_it_knows_and_carries_the_ones_it_does_not() {
+    // Kept as hand-written literals rather than folded into `model.rs`'s `KNOWN`-driven round
+    // trip: `KNOWN` has no `pub`, so a test here cannot iterate it, and these independent
+    // expectations are what catches a member being DELETED from `KNOWN` — the round trip only
+    // cross-checks whatever currently IS in `KNOWN` against itself, so a deletion shrinks its own
+    // loop rather than reding it.
     assert_eq!(MediaKind::from_wire("TEXT"), MediaKind::Text);
     assert_eq!(MediaKind::from_wire("MEDIA"), MediaKind::Media);
     assert_eq!(MediaKind::from_wire("STATUS"), MediaKind::Status);

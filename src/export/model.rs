@@ -371,6 +371,17 @@ pub enum MediaKind {
 
 impl MediaKind {
     /// Every word this parser places, each spelled as [`Self::as_wire`] gives it back.
+    ///
+    /// A short `KNOWN` fails SILENTLY, not loudly. `as_wire` below is an exhaustive match, so
+    /// adding a variant without an arm there is a compile error (`E0004`) the author must answer —
+    /// but answering it does not extend this array, and nothing else forces that second edit.
+    /// `from_wire` falls back to `Self::Other(raw)` on no match, so a variant added and left out of
+    /// `KNOWN` never surfaces as a parse failure: the word it should have matched just lands in
+    /// `Other`, which is the wrong bucket key for `memories`' day-and-kind join. This is the same
+    /// residual `ItemKind::ALL`/`ItemStatus::ALL` (`manifest.rs`) and `SummaryRow::ALL`
+    /// (`tui/screens/overview.rs`) carry — no exhaustive match anywhere can catch an array staying
+    /// short, only catch a variant being used without one — and it is worse here than at
+    /// `ItemStatus`, which at least fails loudly as `CorruptRow` on the identical omission.
     const KNOWN: [Self; 7] = [Self::Text, Self::Media, Self::Status, Self::Note, Self::Sticker, Self::Image, Self::Video];
 
     /// The variant for `raw`, matched without regard to ascii case; see the type's docs for why.
@@ -862,4 +873,27 @@ where
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_known_media_kind_survives_its_own_round_trip() {
+        // Driven off `KNOWN` itself rather than a second hand-written list. `from_wire` looks a word
+        // up BY calling `as_wire` on each `KNOWN` member (see above), so this loop's real failure
+        // mode is two `KNOWN` members sharing a wire spelling: `find` returns the first match, so
+        // the later member's own value never round-trips back to itself. That also catches a future
+        // variant added to `KNOWN` that collides with an existing spelling. It CANNOT catch `KNOWN`
+        // going short when a variant is added — the residual documented at `KNOWN` itself, identical
+        // to `ItemKind::ALL`/`ItemStatus::ALL` (`manifest.rs`) and `SummaryRow::ALL`
+        // (`tui/screens/overview.rs`). `tests/export.rs`'s
+        // `media_kind_keeps_the_words_it_knows_and_carries_the_ones_it_does_not` stays alongside
+        // this: its hand-written literals are what catches a member being DELETED from `KNOWN`,
+        // which this loop cannot (deleting a member just shrinks what this loop iterates over).
+        for kind in MediaKind::KNOWN {
+            assert_eq!(MediaKind::from_wire(kind.as_wire()), kind, "{kind:?} did not round-trip through as_wire/from_wire");
+        }
+    }
 }
