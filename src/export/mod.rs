@@ -23,6 +23,7 @@ pub mod ffmpeg;
 pub mod local_fix;
 pub mod manifest;
 pub mod memories;
+pub mod memories_run;
 pub mod model;
 pub mod overlay;
 pub mod schema;

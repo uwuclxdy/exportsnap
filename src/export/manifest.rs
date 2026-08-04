@@ -759,6 +759,29 @@ impl Manifest {
             .collect()
     }
 
+    /// Every item of `kind`, ordered by source id.
+    ///
+    /// The read a live-progress screen polls each tick: the manifest is the run's only writer and
+    /// every status transition is one autocommit statement, so a reader on its own connection sees
+    /// whole rows at whatever point the run has reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Sqlite`] when the read fails and [`ManifestError::CorruptRow`]
+    /// when a stored value no longer parses.
+    pub fn items(&self, kind: ItemKind) -> Result<Vec<Item>, ManifestError> {
+        let sql = format!("SELECT {ITEM_COLUMNS} FROM items WHERE kind = ?1 ORDER BY source_id");
+        let mut stmt = self.conn.prepare(&sql).map_err(|source| sqlite_error("list items", &self.path, source))?;
+        let rows = stmt
+            .query_map(params![kind.as_stored()], RawItem::from_row)
+            .map_err(|source| sqlite_error("list items", &self.path, source))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|source| sqlite_error("list items", &self.path, source))?
+            .into_iter()
+            .map(Item::try_from)
+            .collect()
+    }
+
     /// Runs the resume contract over one [`ItemKind`] and reports what it found.
     ///
     /// Every finished item is re-hashed in full and demoted if its bytes disagree with what was

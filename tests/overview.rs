@@ -41,9 +41,9 @@ const SOURCE_CELLS: usize = 18;
 // ---- harness ----
 
 fn draw(overview: Overview, width: u16, height: u16) -> Terminal<TestBackend> {
-    let app = App::new(Tier::Full).with_overview(overview);
+    let mut app = App::new(Tier::Full).with_overview(overview);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| shell::render(frame, &app)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     terminal
 }
 
@@ -120,7 +120,12 @@ fn export_tree(name: &str) -> PathBuf {
 
 /// ffmpeg on `PATH`, vlc not, 2 GiB free — none of it read off the real machine.
 fn environment() -> Environment {
-    Environment { ffmpeg: Some(PathBuf::from("/usr/bin/ffmpeg")), vlc: None, available_space: Some(2 * 1024 * 1024 * 1024) }
+    Environment {
+        ffmpeg: Some(PathBuf::from("/usr/bin/ffmpeg")),
+        vlc: None,
+        available_space: Some(2 * 1024 * 1024 * 1024),
+        total_space: Some(4 * 1024 * 1024 * 1024),
+    }
 }
 
 // ---- both panels against a known export ----
@@ -813,10 +818,10 @@ fn every_overview_state_survives_degenerate_sizes() {
 
     for source in [&loaded, &bare] {
         for (width, height) in sizes {
-            let app = App::new(Tier::Full).with_overview(Overview::load_with(source, environment()));
+            let mut app = App::new(Tier::Full).with_overview(Overview::load_with(source, environment()));
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| shell::render(frame, &app))
+                .draw(|frame| shell::render(frame, &mut app))
                 .unwrap_or_else(|error| panic!("{} at {width}x{height}: {error}", source.display()));
         }
     }

@@ -244,3 +244,57 @@ fn toast_bg_treats_non_rgb_underlay_as_unknown_compatible_tier() {
     assert_eq!(toast_bg(Tier::Compatible, Some(Color::Reset)), Color::Indexed(234));
     assert_eq!(toast_bg(Tier::Compatible, Some(Color::Indexed(42))), Color::Indexed(234));
 }
+
+// ---- usage-role threshold color (skill: Progress bar — usage/quota role) ----
+
+/// The resolved palette values the threshold tests compare against, so a mutation that renames a
+/// role fails as a color mismatch rather than as a syntax error.
+fn threshold_palette() -> (Color, Color, Color) {
+    let palette = Palette::new(Tier::Full);
+    (palette.text_dim, palette.warning, palette.danger)
+}
+
+#[test]
+fn the_usage_threshold_is_dim_below_sixty() {
+    let (dim, _, _) = threshold_palette();
+    for percent in [0, 1, 50, 59] {
+        assert_eq!(Palette::new(Tier::Full).usage_color(percent), dim, "{percent}%");
+    }
+}
+
+#[test]
+fn the_usage_threshold_is_warning_at_both_boundaries() {
+    let (_, warning, _) = threshold_palette();
+    // 60 and 80 are WARNING, exactly as the contract's `60–80` band reads — a `<=`/`<` slip on
+    // either boundary changes one of these two.
+    for percent in [60, 80] {
+        assert_eq!(Palette::new(Tier::Full).usage_color(percent), warning, "{percent}%");
+    }
+}
+
+#[test]
+fn the_usage_threshold_is_danger_above_eighty() {
+    let (_, _, danger) = threshold_palette();
+    for percent in [81, 99, 100] {
+        assert_eq!(Palette::new(Tier::Full).usage_color(percent), danger, "{percent}%");
+    }
+}
+
+#[test]
+fn the_usage_threshold_resolves_per_tier() {
+    // The helper resolves through the palette like every other color, so the compatible tier gets
+    // its own indexed values — a hardcoded `full` color in the helper would red here.
+    assert_eq!(Palette::new(Tier::Compatible).usage_color(59), Color::Indexed(145));
+    assert_eq!(Palette::new(Tier::Compatible).usage_color(60), Color::Indexed(223));
+    assert_eq!(Palette::new(Tier::Compatible).usage_color(81), Color::Indexed(211));
+}
+
+#[test]
+fn the_status_pill_colors_follow_the_manifest_statuses() {
+    use exportsnap::export::manifest::ItemStatus;
+    let palette = Palette::new(Tier::Full);
+    assert_eq!(palette.status_pill(ItemStatus::Pending), palette.text_dim);
+    assert_eq!(palette.status_pill(ItemStatus::Done), palette.success);
+    assert_eq!(palette.status_pill(ItemStatus::Failed), palette.danger);
+    assert_eq!(palette.status_pill(ItemStatus::SourceMissing), palette.warning);
+}

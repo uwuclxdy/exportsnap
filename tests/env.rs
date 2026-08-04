@@ -96,7 +96,8 @@ fn locate_in_finds_each_tool_under_the_name_it_declares() {
 
 #[test]
 fn tool_reads_back_the_field_that_holds_it() {
-    let environment = Environment { ffmpeg: Some(PathBuf::from("/usr/bin/ffmpeg")), vlc: None, available_space: Some(1) };
+    let environment =
+        Environment { ffmpeg: Some(PathBuf::from("/usr/bin/ffmpeg")), vlc: None, available_space: Some(1), total_space: None };
 
     assert_eq!(environment.tool(Tool::Ffmpeg), Some(PathBuf::from("/usr/bin/ffmpeg").as_path()));
     assert_eq!(environment.tool(Tool::Vlc), None);

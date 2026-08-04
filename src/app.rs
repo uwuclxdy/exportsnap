@@ -2,13 +2,22 @@
 //! grammar; the frame itself is composed by [`crate::tui::shell`].
 
 use std::io;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::export::env::Environment;
+use crate::export::memories_run::RunEvent;
+use crate::tui::screens::memories::Memories;
 use crate::tui::screens::overview::Overview;
 use crate::tui::shell;
 use crate::tui::theme::{Palette, Tier};
+
+/// How long the event loop waits for input before ticking. One spinner frame per tick (80 ms),
+/// which is also the rate the run's manifest statuses are polled at.
+const TICK: Duration = Duration::from_millis(80);
 
 /// The six top-level screens (design.md: TUI screen map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,12 +93,20 @@ pub struct App {
     quit_armed: bool,
     running: bool,
     overview: Overview,
+    memories: Memories,
 }
 
 impl App {
     #[must_use]
     pub fn new(tier: Tier) -> Self {
-        Self { palette: Palette::new(tier), active: Tab::Overview, quit_armed: false, running: true, overview: Overview::unloaded() }
+        Self {
+            palette: Palette::new(tier),
+            active: Tab::Overview,
+            quit_armed: false,
+            running: true,
+            overview: Overview::unloaded(),
+            memories: Memories::new(PathBuf::new(), None),
+        }
     }
 
     /// Hands the overview screen a real read of the source dir. `main` calls this before the first
@@ -100,6 +117,28 @@ impl App {
         self
     }
 
+    /// Hands the memories screen its run context: the source dir and the output root, `--out`'s
+    /// value or the default. `main` calls this before the first frame.
+    #[must_use]
+    pub fn with_memories(mut self, source: PathBuf, out_root: Option<PathBuf>) -> Self {
+        self.memories = Memories::new(source, out_root);
+        self
+    }
+
+    /// [`Self::with_memories`] with the environment handed in — the seam a render test uses to
+    /// pin the disk-free row.
+    #[must_use]
+    pub fn with_memories_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
+        self.memories = Memories::with_environment(source, out_root, environment);
+        self
+    }
+
+    /// Hands the memories screen a receiver the test feeds — the seam the render and tick tests
+    /// drive; the events flow through the real `tick` machinery.
+    pub fn with_memories_channel(&mut self, receiver: std::sync::mpsc::Receiver<RunEvent>) {
+        self.memories.with_channel(receiver);
+    }
+
     #[must_use]
     pub const fn palette(&self) -> &Palette {
         &self.palette
@@ -108,6 +147,17 @@ impl App {
     #[must_use]
     pub const fn overview(&self) -> &Overview {
         &self.overview
+    }
+
+    #[must_use]
+    pub const fn memories(&self) -> &Memories {
+        &self.memories
+    }
+
+    /// The memories screen's mutable half — the shell borrows it to render the stateful table,
+    /// and tests reach the worker seam through it.
+    pub fn memories_mut(&mut self) -> &mut Memories {
+        &mut self.memories
     }
 
     #[must_use]
@@ -125,19 +175,37 @@ impl App {
         self.running
     }
 
-    /// Draws, blocks for one event, applies it, repeats. There is no tick timer because
-    /// nothing animates yet — a timer would only wake the process to redraw an identical
-    /// frame. Add one alongside the first spinner or progress bar.
+    /// Draws, waits for an event, applies it, ticks, repeats.
+    ///
+    /// While a memories run is live the wait is capped at one tick (80 ms), so the spinner
+    /// animates and the per-item poll refreshes without input; with no run live there is nothing
+    /// to animate, and the loop blocks on input instead of redrawing an identical frame every
+    /// 80 ms forever.
     ///
     /// # Errors
     ///
     /// Returns the backend's error if drawing to the terminal or reading an event fails.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while self.running {
-            terminal.draw(|frame| shell::render(frame, self))?;
-            self.handle_event(&event::read()?);
+            {
+                let app = &mut *self;
+                terminal.draw(|frame| shell::render(frame, app))?;
+            }
+            if self.memories.run_in_flight() {
+                if event::poll(TICK)? {
+                    self.handle_event(&event::read()?);
+                }
+                self.tick();
+            } else {
+                self.handle_event(&event::read()?);
+            }
         }
         Ok(())
+    }
+
+    /// One timer tick: pump the memories run's channel, poll its statuses, advance the spinner.
+    pub fn tick(&mut self) {
+        self.memories.tick();
     }
 
     /// Applies one terminal event. Resizes need no state change — the next draw reads the new
@@ -175,9 +243,18 @@ impl App {
             return;
         }
 
-        // `q` at the top level arms a 2-step quit and never quits in one press. Hotkeys are
-        // case-insensitive, so caps lock can't strand a user with no way out.
+        // `q` while the memories table pane is descended is the back key, not the quit key — it
+        // ascends, exactly like esc (cloudy-tui: q back whenever q would ascend a level). The
+        // hint bar advertises the same.
+        let descended = self.active == Tab::Memories && self.memories.descended();
         if matches!(key.code, KeyCode::Char('q' | 'Q')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            if descended {
+                self.memories.ascend();
+                self.quit_armed = false;
+                return;
+            }
+            // `q` at the top level arms a 2-step quit and never quits in one press. Hotkeys are
+            // case-insensitive, so caps lock can't strand a user with no way out.
             if self.quit_armed {
                 self.running = false;
             } else {
@@ -186,7 +263,23 @@ impl App {
             return;
         }
 
+        // `x` dismisses the run-completion footer alert — the only thing it is bound to. With no
+        // alert live it is a key like any other (it still disarms an armed quit below).
+        if matches!(key.code, KeyCode::Char('x' | 'X'))
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+            && self.memories.dismiss_alert()
+        {
+            return;
+        }
+
         self.quit_armed = false;
+
+        // Screen-owned keys on the memories tab (form rows, table scroll, descend/ascend). The
+        // screen answers `false` for keys that belong to the shell, so the tab switching below
+        // still works when the form owns the caret.
+        if self.active == Tab::Memories && self.memories.handle_key(key) {
+            return;
+        }
 
         match key.code {
             KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
@@ -197,6 +290,9 @@ impl App {
             }
             KeyCode::Char(c) if key.modifiers == KeyModifiers::ALT => {
                 if let Some(tab) = c.to_digit(10).and_then(Tab::from_jump_digit) {
+                    // A jump ascends a descended pane implicitly (cloudy-tui: the jump ascends
+                    // implicitly), and moving focus away disarms the quit like any other key.
+                    self.memories.ascend();
                     self.active = tab;
                 }
             }

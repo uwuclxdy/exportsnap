@@ -22,7 +22,7 @@ const SECOND_TAB_COLUMN: u16 = FIRST_TAB_COLUMN + 8 + 3;
 /// `╭` + the border-token dash the panel title carries — where ` OVERVIEW ` starts.
 const PANEL_TITLE_COLUMN: u16 = 2;
 
-fn draw(app: &App, width: u16, height: u16) -> Terminal<TestBackend> {
+fn draw(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| shell::render(frame, app)).unwrap();
     terminal
@@ -40,7 +40,7 @@ fn grid(buffer: &Buffer) -> Vec<String> {
     (0..buffer.area.height).map(|y| row(buffer, y)).collect()
 }
 
-fn header_row(app: &App, width: u16) -> String {
+fn header_row(app: &mut App, width: u16) -> String {
     let terminal = draw(app, width, 20);
     row(terminal.backend().buffer(), 0)
 }
@@ -74,15 +74,16 @@ fn on_tab(tab: Tab) -> App {
 
 #[test]
 fn renders_header_body_panel_and_hint_bar() {
-    // Driven on `memories` rather than `overview`: the overview tab owns its own panels now, so
-    // the shell's placeholder panel — the thing this pins — only survives on the other five.
-    let terminal = draw(&on_tab(Tab::Memories), 52, 6);
+    // Driven on `chat media` rather than `overview` or `memories`: those two tabs own their own
+    // panels now, so the shell's placeholder panel — the thing this pins — only survives on the
+    // other four.
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 52, 6);
     assert_eq!(
         grid(terminal.backend().buffer()),
         [
-            " exportsnap  •  ‹   memories   ›                    ",
+            " exportsnap  •  ‹   chat media   ›                  ",
             " ! terminal too small · enlarge for full layout     ",
-            "╭─ MEMORIES ───────────────────────────────────────╮",
+            "╭─ CHAT MEDIA ─────────────────────────────────────╮",
             "│                                                  │",
             "╰──────────────────────────────────────────────────╯",
             " ←→ switch   q quit                                 ",
@@ -95,7 +96,7 @@ fn renders_header_body_panel_and_hint_bar() {
 #[test]
 fn header_renders_the_brand_all_six_tab_labels_and_the_version() {
     assert_eq!(
-        header_row(&App::new(Tier::Full), 100),
+        header_row(&mut App::new(Tier::Full), 100),
         format!(
             " exportsnap  •  overview   memories   chat media   history   account   settings\
               {:>21}",
@@ -106,7 +107,7 @@ fn header_renders_the_brand_all_six_tab_labels_and_the_version() {
 
 #[test]
 fn active_tab_label_is_accent_bold_underlined_and_inactive_is_dim() {
-    let terminal = draw(&App::new(Tier::Full), 100, 20);
+    let terminal = draw(&mut App::new(Tier::Full), 100, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -123,7 +124,7 @@ fn active_tab_label_is_accent_bold_underlined_and_inactive_is_dim() {
 
 #[test]
 fn the_underline_moves_with_the_active_tab() {
-    let terminal = draw(&on_tab(Tab::Memories), 100, 20);
+    let terminal = draw(&mut on_tab(Tab::Memories), 100, 20);
     let buffer = terminal.backend().buffer();
 
     assert!(!buffer[(FIRST_TAB_COLUMN, 0)].style().add_modifier.contains(Modifier::UNDERLINED));
@@ -133,8 +134,8 @@ fn the_underline_moves_with_the_active_tab() {
 #[test]
 fn no_underline_row_sits_beneath_the_tab_bar() {
     // The active label carries the underline as a text attribute; row 1 is already the panel.
-    let terminal = draw(&on_tab(Tab::Memories), 100, 20);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ MEMORIES "));
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 100, 20);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ CHAT MEDIA "));
 }
 
 // ---- header: right-edge suppression (skill: App shell → right-edge suppression priority) ----
@@ -164,9 +165,9 @@ fn tabs_collapse_to_the_overflow_form_one_cell_narrower() {
 fn overflow_markers_track_which_neighbours_exist() {
     // A middle tab has both neighbours; the first and last each lose one marker, and the
     // marker's cell stays blank so the active label holds its column.
-    assert_eq!(header_row(&on_tab(Tab::ChatMedia), 50), " exportsnap  •  ‹   chat media   ›                ");
-    assert_eq!(header_row(&on_tab(Tab::Overview), 50), " exportsnap  •      overview   ›                  ");
-    assert_eq!(header_row(&on_tab(Tab::Settings), 50), " exportsnap  •  ‹   settings                      ");
+    assert_eq!(header_row(&mut on_tab(Tab::ChatMedia), 50), " exportsnap  •  ‹   chat media   ›                ");
+    assert_eq!(header_row(&mut on_tab(Tab::Overview), 50), " exportsnap  •      overview   ›                  ");
+    assert_eq!(header_row(&mut on_tab(Tab::Settings), 50), " exportsnap  •  ‹   settings                      ");
 }
 
 // ---- header: width floor (skill: Tab bar → Overflow; Patterns → Density) ----
@@ -193,7 +194,7 @@ fn every_active_label_renders_whole_at_the_floor() {
     // active label, brand and leading marker all survive whole, for the widest label and the
     // narrowest alike.
     // Compared as one batch so a mutation shows every tab it broke, not just the first.
-    let rendered: Vec<String> = Tab::ALL.into_iter().map(|tab| header_row(&on_tab(tab), 30)).collect();
+    let rendered: Vec<String> = Tab::ALL.into_iter().map(|tab| header_row(&mut on_tab(tab), 30)).collect();
 
     assert_eq!(
         rendered,
@@ -212,7 +213,7 @@ fn every_active_label_renders_whole_at_the_floor() {
 fn the_banner_takes_the_header_row_one_cell_below_the_floor() {
     // A clipped active label would name the wrong tab, so the row says the terminal is too
     // small instead. The body is untouched — the panel still owns row 1.
-    let terminal = draw(&on_tab(Tab::ChatMedia), 29, 20);
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 29, 20);
     let buffer = terminal.backend().buffer();
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
@@ -223,7 +224,7 @@ fn the_banner_takes_the_header_row_one_cell_below_the_floor() {
 fn the_header_banner_tints_its_whole_row() {
     // Same full-width wash the body banner carries: this is the banner, not a header that
     // happens to spell the copy.
-    let terminal = draw(&App::new(Tier::Full), 29, 20);
+    let terminal = draw(&mut App::new(Tier::Full), 29, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -238,7 +239,7 @@ fn the_header_banner_tints_its_whole_row() {
 fn a_frame_under_both_floors_carries_exactly_one_banner() {
     // Width below the header floor and height below the compact floor at once. The header row
     // is the one already lost, so it says it, and the body keeps every row it has.
-    let terminal = draw(&on_tab(Tab::Memories), 29, 13);
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 29, 13);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -247,14 +248,14 @@ fn a_frame_under_both_floors_carries_exactly_one_banner() {
     assert_eq!(washed, [0], "rows carrying the banner wash");
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
-    assert!(row(buffer, 1).starts_with("╭─ MEMORIES "), "{:?}", row(buffer, 1));
+    assert!(row(buffer, 1).starts_with("╭─ CHAT MEDIA "), "{:?}", row(buffer, 1));
 }
 
 #[test]
 fn the_height_banner_still_takes_the_body_at_the_width_floor() {
     // One cell wider and the two floors stop overlapping: the header renders for real and the
     // compact banner goes back to the top of the body where the contract puts it.
-    let terminal = draw(&App::new(Tier::Full), 30, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 30, 13);
     let buffer = terminal.backend().buffer();
 
     assert_eq!(row(buffer, 0), " exportsnap  •      overview  ");
@@ -263,7 +264,7 @@ fn the_height_banner_still_takes_the_body_at_the_width_floor() {
 
 #[test]
 fn overflow_markers_are_text_faint() {
-    let terminal = draw(&on_tab(Tab::ChatMedia), 50, 20);
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 50, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -278,26 +279,28 @@ fn the_panel_title_names_the_active_tab_in_uppercase() {
     // `overview` is absent on purpose: it is the one tab with a real screen behind it, and its own
     // two panel titles are pinned in `tests/overview.rs`. The other five are still the shell's
     // placeholder panel, which is what names itself after the tab.
+    // `overview` and `memories` are absent on purpose: they are the two tabs with a real screen
+    // behind them, and their own panel titles are pinned in `tests/overview.rs` and
+    // `tests/memories.rs`.
     for (tab, title) in [
-        (Tab::Memories, "╭─ MEMORIES ─"),
         (Tab::ChatMedia, "╭─ CHAT MEDIA ─"),
         (Tab::History, "╭─ HISTORY ─"),
         (Tab::Account, "╭─ ACCOUNT ─"),
         (Tab::Settings, "╭─ SETTINGS ─"),
     ] {
-        let terminal = draw(&on_tab(tab), 60, 20);
+        let terminal = draw(&mut on_tab(tab), 60, 20);
         assert!(row(terminal.backend().buffer(), 1).starts_with(title), "{tab:?} should render {title}");
     }
 }
 
 #[test]
 fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
-    let terminal = draw(&on_tab(Tab::Memories), 60, 20);
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
     let title = buffer[(PANEL_TITLE_COLUMN + 1, 1)].style();
-    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "M");
+    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "C");
     assert_eq!(title.fg, Some(palette.accent_2));
     assert!(title.add_modifier.contains(Modifier::BOLD));
     assert!(title.add_modifier.contains(Modifier::ITALIC));
@@ -309,14 +312,15 @@ fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
 
 #[test]
 fn the_title_style_never_bleeds_into_the_border_break_dashes() {
-    // Chrome owns every `─` cell: the dash before ` MEMORIES ` and the first one after it both
-    // carry the border token, with no title color, bold or italic on them. ` MEMORIES ` is the
-    // same 10 cells ` OVERVIEW ` was, so the two columns below are unchanged.
-    let terminal = draw(&on_tab(Tab::Memories), 60, 20);
+    // Chrome owns every `─` cell: the dash before ` CHAT MEDIA ` and the first one after it both
+    // carry the border token, with no title color, bold or italic on them. ` CHAT MEDIA ` is the
+    // same 10 cells ` OVERVIEW ` was, so the dash columns are 2 cells apart in from the corners,
+    // and the title spans ` CHAT MEDIA ` (12 cells) from column 3 to 14.
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
-    for x in [PANEL_TITLE_COLUMN - 1, PANEL_TITLE_COLUMN + 10] {
+    for x in [PANEL_TITLE_COLUMN - 1, PANEL_TITLE_COLUMN + 12] {
         let cell = &buffer[(x, 1)];
         assert_eq!(cell.symbol(), "─", "column {x}");
         assert_eq!(cell.style().fg, Some(palette.line_strong), "column {x}");
@@ -329,13 +333,13 @@ fn the_title_style_never_bleeds_into_the_border_break_dashes() {
 
 #[test]
 fn the_hint_bar_owns_the_footer_row_while_the_quit_is_disarmed() {
-    let terminal = draw(&App::new(Tier::Full), 40, 20);
+    let terminal = draw(&mut App::new(Tier::Full), 40, 20);
     assert_eq!(row(terminal.backend().buffer(), 19), " ←→ switch   q quit                     ");
 }
 
 #[test]
 fn hint_keys_are_accent_and_labels_are_dim() {
-    let terminal = draw(&App::new(Tier::Full), 40, 20);
+    let terminal = draw(&mut App::new(Tier::Full), 40, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -362,7 +366,7 @@ fn the_footer_alert_replaces_the_hint_bar_in_place_while_armed() {
     press(&mut app, KeyCode::Char('q'));
     assert!(app.is_quit_armed());
 
-    let terminal = draw(&app, 40, 20);
+    let terminal = draw(&mut app, 40, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -384,25 +388,25 @@ fn the_footer_alert_replaces_the_hint_bar_in_place_while_armed() {
 
 #[test]
 fn the_compact_banner_appears_below_fourteen_rows() {
-    let terminal = draw(&App::new(Tier::Full), 60, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 60, 13);
     assert_eq!(row(terminal.backend().buffer(), 1), " ! terminal too small · enlarge for full layout             ");
 }
 
 #[test]
 fn the_compact_banner_is_gone_at_fourteen_rows() {
-    let terminal = draw(&on_tab(Tab::Memories), 60, 14);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ MEMORIES "));
+    let terminal = draw(&mut on_tab(Tab::ChatMedia), 60, 14);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ CHAT MEDIA "));
 }
 
 #[test]
 fn the_compact_banner_keeps_its_full_copy_at_its_exact_width() {
-    let terminal = draw(&App::new(Tier::Full), 47, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 47, 13);
     assert_eq!(row(terminal.backend().buffer(), 1), " ! terminal too small · enlarge for full layout");
 }
 
 #[test]
 fn the_compact_banner_truncates_with_a_trailing_ellipsis_one_cell_narrower() {
-    let terminal = draw(&App::new(Tier::Full), 46, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 46, 13);
     assert_eq!(row(terminal.backend().buffer(), 1), " ! terminal too small · enlarge for full layo…");
 }
 
@@ -412,7 +416,7 @@ fn the_compact_banner_survives_a_width_that_cuts_the_multibyte_separator() {
     // at this width and panic. Rendering it through the real draw path is the end-to-end
     // counterpart of the unit test on the truncator. 24 cells is under the header floor too,
     // so this is the header's banner — the one row the frame's single banner gets.
-    let terminal = draw(&App::new(Tier::Full), 24, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 24, 13);
     assert_eq!(row(terminal.backend().buffer(), 0), " ! terminal too small ·…");
 }
 
@@ -420,7 +424,7 @@ fn the_compact_banner_survives_a_width_that_cuts_the_multibyte_separator() {
 fn the_compact_banner_tints_the_whole_row() {
     // The full-width semantic wash is what tells a banner apart from the glyph-only footer
     // alert, so every cell of the row carries it — trailing filler included.
-    let terminal = draw(&App::new(Tier::Full), 60, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 60, 13);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -438,7 +442,7 @@ fn the_same_header_renders_each_tier_in_that_tier_s_own_colors() {
     for (tier, accent, text_dim) in
         [(Tier::Full, Color::Rgb(67, 171, 229), Color::Rgb(166, 173, 200)), (Tier::Compatible, Color::Indexed(75), Color::Indexed(145))]
     {
-        let terminal = draw(&App::new(tier), 100, 20);
+        let terminal = draw(&mut App::new(tier), 100, 20);
         let buffer = terminal.backend().buffer();
 
         assert_eq!(buffer[(FIRST_TAB_COLUMN, 0)].style().fg, Some(accent), "{tier:?} active tab");
@@ -455,7 +459,7 @@ fn the_panel_border_and_title_follow_the_tier_too() {
         while app.active() != Tab::Memories {
             press(&mut app, KeyCode::Right);
         }
-        let terminal = draw(&app, 60, 20);
+        let terminal = draw(&mut app, 60, 20);
         let buffer = terminal.backend().buffer();
 
         assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].style().fg, Some(accent_2), "{tier:?} panel title");
@@ -469,7 +473,7 @@ fn the_panel_border_and_title_follow_the_tier_too() {
 fn the_full_tier_paints_the_base_surface_across_the_whole_frame() {
     // The alternate screen resets to the terminal's own background, so every cell the app
     // doesn't otherwise tint has to carry `BG` — header row, panel interior, border, footer.
-    let terminal = draw(&App::new(Tier::Full), 40, 20);
+    let terminal = draw(&mut App::new(Tier::Full), 40, 20);
     let buffer = terminal.backend().buffer();
 
     for y in 0..20 {
@@ -483,7 +487,7 @@ fn the_full_tier_paints_the_base_surface_across_the_whole_frame() {
 fn the_compatible_tier_leaves_the_terminal_background_alone() {
     // DNA rule 3 scopes unpainted surfaces to this tier only: elevation falls to borders and
     // color, and the user's own background shows through.
-    let terminal = draw(&App::new(Tier::Compatible), 40, 20);
+    let terminal = draw(&mut App::new(Tier::Compatible), 40, 20);
     let buffer = terminal.backend().buffer();
 
     for y in 0..20 {
@@ -498,7 +502,7 @@ fn the_compact_banner_wash_survives_the_base_surface_underneath_it() {
     // Ordering guard: the base fill is painted first, so a banner drawn before it would be
     // overwritten. Both tiers paint the semantic wash — it is not a surface fill.
     for (tier, warning) in [(Tier::Full, Color::Rgb(249, 226, 175)), (Tier::Compatible, Color::Indexed(223))] {
-        let terminal = draw(&App::new(tier), 60, 13);
+        let terminal = draw(&mut App::new(tier), 60, 13);
         let buffer = terminal.backend().buffer();
         for x in 0..60 {
             assert_eq!(buffer[(x, 1)].style().bg, Some(warning), "{tier:?} cell ({x}, 1)");
@@ -516,10 +520,10 @@ fn every_tab_renders_without_panicking_at_degenerate_sizes() {
     let sizes = [(0, 0), (0, 20), (20, 0), (1, 1), (1, 3), (3, 1), (2, 2), (4, 4), (16, 3), (17, 2), (255, 1), (1, 255), (500, 3)];
 
     for tab in Tab::ALL {
-        let app = on_tab(tab);
+        let mut app = on_tab(tab);
         for (width, height) in sizes {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| shell::render(frame, &app)).unwrap_or_else(|error| panic!("{tab:?} at {width}x{height}: {error}"));
+            terminal.draw(|frame| shell::render(frame, &mut app)).unwrap_or_else(|error| panic!("{tab:?} at {width}x{height}: {error}"));
         }
     }
 }

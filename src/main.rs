@@ -51,10 +51,13 @@ fn main() -> Result<()> {
     // Deliberate ceiling: this is blocking, so a large `json/` delays the first frame with nothing
     // on screen to say why. The upgrade path is the phase-2 tokio runtime plus the overview's own
     // loading state, which needs the tick timer no screen has earned yet.
-    let source = match parse_source_arg(args)? {
+    let source = match parse_source_arg(args.iter().cloned())? {
         Some(dir) => dir,
         None => std::env::current_dir().context("could not read the working dir; pass --source=<dir> instead")?,
     };
+    // `--out=<dir>` names where a memories run writes (decision 33); absent, the run uses
+    // `default_out_root(source)`. Parsed before the terminal is taken over, like the source.
+    let out = parse_out_arg(args)?;
     let overview = Overview::load(&source);
 
     // `try_init` installs ratatui's own restore-then-chain panic hook; unlike `init` it hands
@@ -67,7 +70,7 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::try_init()
         .inspect_err(|_| ratatui::restore())
         .context("failed to take over the terminal; run exportsnap in an interactive terminal")?;
-    let mut app = App::new(tier).with_overview(overview);
+    let mut app = App::new(tier).with_overview(overview).with_memories(source, out);
     let result = app.run(&mut terminal);
     ratatui::restore();
 
@@ -116,6 +119,29 @@ fn parse_source_arg(args: impl IntoIterator<Item = String>) -> Result<Option<Pat
     Ok(source)
 }
 
+/// Hand-parses `--out=<dir>`, last one wins: where a memories run writes (decision 33). Same
+/// shape as [`parse_source_arg`] and for the same reason: a real CLI with subcommands is phase 5
+/// and brings its own argument parser then.
+///
+/// `None` means no `--out` was passed, which the memories screen resolves to
+/// `default_out_root(source)`.
+fn parse_out_arg(args: impl IntoIterator<Item = String>) -> Result<Option<PathBuf>> {
+    let mut out = None;
+    for arg in args {
+        if arg == "--out" {
+            bail!("--out needs a value; pass --out=<dir> naming where the fixed memories land");
+        }
+        let Some(value) = arg.strip_prefix("--out=") else {
+            continue;
+        };
+        if value.is_empty() {
+            bail!("--out= names no dir; pass --out=<dir> naming where the fixed memories land");
+        }
+        out = Some(PathBuf::from(value));
+    }
+    Ok(out)
+}
+
 /// Hand-parses `--version`: any occurrence wins — the flag takes no state, so
 /// there is no last one to speak of. A `--version=` value is the one early
 /// fire. The caller checks it before anything touches the terminal. Same shape
@@ -147,6 +173,38 @@ mod tests {
 
     fn parse_version(args: &[&str]) -> Result<bool> {
         wants_version_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn parse_out(args: &[&str]) -> Result<Option<PathBuf>> {
+        parse_out_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    #[test]
+    fn absent_out_arg_leaves_the_dir_to_the_memories_screen() {
+        assert_eq!(parse_out(&[]).unwrap(), None);
+        assert_eq!(parse_out(&["--theme=full", "somewhere"]).unwrap(), None);
+    }
+
+    #[test]
+    fn out_arg_takes_the_dir_after_the_equals() {
+        assert_eq!(parse_out(&["--out=/tmp/fixed"]).unwrap(), Some(PathBuf::from("/tmp/fixed")));
+    }
+
+    #[test]
+    fn last_out_arg_wins() {
+        assert_eq!(parse_out(&["--out=/tmp/one", "--out=/tmp/two"]).unwrap(), Some(PathBuf::from("/tmp/two")));
+    }
+
+    #[test]
+    fn out_flag_without_a_value_is_a_hard_error() {
+        let error = parse_out(&["--out", "/tmp/fixed"]).unwrap_err();
+        assert_eq!(error.to_string(), "--out needs a value; pass --out=<dir> naming where the fixed memories land");
+    }
+
+    #[test]
+    fn an_empty_out_value_is_a_hard_error() {
+        let error = parse_out(&["--out="]).unwrap_err();
+        assert_eq!(error.to_string(), "--out= names no dir; pass --out=<dir> naming where the fixed memories land");
     }
 
     #[test]

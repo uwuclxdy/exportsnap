@@ -110,6 +110,17 @@ pub fn available_space(path: impl AsRef<Path>) -> Result<u64, SpaceError> {
     fs4::available_space(path).map_err(|source| SpaceError { path: path.to_path_buf(), source })
 }
 
+/// The whole size of the filesystem holding `path`, so a caller can turn [`available_space`] into
+/// the used share the usage-role bar shows. Same failure shape, same reason.
+///
+/// # Errors
+///
+/// Returns [`SpaceError`] when the path cannot be stat'd.
+pub fn total_space(path: impl AsRef<Path>) -> Result<u64, SpaceError> {
+    let path = path.as_ref();
+    fs4::total_space(path).map_err(|source| SpaceError { path: path.to_path_buf(), source })
+}
+
 /// One probe of everything the overview's environment panel reports.
 ///
 /// A plain snapshot with public fields, so a caller that already knows the answers — a render test
@@ -126,21 +137,25 @@ pub struct Environment {
     /// in, and [`available_space`] still carries the whole [`SpaceError`] for a caller that can act
     /// on one.
     pub available_space: Option<u64>,
+    /// The filesystem's total size, so a usage bar can show the free half as a share of the whole.
+    /// `None` when the filesystem could not be measured, exactly like `available_space`.
+    pub total_space: Option<u64>,
 }
 
 impl Environment {
     /// Probes `PATH` for every [`Tool::ALL`] and measures the filesystem holding `path`.
     #[must_use]
     pub fn probe(path: impl AsRef<Path>) -> Self {
-        Self::from_probes(locate, available_space(path).ok())
+        let path = path.as_ref();
+        Self::from_probes(locate, available_space(path).ok(), total_space(path).ok())
     }
 
     /// The field wiring, split from the probes so a unit test can hand in a locator that answers
     /// differently per [`Tool`]. Without that seam a swap here (`ffmpeg: locate(Tool::Vlc)`) is
     /// invisible on any machine where the two tools agree, which includes every machine with
     /// neither installed.
-    fn from_probes(locate: impl Fn(Tool) -> Option<PathBuf>, available_space: Option<u64>) -> Self {
-        Self { ffmpeg: locate(Tool::Ffmpeg), vlc: locate(Tool::Vlc), available_space }
+    fn from_probes(locate: impl Fn(Tool) -> Option<PathBuf>, available_space: Option<u64>, total_space: Option<u64>) -> Self {
+        Self { ffmpeg: locate(Tool::Ffmpeg), vlc: locate(Tool::Vlc), available_space, total_space }
     }
 
     /// Where `tool` was found.
@@ -161,7 +176,7 @@ mod tests {
     fn each_field_holds_the_tool_it_is_named_after() {
         // A locator that answers differently per tool, which the real `PATH` cannot be made to do
         // from a test. This is what makes a swapped field in `from_probes` observable.
-        let environment = Environment::from_probes(|tool| Some(PathBuf::from(tool.command())), Some(7));
+        let environment = Environment::from_probes(|tool| Some(PathBuf::from(tool.command())), Some(7), Some(14));
 
         assert_eq!(environment.ffmpeg, Some(PathBuf::from("ffmpeg")));
         assert_eq!(environment.vlc, Some(PathBuf::from("vlc")));
@@ -172,7 +187,7 @@ mod tests {
 
     #[test]
     fn a_locator_that_finds_nothing_leaves_the_space_figure_alone() {
-        let environment = Environment::from_probes(|_| None, Some(42));
+        let environment = Environment::from_probes(|_| None, Some(42), None);
 
         assert_eq!(environment.ffmpeg, None);
         assert_eq!(environment.vlc, None);

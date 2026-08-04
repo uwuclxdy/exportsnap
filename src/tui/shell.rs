@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 
-use super::screens::overview;
+use super::screens::{memories, overview};
 use super::theme::{Palette, glyph};
 use super::widgets::{PanelStyle, panel};
 use super::{footer, header};
@@ -27,9 +27,11 @@ pub(crate) const COMPACT_HEIGHT: u16 = 14;
 pub(crate) const HEADER_ROWS: u16 = 1;
 pub(crate) const FOOTER_ROWS: u16 = 1;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let palette = app.palette();
+    // A copy rather than a borrow: the memories screen's stateful table needs the app mutable
+    // while the palette is read.
+    let palette = *app.palette();
 
     // The base surface, on the tier that has one. `try_init` enters the alternate screen,
     // which resets to the terminal's own background, so without this the `full` tier would
@@ -48,29 +50,30 @@ pub fn render(frame: &mut Frame, app: &App) {
     let header_fits = header_area.width >= header::min_width();
 
     if header_fits {
-        frame.render_widget(header::render(palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width), header_area);
+        frame.render_widget(header::render(&palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width), header_area);
     } else {
-        frame.render_widget(compact_banner(palette, header_area.width), header_area);
+        frame.render_widget(compact_banner(&palette, header_area.width), header_area);
     }
-    frame.render_widget(footer::render(palette, app.is_quit_armed()), footer_area);
+    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.memories().alert(), app.memories().descended()), footer_area);
 
     // Recomputed from the live frame size every draw, so it self-clears on resize rather than
     // living on as a stored notification. At most one banner per frame (skill: Banner), so a
     // frame short on both axes says it once, in the header's row.
     let panel_area = if header_fits && area.height < COMPACT_HEIGHT {
         let [banner_area, rest] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body_area);
-        frame.render_widget(compact_banner(palette, banner_area.width), banner_area);
+        frame.render_widget(compact_banner(&palette, banner_area.width), banner_area);
         rest
     } else {
         body_area
     };
 
     match app.active() {
-        Tab::Overview => overview::render(frame, palette, app.overview(), panel_area),
-        // The other five tabs are still the empty shell: one placeholder panel named after the
+        Tab::Overview => overview::render(frame, &palette, app.overview(), panel_area),
+        Tab::Memories => memories::render(frame, &palette, app.memories_mut(), panel_area),
+        // The other four tabs are still the empty shell: one placeholder panel named after the
         // tab. It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the
         // cursor) and, being the first panel on the body, an `ACCENT_2` title.
-        tab => frame.render_widget(panel(palette, tab.label(), PanelStyle { first: true, focused: true }), panel_area),
+        tab => frame.render_widget(panel(&palette, tab.label(), PanelStyle { first: true, focused: true }), panel_area),
     }
 }
 

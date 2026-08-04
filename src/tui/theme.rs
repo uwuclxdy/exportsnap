@@ -2,7 +2,7 @@
 //! the toast glass-blend helper (cloudy-tui skill, DNA rule 10: raw hex / `Color::Rgb` /
 //! one-off glyph literals outside this module are a bug).
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 
 /// Which color depth + glyph set the terminal gets. Auto-detected at startup; an explicit
 /// override (CLI flag or config file, resolved by the caller) always wins over env sniffing.
@@ -111,6 +111,83 @@ impl Palette {
         match self.tier {
             Tier::Full => Some(self.bg),
             Tier::Compatible => None,
+        }
+    }
+
+    /// The usage-role color for a percentage (cloudy-tui skill: Progress bar — usage/quota role,
+    /// higher = worse). `<60` reads as nothing notable, `60..=80` needs attention, `>80` is
+    /// danger — so the boundaries themselves are `WARNING`, pinned by
+    /// `the_usage_threshold_is_warning_at_both_boundaries` in `tests/theme.rs`.
+    #[must_use]
+    pub const fn usage_color(self, percent: u8) -> Color {
+        if percent < 60 {
+            self.text_dim
+        } else if percent <= 80 {
+            self.warning
+        } else {
+            self.danger
+        }
+    }
+
+    /// The label color of a status pill for a manifest item (cloudy-tui skill: Status pill —
+    /// semantic when the state carries a charge, neutral `TEXT_DIM` otherwise). `pending` is the
+    /// default state and nothing has gone wrong yet; `source_missing` is a real gap to report.
+    #[must_use]
+    pub const fn status_pill(self, status: crate::export::manifest::ItemStatus) -> Color {
+        use crate::export::manifest::ItemStatus;
+        match status {
+            ItemStatus::Pending => self.text_dim,
+            ItemStatus::Done => self.success,
+            ItemStatus::Failed => self.danger,
+            ItemStatus::SourceMissing => self.warning,
+        }
+    }
+
+    /// The fill of a determinate progress bar (cloudy-tui skill: Progress bar — progress role,
+    /// higher = good): solid `ACCENT`, no threshold coloring.
+    #[must_use]
+    pub const fn progress_fill(self) -> Style {
+        Style::new().fg(self.accent)
+    }
+
+    /// The bare track a determinate bar's `░` run sits on.
+    #[must_use]
+    pub const fn bar_track(self) -> Style {
+        Style::new().fg(self.line)
+    }
+
+    /// The toggle control's rendered form (cloudy-tui skill: Toggle row; Capability tiers table):
+    /// a two-tone slide switch on `full`, a bracketed `[on]`/`[off]` word on `compatible`. The
+    /// tier difference is resolved here so widget code never branches on `Tier`.
+    #[must_use]
+    pub fn toggle(self, on: bool) -> Vec<ratatui::text::Span<'static>> {
+        let track = Style::new().fg(self.line);
+        let bracket = Style::new().fg(self.text_dim);
+        match (self.tier, on) {
+            (Tier::Full, true) => {
+                let knob = Style::new().fg(self.accent);
+                vec![
+                    ratatui::text::Span::styled(full::TOGGLE_TRACK.to_string(), track),
+                    ratatui::text::Span::styled(full::TOGGLE_KNOB_ON.to_string(), knob),
+                ]
+            }
+            (Tier::Full, false) => {
+                let knob = Style::new().fg(self.text_dim);
+                vec![
+                    ratatui::text::Span::styled(full::TOGGLE_KNOB_OFF.to_string(), knob),
+                    ratatui::text::Span::styled(full::TOGGLE_TRACK.to_string(), track),
+                ]
+            }
+            (Tier::Compatible, true) => vec![
+                ratatui::text::Span::styled(compatible::TOGGLE_BRACKET_OPEN.to_string(), bracket),
+                ratatui::text::Span::styled(compatible::TOGGLE_WORD_ON, Style::new().fg(self.accent)),
+                ratatui::text::Span::styled(compatible::TOGGLE_BRACKET_CLOSE.to_string(), bracket),
+            ],
+            (Tier::Compatible, false) => vec![
+                ratatui::text::Span::styled(compatible::TOGGLE_BRACKET_OPEN.to_string(), bracket),
+                ratatui::text::Span::styled(compatible::TOGGLE_WORD_OFF, Style::new().fg(self.text_dim)),
+                ratatui::text::Span::styled(compatible::TOGGLE_BRACKET_CLOSE.to_string(), bracket),
+            ],
         }
     }
 
