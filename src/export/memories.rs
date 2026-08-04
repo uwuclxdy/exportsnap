@@ -208,6 +208,18 @@ pub struct Bucket {
     pub kind: MemoryKind,
 }
 
+impl Bucket {
+    /// The bucket an entry falls in, or `None` when it carries no date to bucket by.
+    ///
+    /// Public because a later pass has to re-derive the same key to ask a question about the whole
+    /// bucket — decision 32's "does every entry here name one place" — and a second spelling of
+    /// the key would drift from this one silently.
+    #[must_use]
+    pub fn of(memory: &Memory) -> Option<Self> {
+        Some(Self { day: Day::from(memory.date?), kind: MemoryKind::from_media_type(&memory.media_type) })
+    }
+}
+
 impl fmt::Display for Bucket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { day, kind } = self;
@@ -796,7 +808,7 @@ pub fn reconcile(memories: &Memories, discovery: Discovery) -> Reconciliation {
     let files_per_bucket: BTreeMap<Bucket, usize> = unclaimed.iter().map(|(bucket, queue)| (*bucket, queue.len())).collect();
 
     let mut entries_per_bucket: BTreeMap<Bucket, usize> = BTreeMap::new();
-    for bucket in memories.saved_media.iter().filter_map(bucket_of) {
+    for bucket in memories.saved_media.iter().filter_map(Bucket::of) {
         *entries_per_bucket.entry(bucket).or_default() += 1;
     }
 
@@ -804,7 +816,7 @@ pub fn reconcile(memories: &Memories, discovery: Discovery) -> Reconciliation {
     let mut items = Vec::with_capacity(memories.saved_media.len());
     for (entry_index, memory) in memories.saved_media.iter().enumerate() {
         let url = memory.media_download_url.clone().or_else(|| memory.download_link.clone());
-        let claimed = bucket_of(memory).and_then(|bucket| {
+        let claimed = Bucket::of(memory).and_then(|bucket| {
             let media = unclaimed.get_mut(&bucket)?.pop_front()?;
             let alone = entries_per_bucket.get(&bucket) == Some(&1) && files_per_bucket.get(&bucket) == Some(&1);
             let source_id = media.uuid().to_owned();
@@ -836,11 +848,6 @@ pub fn reconcile(memories: &Memories, discovery: Discovery) -> Reconciliation {
         duplicates,
         unreadable,
     }
-}
-
-/// The bucket an entry falls in, or `None` when it carries no date to bucket by.
-fn bucket_of(memory: &Memory) -> Option<Bucket> {
-    Some(Bucket { day: Day::from(memory.date?), kind: MemoryKind::from_media_type(&memory.media_type) })
 }
 
 /// The manifest `source_id` for an entry no media paired with.

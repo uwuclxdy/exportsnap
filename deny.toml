@@ -9,7 +9,61 @@ all-features = true
 # `unmaintained` re-added in 0.18.2: all | workspace | transitive | none (NOT deny/warn).
 yanked       = "deny"
 unmaintained = "workspace"  # flag unmaintained direct deps, not deep transitives we can't control
-ignore       = []
+
+# `little_exif` pins `quick-xml 0.37.5` and there is no way out of it: `cargo update` cannot escape
+# the `^0.37.5` requirement, no feature turns XMP off, and upstream's bump PR was closed unmerged
+# over an MSRV objection. So both entries below are an INDEFINITE posture, not a waiting period.
+#
+# Chosen over a `[patch.crates-io]` shim deliberately. A path- or git-patched lockfile entry
+# carries neither `source` nor `checksum`, which makes cargo-audit AND cargo-deny blind to that
+# crate entirely — measured: a deliberately vulnerable 0.37.5 shim exits 0 from both tools and
+# neither mentions quick-xml at all. Two ignores with the crate still visible to the gate beats one
+# ignore with the gate unable to verify the fix it exists to deliver.
+#
+# `audit.toml` carries the same two ids, because cargo-audit does not read this file.
+ignore = [
+  # Unbounded namespace-declaration allocation in `NsReader`. Inapplicable rather than mitigated:
+  # the advisory is `NsReader`-only by its own text, and little_exif has no `NsReader`.
+  "RUSTSEC-2026-0195",
+  # Quadratic `attributes()` / `try_get_attribute` on many-attribute tags. Reachable in
+  # little_exif ONLY from the PNG write path (`xmp.rs:132`, inside `clear_metadata`, triggered by
+  # an iTXt/zTXt/tEXt chunk keyed `XML:com.adobe.xmp`). This crate hands the library JPEG bytes
+  # and nothing else. `little_exif` has ELEVEN public entry points and they split in two; this crate
+  # makes the compiler carry six of them and holds the other five by convention. Both halves stated,
+  # because the earlier wording read as a guarantee for all eleven and was not.
+  #   - SIX take a `FileExtension` (new_from_vec, write_to_vec, clear_metadata, clear_app12_segment,
+  #     clear_app13_segment, as_u8_vec). `src/export/exif.rs`'s private `library` module holds two
+  #     functions that take NO file type, and `FileExtension` is in scope nowhere else in the crate,
+  #     so no call site can choose a variant. COMPILER-ENFORCED: the counterexample is E0425/E0433.
+  #   - FIVE infer it from a PATH and need no `FileExtension` and no import (new_from_path,
+  #     write_to_file, file_clear_metadata, file_clear_app12_segment, file_clear_app13_segment).
+  #     CONVENTION ONLY, held by there being no caller — verified, all five have none. Adding one is
+  #     new code visible in a diff; the compiler will not stop it.
+  # `Metadata::file_clear_metadata(path)` is the shortest reach to this advisory and was the unnamed
+  # one while this section said "the two alternatives". Separately, `little_exif`'s own `mod png` is
+  # private (lib.rs:44), so the direct `png::write_metadata` route is closed by the library rather
+  # than by us — a 0.6.23 property a version bump could reopen.
+  #
+  # No test carries the six-door half; the compiler does. `tests/supply_chain.rs` keeps a round-trip
+  # REGRESSION test, and eleven pipeline tests in tests/local_fix.rs fail if stamping breaks. Do not
+  # cite either as a security pin — this file used to and that was the error. What they catch is the
+  # narrow set of edits the compiler still permits inside the `library` module itself.
+  #
+  # An earlier version put a module-wide `const` behind a source scan instead. Review beat the scan
+  # twice — an aliased type at a call site dispatching on a fixture dimension held constant, and a
+  # `//` inside a string literal hiding code from the comment stripper — which is why the shape
+  # changed rather than the scan getting sharper. Do not reintroduce a scan here.
+  #
+  # Residual, so nobody reads more into this than it holds: a future edit can name the type by ANY
+  # path — including a fully-qualified `little_exif::filetype::FileExtension::PNG`, which needs no
+  # import and does compile (measured) — and call the library's entry point directly. So the claim
+  # is not "the type is unreachable". It is that no EXISTING call site can be made to pass a
+  # different file type, because none of them takes one; subverting it means adding a new direct
+  # call to the library, which is new code in the diff rather than a one-variant edit.
+  #
+  # The moment anything in this crate stamps a PNG, this ignore is wrong.
+  "RUSTSEC-2026-0194",
+]
 
 [licenses]
 confidence-threshold = 0.8  # cargo-deny's default, stated for clarity
@@ -25,6 +79,18 @@ allow = [
   "MPL-2.0",
   "Zlib",
 ]
+
+# `tzf-dist` is `MIT AND ODbL-1.0`: the code is MIT and the timezone boundary polygons it embeds
+# are OpenStreetMap-derived, which is ODbL. It arrives through `tzf-rs`, which is the only offline
+# GPS-to-timezone route, and the data is what the crate is for — there is no feature that drops it
+# and keeps the lookup. Scoped to this one crate rather than added to `allow`, so a second ODbL
+# dependency arriving later still has to be argued for on its own terms.
+#
+# NEEDS A HUMAN CALL: ODbL's share-alike attaches to a distributed derived database, so shipping a
+# binary with these polygons in it is a licence question this file records rather than settles.
+[[licenses.exceptions]]
+name  = "tzf-dist"
+allow = ["ODbL-1.0"]
 
 [bans]
 multiple-versions = "warn"

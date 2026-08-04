@@ -8,12 +8,22 @@
 //! depends on: the optional tools installed and the room left on disk. [`memories`] joins the
 //! media on disk to the entries `memories_history.json` names and enrolls the result in
 //! [`manifest`].
+//!
+//! Phase 2's local-fix leg builds on that: [`overlay`] composites a memory's caption layer back
+//! over it, [`timezone`] turns its coordinates into the offset local clocks were at, [`exif`]
+//! writes the result into the image (and owns the guard type that keeps `little_exif` on its one
+//! safe path), and [`local_fix`] is the pass that drives all three and records the outcome in
+//! [`manifest`].
 
 pub mod env;
+pub mod exif;
+pub mod local_fix;
 pub mod manifest;
 pub mod memories;
 pub mod model;
+pub mod overlay;
 pub mod schema;
+pub mod timezone;
 pub mod zip;
 
 use std::error::Error;

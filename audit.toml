@@ -1,0 +1,17 @@
+# cargo-audit's advisory ignores.
+#
+# A second file rather than a duplicate posture: cargo-audit reads only `~/.cargo/audit.toml`, so
+# `deny.toml`'s `[advisories] ignore` does not reach it. The `~/repos/rs/cargo.sh` gate scrapes the
+# ids out of THIS file and passes them as `--ignore` flags, which is what keeps the two tools
+# agreeing. Every id here must also be in `deny.toml`, where the full reasoning lives.
+#
+# Both are `quick-xml 0.37.5`, pinned by `little_exif` with no way out. In short:
+# - RUSTSEC-2026-0195 is `NsReader`-only and little_exif has no `NsReader`.
+# - RUSTSEC-2026-0194 is reachable only from little_exif's PNG write path, and the `Jpeg` guard
+#   type in `src/export/exif.rs` is what makes it structurally unreachable from here.
+
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
