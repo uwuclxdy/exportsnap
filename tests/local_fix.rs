@@ -59,7 +59,12 @@ fn uuid(seed: u32) -> String {
 /// test passes whether the copy happens or not. The red channel is kept under 40 so the overlay
 /// assertions elsewhere still have a clean "is this red" question to ask.
 fn write_main(dir: &Path, day: &str, seed: u32) -> MemoryFile {
-    let mut pixels = RgbImage::new(WIDTH, HEIGHT);
+    write_main_sized(dir, day, seed, WIDTH, HEIGHT)
+}
+
+/// [`write_main`] at any size, for a fixture whose dimensions have to disagree with the overlay's.
+fn write_main_sized(dir: &Path, day: &str, seed: u32, width: u32, height: u32) -> MemoryFile {
+    let mut pixels = RgbImage::new(width, height);
     for (x, y, pixel) in pixels.enumerate_pixels_mut() {
         *pixel = Rgb([(x % 7) as u8 * 5, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]);
     }
@@ -71,9 +76,14 @@ fn write_main(dir: &Path, day: &str, seed: u32) -> MemoryFile {
 /// An overlay whose left half is opaque red and whose right half is fully transparent, so a
 /// composite that ran and one that did not are told apart by a single pixel each way.
 fn write_overlay(dir: &Path, day: &str, seed: u32) -> MemoryFile {
-    let mut pixels = RgbaImage::new(WIDTH, HEIGHT);
+    write_overlay_sized(dir, day, seed, WIDTH, HEIGHT)
+}
+
+/// [`write_overlay`] at any size, same red/transparent split.
+fn write_overlay_sized(dir: &Path, day: &str, seed: u32, width: u32, height: u32) -> MemoryFile {
+    let mut pixels = RgbaImage::new(width, height);
     for (x, _, pixel) in pixels.enumerate_pixels_mut() {
-        *pixel = if x < WIDTH / 2 { Rgba([255, 0, 0, 255]) } else { Rgba([0, 0, 0, 0]) };
+        *pixel = if x < width / 2 { Rgba([255, 0, 0, 255]) } else { Rgba([0, 0, 0, 0]) };
     }
     let path = memories_dir(dir).join(format!("{day}_{}-overlay.png", uuid(seed)));
     pixels.save_with_format(&path, ImageFormat::Png).unwrap();
@@ -490,6 +500,43 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
     let modified = fs::metadata(&written).unwrap().modified().unwrap();
     let expected = UNIX_EPOCH + Duration::from_secs(u64::try_from(plan.items[0].capture.instant().timestamp()).unwrap());
     assert_eq!(modified, expected);
+}
+
+#[test]
+fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
+    // The dimensions the 2026-08-04 census found on real data: a 1440x2560 main with a
+    // 1080x1920 overlay (38 of 161 real pairs, the modal image shape; see the local-fix
+    // section of docs/design.md). `compose` scales the overlay TO the main, so an unscaled
+    // composite would leave the main's bottom 640 rows and right 360 columns unpainted —
+    // which is what the low-row asserts below catch, since the fixture main's red channel
+    // never rises past 40 while the overlay's opaque half is 255.
+    const MAIN_W: u32 = 1440;
+    const MAIN_H: u32 = 2560;
+    const OVERLAY_W: u32 = 1080;
+    const OVERLAY_H: u32 = 1920;
+
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+    let files = vec![
+        write_main_sized(dir.path(), "2021-01-15", 1, MAIN_W, MAIN_H),
+        write_overlay_sized(dir.path(), "2021-01-15", 1, OVERLAY_W, OVERLAY_H),
+    ];
+    let reconciliation = reconciled(&memories, files);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let out = dir.path().join("out");
+    let plan = Plan::build(&memories, &reconciliation, &out);
+    assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
+    assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
+
+    let composite = image::open(&plan.items[0].output).unwrap().to_rgb8();
+    assert_eq!(composite.dimensions(), (MAIN_W, MAIN_H), "the composite keeps the MAIN's size, not the overlay's");
+    // After scaling, the overlay's opaque red half is 720 wide and covers the full 2560
+    // rows. The pixel at (700, MAIN_H - 60) sits inside that half only after scaling: an
+    // unscaled 1080x1920 overlay never paints below row 1920, so this assert reds when the
+    // resize is dropped even though the composite's dimensions do not move.
+    assert!(composite.get_pixel(700, MAIN_H - 60).0[0] > 200, "the scaled overlay's opaque half reached the main's bottom rows");
+    assert!(composite.get_pixel(1400, MAIN_H - 60).0[0] < 60, "the scaled transparent half still leaves the main showing, bottom rows");
+    assert!(composite.get_pixel(1400, 100).0[0] < 60, "the scaled transparent half still leaves the main showing, a row both sizes reach");
 }
 
 #[test]
