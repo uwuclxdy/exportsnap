@@ -308,7 +308,9 @@ fn is_uuid(text: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryMedia {
     pub main: MemoryFile,
-    /// `None` is the common answer: 162 of the observed export's 746 memories carry an overlay.
+    /// `None` is the common answer: 161 of the observed export's 746 memories carry an overlay,
+    /// split 77 image mains and 84 video mains. The export holds 162 overlay files, not 161; the
+    /// odd one has no main and lands in [`Discovery::orphan_overlays`] instead.
     pub overlay: Option<MemoryFile>,
 }
 
