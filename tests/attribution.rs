@@ -11,6 +11,11 @@
 //!     cargo about generate about.hbs -o THIRD-PARTY-LICENSES
 //!
 //! with the committed `about.toml` + `about.hbs` as inputs.
+//!
+//! The other half of the obligation is the binary itself: a downloaded release
+//! never carries the repo, so `the_built_binary_prints_the_credit` below
+//! spawns the built binary and pins that `--version` prints the OSM/ODbL
+//! credit with no terminal and no network.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
@@ -42,4 +47,19 @@ fn third_party_licenses_links_the_odbl_text_instead_of_shipping_it() {
     // text and the "not reproduced here" marker disappears with it.
     let text = fs::read_to_string(notice_path()).unwrap();
     assert!(text.contains("The full ODbL-1.0 text is not reproduced here; it is at"), "the ODbL section must link the text, not paste it");
+}
+
+#[test]
+fn the_built_binary_prints_the_credit_on_version_without_a_terminal() {
+    // The durable half of task 22's verify line: a built binary prints the OSM
+    // + ODbL credit without network or extra flags. `--version` is handled
+    // before any terminal takeover, so this passes headless — `output()` gives
+    // the child a captured stdout and no tty, and the EPIPE path is not
+    // exercised here by design (a closed pipe is not deterministic).
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_exportsnap")).arg("--version").output().unwrap();
+    assert!(output.status.success(), "--version must exit 0, got {:?}", output.status);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for needle in ["OpenStreetMap", "ODbL-1.0", "https://opendatacommons.org/licenses/odbl/1-0/", "tzf-dist", "THIRD-PARTY-LICENSES"] {
+        assert!(stdout.contains(needle), "--version stdout lacks '{needle}'");
+    }
 }

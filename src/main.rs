@@ -116,10 +116,11 @@ fn parse_source_arg(args: impl IntoIterator<Item = String>) -> Result<Option<Pat
     Ok(source)
 }
 
-/// Hand-parses `--version`, last one wins: any occurrence wins, and the caller
-/// checks it before anything touches the terminal. Same shape as
-/// [`parse_theme_arg`] and for the same reason: a real CLI with subcommands is
-/// phase 5 and brings its own argument parser then.
+/// Hand-parses `--version`: any occurrence wins — the flag takes no state, so
+/// there is no last one to speak of. A `--version=` value is the one early
+/// fire. The caller checks it before anything touches the terminal. Same shape
+/// as [`parse_theme_arg`] and for the same reason: a real CLI with subcommands
+/// is phase 5 and brings its own argument parser then.
 fn wants_version_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
     let mut version = false;
     for arg in args {
