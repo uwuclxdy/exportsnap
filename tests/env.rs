@@ -13,6 +13,15 @@ fn missing_path() -> PathBuf {
 #[test]
 fn every_tool_names_the_binary_it_looks_for() {
     assert_eq!(Tool::ALL.map(Tool::command), ["ffmpeg", "vlc"]);
+
+    // Second witness; `Tool::command`/`Environment::tool` (src/export/env.rs) are the first.
+    // Survives either being weakened to a wildcard. Residual and rationale: `MissingReason::ALL`,
+    // src/export/memories.rs. Never collapse to `_ => {}`.
+    for tool in Tool::ALL {
+        match tool {
+            Tool::Ffmpeg | Tool::Vlc => {}
+        }
+    }
 }
 
 #[test]

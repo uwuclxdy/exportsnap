@@ -797,6 +797,20 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), labels.len(), "a duplicate label would hide a row kind");
+
+        // Second witness; `SummaryRow::label` above is the first. Survives it being weakened to a
+        // wildcard. Residual and rationale: `MissingReason::ALL`, src/export/memories.rs. Never
+        // collapse to `_ => {}`.
+        for row in SummaryRow::ALL {
+            match row {
+                SummaryRow::Parts
+                | SummaryRow::Missing
+                | SummaryRow::Memories
+                | SummaryRow::Chats
+                | SummaryRow::Snaps
+                | SummaryRow::Friends => {}
+            }
+        }
     }
 
     #[test]

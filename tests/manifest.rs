@@ -615,6 +615,24 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
     // list is a contract rather than an implementation detail.
     assert_eq!(ItemKind::ALL.map(ItemKind::as_stored), ["memory", "chat_media", "history_export"]);
     assert_eq!(ItemStatus::ALL.map(ItemStatus::as_stored), ["pending", "done", "failed", "source_missing"]);
+
+    // Second witness for each; `ItemKind::as_stored`/`ItemStatus::as_stored` above are the first,
+    // and `ItemStatus` also has `resume`'s per-status match (src/export/manifest.rs) as a second.
+    // Survives any of those being weakened to a wildcard. Residual and rationale:
+    // `MissingReason::ALL`, src/export/memories.rs. `ItemStatus` is where an omission bites
+    // hardest: `from_stored` parses through `ALL`, so a missing variant fails on READ as
+    // `CorruptRow`, blaming the user for a gap in this crate. Never collapse either match to
+    // `_ => {}`.
+    for kind in ItemKind::ALL {
+        match kind {
+            ItemKind::Memory | ItemKind::ChatMedia | ItemKind::HistoryExport => {}
+        }
+    }
+    for status in ItemStatus::ALL {
+        match status {
+            ItemStatus::Pending | ItemStatus::Done | ItemStatus::Failed | ItemStatus::SourceMissing => {}
+        }
+    }
 }
 
 #[test]

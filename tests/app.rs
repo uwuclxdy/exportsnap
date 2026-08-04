@@ -39,6 +39,15 @@ fn starts_running_on_the_first_tab_with_quit_disarmed() {
 fn tab_order_matches_the_design_screen_map() {
     assert_eq!(Tab::ALL, [Tab::Overview, Tab::Memories, Tab::ChatMedia, Tab::History, Tab::Account, Tab::Settings,]);
     assert_eq!(Tab::ALL.map(Tab::label), ["overview", "memories", "chat media", "history", "account", "settings",]);
+
+    // Second witness; `Tab::label`/`Tab::index` (src/app.rs) are the first. Survives either being
+    // weakened to a wildcard. Residual and rationale: `MissingReason::ALL`, src/export/memories.rs.
+    // Never collapse to `_ => {}`.
+    for tab in Tab::ALL {
+        match tab {
+            Tab::Overview | Tab::Memories | Tab::ChatMedia | Tab::History | Tab::Account | Tab::Settings => {}
+        }
+    }
 }
 
 // ---- arrow navigation (skill: Keyboard grammar — `←`/`→` switch screens) ----

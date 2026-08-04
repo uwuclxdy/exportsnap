@@ -143,6 +143,20 @@ fn the_role_is_matched_without_regard_to_case() {
     assert_eq!(shouted.extension, "MP4");
 }
 
+#[test]
+fn every_role_is_named_in_all() {
+    // Second witness; `Role::as_suffix` and the main/overlay bucketing match
+    // (src/export/memories.rs) are the first. Survives either being weakened to a wildcard.
+    // Residual and rationale: the `MissingReason::ALL` witness in
+    // `a_missing_reason_says_which_gap_it_is_in_prose_the_manifest_can_store`. Never collapse to
+    // `_ => {}`.
+    for role in Role::ALL {
+        match role {
+            Role::Main | Role::Overlay => {}
+        }
+    }
+}
+
 // ---- overlay pairing ----
 
 #[test]
