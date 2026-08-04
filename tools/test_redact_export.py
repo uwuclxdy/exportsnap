@@ -490,7 +490,9 @@ class TestListings(RedactorCase):
     def test_every_real_export_schema_filename_survives_verbatim(self):
         # A word missing from NAME_VOCABULARY renames the file a parser looks for,
         # and two mangled names can collide onto one mirror (snap_ads / snap_pro),
-        # which also makes any --mask-keys-under rule against them ambiguous.
+        # which also makes any --mask-keys-under rule against them ambiguous. The
+        # union of two real exports' schema file sets, one older (no
+        # in_app_reports.json) and one newer (no memories_history.json).
         names = [
             "account.json",
             "account_history.json",
@@ -500,6 +502,7 @@ class TestListings(RedactorCase):
             "email_campaign_history.json",
             "feature_emails.json",
             "friends.json",
+            "in_app_reports.json",
             "location_history.json",
             "memories_history.json",
             "ranking.json",

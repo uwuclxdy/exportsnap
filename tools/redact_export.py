@@ -82,6 +82,18 @@ NOT GUARANTEED
     who learns one real date can recover it and invert every other date.
   * A float pair that is not under a coordinate-ish key keeps its sign and
     decade, so it can still LOOK like a coordinate to a human auditor.
+  * A vocabulary word is matched as a whole token, case-insensitively, so it
+    survives verbatim in EVERY position of a masked name, not just the file it
+    was added for. A real, user-derived token -- a username, a caption, a
+    folder name -- that happens to equal a vocabulary word passes through
+    unmasked in a filename, a mirrored path segment, or a listing example, the
+    same way a schema word does. This is a closed-vocabulary consequence, not
+    a defect: the vocabulary is a list of words the operator asserts are not
+    owner-identifying, and the only mitigation is reading NAME_VOCABULARY in
+    this file's source and judging it against the export at hand -- there is
+    no runtime signal for it. The report's vocabulary_used total does NOT
+    cover this: it is fed only by value synthesis, and the name-masking path
+    never records into it.
 
 Exit codes: 0 clean, 1 bad configuration or unreadable input, 2 argparse usage
 error, 3 self-check failure.
@@ -273,6 +285,7 @@ NAME_VOCABULARY = frozenset(
         "connected",
         "apps",
         "purchase",
+        "reports",
         "app",
         "in",
         "with",
