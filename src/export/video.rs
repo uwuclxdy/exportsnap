@@ -40,11 +40,14 @@
 //! patch therefore leaves no half-written file, and that property is **structural rather than
 //! guarded**: it holds only because the patch mutates an in-memory `Vec` and the write runs on
 //! `Ok`. Nothing observes the absence of a file that was never opened, so a refactor that streams
-//! patches at a file would lose it in silence. Three tests stand between that and a corrupted
+//! patches at a file would lose it in silence. Four tests stand between that and a corrupted
 //! archive, and they are worth naming because none of them reads as being about this on its own:
 //!
 //! - `a_capture_before_1970_is_refused_and_changes_nothing` (`tests/video.rs`) — the buffer and the
 //!   source file both come through a refused stamp untouched.
+//! - `a_chunk_table_the_tagging_crate_refuses_errors_cleanly_and_changes_nothing` (`tests/video.rs`)
+//!   — the tag write itself failing, not a refused date, leaves the buffer untouched; the first
+//!   test to pin the all-or-nothing property at the `mp4ameta` step.
 //! - `a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path` (`tests/video.rs`) —
 //!   the write truncates, so a smaller output cannot leave an older, larger one's tail behind.
 //! - `a_video_whose_date_cannot_be_stored_leaves_the_output_path_alone` (`tests/local_fix.rs`) —
