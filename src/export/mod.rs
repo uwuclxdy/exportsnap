@@ -12,11 +12,14 @@
 //! Phase 2's local-fix leg builds on that: [`overlay`] composites a memory's caption layer back
 //! over it, [`timezone`] turns its coordinates into the offset local clocks were at, [`exif`]
 //! writes the result into the image (and owns the guard type that keeps `little_exif` on its one
-//! safe path), and [`local_fix`] is the pass that drives all three and records the outcome in
+//! safe path), [`video`] does the same job for an MP4's container metadata (and owns the guard type
+//! that keeps `mp4ameta` off its chapter legs), [`ffmpeg`] is the only thing that touches video
+//! pixels, and [`local_fix`] is the pass that drives all of them and records the outcome in
 //! [`manifest`].
 
 pub mod env;
 pub mod exif;
+pub mod ffmpeg;
 pub mod local_fix;
 pub mod manifest;
 pub mod memories;
@@ -24,6 +27,7 @@ pub mod model;
 pub mod overlay;
 pub mod schema;
 pub mod timezone;
+pub mod video;
 pub mod zip;
 
 use std::error::Error;

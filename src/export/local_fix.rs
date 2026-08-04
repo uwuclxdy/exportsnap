@@ -21,6 +21,19 @@
 //!   an hour or more, so an arbitrary assignment gets the time badly wrong. Everywhere else the
 //!   time falls back to the file's own embedded timestamp, then to the day in its filename.
 //!
+//! # Images and videos take different routes to the same place
+//!
+//! An image is composited and stamped entirely in pure Rust and lands as a JPEG. A video's
+//! **metadata is written in pure Rust too**, always, whatever else happened to it — one metadata
+//! code path, one set of properties. What differs is the pixels:
+//!
+//! - **Transcoding on** (the default, see [`VideoOptions`]) **and ffmpeg installed**: ffmpeg
+//!   re-encodes the HEVC every memory video carries into H.264, burning the caption layer in on
+//!   the way past, since a re-encode is already touching every frame.
+//! - **Transcoding off, or no ffmpeg**: the video's bytes are copied and only the metadata is
+//!   patched. Nothing re-encodes video pixels, and the run reports both what it did not transcode
+//!   and the overlay it therefore could not draw ([`Notice`]).
+//!
 //! # Non-destructive by construction
 //!
 //! Decision 33: output lands under [`default_out_root`], and the source is only ever read. A bad
@@ -37,12 +50,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 
+use crate::export::env::{self, Tool};
 use crate::export::exif::{ExifError, Jpeg, Stamp};
+use crate::export::ffmpeg::{self, FfmpegError};
 use crate::export::manifest::{ItemKind, Manifest, ManifestError, ResumeReport};
 use crate::export::memories::{Bucket, Day, MemoryMedia, Pairing, Reconciliation};
 use crate::export::model::{LocationPoint, Memories, Memory, Timestamp};
 use crate::export::overlay::{self, OverlayError};
 use crate::export::timezone;
+use crate::export::video::{LocationAtom, Mp4, NotMp4, VideoError, VideoStamp};
 
 /// The directory a run writes into, under the source the user pointed at.
 ///
@@ -50,15 +66,26 @@ use crate::export::timezone;
 /// it.
 const OUT_DIR: &str = "exportsnap-out";
 
-/// Every image this build writes is a JPEG, whatever the source was, because that is what keeps a
-/// PNG out of `little_exif` (see [`crate::export::exif`]).
-const OUTPUT_EXTENSION: &str = "jpg";
-
 /// Extensions the image leg reads. A main outside this set is deferred rather than attempted.
 const IMAGE_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
 
-/// Extensions whose bytes can be copied straight through instead of re-encoded.
+/// Extensions the video leg reads.
+const VIDEO_EXTENSIONS: [&str; 1] = ["mp4"];
+
+/// Image extensions whose bytes can be copied straight through instead of re-encoded.
+///
+/// Only the image leg consults this. The video leg has no equivalent list because it has no
+/// equivalent choice: a video's pixels are touched by a transcode or by nothing.
 const VERBATIM_EXTENSIONS: [&str; 2] = ["jpg", "jpeg"];
+
+/// What a transcode writes before the finished file replaces it.
+///
+/// ffmpeg needs a seekable file to mux an MP4 into, so it is the one step of the pass that cannot
+/// be a single `fs::write` of a finished buffer. Pointing it at a scratch name beside the output
+/// and writing the real output afterwards is what keeps a failed item from leaving a half-made
+/// video where the manifest will later hash one. Leading dot so a file browser does not show a
+/// crashed run's leftovers as memories.
+const SCRATCH_PREFIX: &str = ".exportsnap-transcoding-";
 
 /// Where a run writes when the caller names no output root.
 ///
@@ -86,7 +113,8 @@ pub fn default_out_root(source: impl AsRef<Path>) -> PathBuf {
 pub enum TimeSource {
     /// The entry's own `Date`, which only an exact bucket may hand over.
     Entry,
-    /// The `-main` file's own `DateTimeOriginal`, `CreateDate` or `ModifyDate`.
+    /// The `-main` file's own metadata: an image's `DateTimeOriginal`, `CreateDate` or
+    /// `ModifyDate`, a video's `mvhd` creation time.
     Embedded,
     /// The day the filename leads with, at midnight. The last resort.
     Filename,
@@ -143,14 +171,110 @@ impl Capture {
         }
     }
 
-    /// The entry's UTC instant, moved into local time when a coordinate places it.
+    /// A known UTC instant, moved into local time when a coordinate places it.
     ///
     /// The offset is always stated on this path, `+00:00` included, because the instant itself is
     /// exactly known either way: with GPS the wall time is real local time, and without it the
     /// wall time is UTC, so saying so keeps the instant recoverable from the file.
-    fn from_entry(utc: NaiveDateTime, location: Option<LocationPoint>) -> Self {
+    fn from_utc(utc: NaiveDateTime, location: Option<LocationPoint>, source: TimeSource) -> Self {
         let offset = location.and_then(|location| timezone::offset(location, utc)).unwrap_or_else(|| Utc.fix());
-        Self { local: utc.and_utc().with_timezone(&offset).naive_local(), offset: Some(offset), source: TimeSource::Entry }
+        Self { local: utc.and_utc().with_timezone(&offset).naive_local(), offset: Some(offset), source }
+    }
+
+    /// The entry's own `Date`, which an exact bucket hands over.
+    fn from_entry(utc: NaiveDateTime, location: Option<LocationPoint>) -> Self {
+        Self::from_utc(utc, location, TimeSource::Entry)
+    }
+}
+
+// ---- which leg fixes an item ----
+
+/// Which half of the pass fixes an item, and so what it comes out as.
+///
+/// Carried on the plan rather than re-derived at fix time because the output path depends on it and
+/// the whole run's paths are decided before a byte is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Leg {
+    /// Composited and stamped in pure Rust.
+    Image,
+    /// Optionally re-encoded by ffmpeg, then stamped in pure Rust either way.
+    Video,
+}
+
+impl Leg {
+    /// The extension every one of this leg's outputs carries.
+    ///
+    /// **Images come out as JPEG whatever went in**, including a `-main.png` the observed export
+    /// does not contain, because the encoder is what keeps a PNG out of `little_exif` (see
+    /// [`crate::export::exif`]). Videos come out as MP4 whether they were re-encoded or copied,
+    /// since both routes end in an MP4 container.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Image => "jpg",
+            Self::Video => "mp4",
+        }
+    }
+
+    /// Which leg reads a main with this extension, or `None` for a format this build does not read.
+    fn of(extension: &str) -> Option<Self> {
+        if matches(extension, &IMAGE_EXTENSIONS) {
+            Some(Self::Image)
+        } else if matches(extension, &VIDEO_EXTENSIONS) {
+            Some(Self::Video)
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for Leg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Image => "image",
+            Self::Video => "video",
+        })
+    }
+}
+
+// ---- what a run is allowed to do to a video ----
+
+/// What the run may do to a video's pixels.
+///
+/// Not a CLI flag: nothing invokes this pass from `main.rs` yet, and a parsed flag with no consumer
+/// is dead code. This is the seam the memories screen wires a toggle into when it lands, which is
+/// the same call already recorded for `--out=<dir>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoOptions {
+    /// Whether to re-encode HEVC into H.264. **On in [`Self::probe`]**, because every memory video
+    /// in the observed export is `hvc1` and Windows plus older players routinely will not decode
+    /// it, so the default has to produce files that play. Turning it off means no video pixel is
+    /// re-encoded at all — and therefore that no overlay is burned in, since burning one is a
+    /// re-encode.
+    pub transcode: bool,
+    /// Where ffmpeg is, from [`crate::export::env::locate`]. `None` degrades exactly like
+    /// [`Self::transcode`] being off, and the run says which of the two it was.
+    pub ffmpeg: Option<PathBuf>,
+}
+
+impl VideoOptions {
+    /// The defaults a real run uses: transcoding on, ffmpeg looked up on `PATH`.
+    ///
+    /// There is deliberately no `Default` impl. One would have to answer `None` for ffmpeg without
+    /// probing, which reads as "transcoding on" while behaving as "transcoding off" — the exact
+    /// trap this pass exists to report rather than hide.
+    #[must_use]
+    pub fn probe() -> Self {
+        Self { transcode: true, ffmpeg: env::locate(Tool::Ffmpeg) }
+    }
+
+    /// The ffmpeg to run, or why there will not be one.
+    fn transcoder(&self) -> Result<&Path, TranscodeSkip> {
+        match (self.transcode, self.ffmpeg.as_deref()) {
+            (false, _) => Err(TranscodeSkip::OptedOut),
+            (true, None) => Err(TranscodeSkip::NoFfmpeg),
+            (true, Some(ffmpeg)) => Ok(ffmpeg),
+        }
     }
 }
 
@@ -215,6 +339,8 @@ pub struct PlannedItem {
     /// Where the entry sits in `memories_history.json`.
     pub entry_index: usize,
     pub media: MemoryMedia,
+    /// Which half of the pass fixes it. Also what decides [`Self::output`]'s extension.
+    pub leg: Leg,
     pub capture: Capture,
     /// The coordinate this item is allowed to carry, after decision 32. `None` means it gets none,
     /// whether because the entry had none or because its bucket disagreed.
@@ -230,8 +356,6 @@ pub struct PlannedItem {
 /// up untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DeferralReason {
-    /// The main file is a video. Task 17's leg.
-    Video,
     /// The main file's extension names no format this build decodes.
     UnknownFormat,
     /// Nothing in the export names a real calendar date for this memory, so there is no year and
@@ -243,7 +367,6 @@ pub enum DeferralReason {
 impl fmt::Display for DeferralReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Video => "the memory is a video, which the image pass does not touch",
             Self::UnknownFormat => "the memory's file is in a format this build does not decode",
             Self::NoCalendarDate => "no real calendar date could be worked out for this memory, so it has no year and month to file under",
         })
@@ -293,26 +416,29 @@ impl Plan {
             };
             let mut defer = |reason| deferred.push(Deferred { source_id: item.source_id.clone(), reason });
 
-            if !matches(&media.main.extension, &IMAGE_EXTENSIONS) {
-                defer(if media.main.extension.eq_ignore_ascii_case("mp4") { DeferralReason::Video } else { DeferralReason::UnknownFormat });
+            let Some(leg) = Leg::of(&media.main.extension) else {
+                defer(DeferralReason::UnknownFormat);
                 continue;
-            }
+            };
 
             let location = permitted_location(&item.pairing, memory, &agreements);
-            let Some(capture) = capture_of(&item.pairing, memory, media, location) else {
+            let Some(capture) = capture_of(&item.pairing, memory, media, leg, location) else {
                 defer(DeferralReason::NoCalendarDate);
                 continue;
             };
 
+            // Keyed by the whole file name rather than the stem: two memories collide only when
+            // they would land on one path, and a video and an image on the same second do not.
             let stem = capture.local.format("%Y%m%d_%H%M%S").to_string();
-            let ordinal = taken.entry(stem.clone()).or_default();
-            let output = output_path(out_root, capture.local, &stem, *ordinal);
+            let ordinal = taken.entry(format!("{stem}.{}", leg.extension())).or_default();
+            let output = output_path(out_root, capture.local, &stem, leg, *ordinal);
             *ordinal += 1;
 
             items.push(PlannedItem {
                 source_id: item.source_id.clone(),
                 entry_index: item.entry_index,
                 media: media.clone(),
+                leg,
                 capture,
                 location,
                 output,
@@ -340,7 +466,7 @@ fn permitted_location(pairing: &Pairing, memory: &Memory, agreements: &BTreeMap<
 
 /// When this item was taken, working down decision 32's fallback chain. `None` when no step of it
 /// yields a real calendar date.
-fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, location: Option<LocationPoint>) -> Option<Capture> {
+fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, leg: Leg, location: Option<LocationPoint>) -> Option<Capture> {
     let from_entry = match pairing {
         Pairing::Exact(_) => memory.date.and_then(calendar),
         // An ambiguous bucket can span hours, so its entry's time says nothing about this file.
@@ -352,10 +478,8 @@ fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, location:
 
     // The file's own idea of when it was taken. Snapchat's downloads usually carry the download
     // date instead, which is why this is second and not first.
-    if let Ok(jpeg) = Jpeg::read(&media.main.path)
-        && let Some(local) = jpeg.embedded_time()
-    {
-        return Some(Capture { local, offset: jpeg.embedded_offset(), source: TimeSource::Embedded });
+    if let Some(capture) = embedded(leg, media, location) {
+        return Some(capture);
     }
 
     // The day in the filename, which is the only date left. Midnight is a placeholder rather than
@@ -363,9 +487,33 @@ fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, location:
     Some(Capture { local: midnight(media.main.day)?, offset: None, source: TimeSource::Filename })
 }
 
-/// `<root>/YYYY/MM/YYYYMMDD_HHMMSS.jpg`, with `_2`, `_3` and so on for a name already claimed.
-fn output_path(root: &Path, local: NaiveDateTime, stem: &str, ordinal: u32) -> PathBuf {
-    let name = if ordinal == 0 { format!("{stem}.{OUTPUT_EXTENSION}") } else { format!("{stem}_{}.{OUTPUT_EXTENSION}", ordinal + 1) };
+/// The capture time the main file carries in its own metadata, if it carries one.
+///
+/// The two containers say different things and are read accordingly, which is the whole reason
+/// this is not one call. A JPEG's `DateTimeOriginal` is a **local wall time** with the zone in a
+/// separate tag that may be absent. An MP4 header time is a **UTC instant** with no zone field at
+/// all, so it goes through the same conversion an entry's `Date` does and comes out in the zone the
+/// coordinate places it in.
+fn embedded(leg: Leg, media: &MemoryMedia, location: Option<LocationPoint>) -> Option<Capture> {
+    match leg {
+        Leg::Image => {
+            let jpeg = Jpeg::read(&media.main.path).ok()?;
+            Some(Capture { local: jpeg.embedded_time()?, offset: jpeg.embedded_offset(), source: TimeSource::Embedded })
+        }
+        // Reads the movie box alone rather than the whole file: this runs at plan time for every
+        // video whose time falls back to it, and those same files are read in full again when the
+        // run reaches them.
+        Leg::Video => {
+            let utc = crate::export::video::header_time(&media.main.path)?;
+            Some(Capture::from_utc(utc.naive_utc(), location, TimeSource::Embedded))
+        }
+    }
+}
+
+/// `<root>/YYYY/MM/YYYYMMDD_HHMMSS.<ext>`, with `_2`, `_3` and so on for a name already claimed.
+fn output_path(root: &Path, local: NaiveDateTime, stem: &str, leg: Leg, ordinal: u32) -> PathBuf {
+    let extension = leg.extension();
+    let name = if ordinal == 0 { format!("{stem}.{extension}") } else { format!("{stem}_{}.{extension}", ordinal + 1) };
     root.join(local.format("%Y").to_string()).join(local.format("%m").to_string()).join(name)
 }
 
@@ -391,6 +539,8 @@ pub struct FixReport {
     pub skipped: usize,
     /// Paired memories left to another leg. See [`Plan::deferred`].
     pub deferred: usize,
+    /// What the run finished but did not do in full, per item. See [`Notice`].
+    pub notices: Vec<ItemNotice>,
 }
 
 /// One item a run could not fix, and why.
@@ -400,6 +550,62 @@ pub struct Failure {
     /// The message that also went into the manifest's `last_error`, where it is redacted on the
     /// way in.
     pub reason: String,
+}
+
+/// A [`Notice`] against the memory it is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemNotice {
+    pub source_id: String,
+    pub notice: Notice,
+}
+
+/// Something a run finished an item without doing.
+///
+/// Not a failure and not written to the manifest: the item is done, the output is on disk, and its
+/// row is `Done`. What a notice records is that the file is less repaired than a run with more
+/// available could have made it, which is a thing a user gets to know rather than discover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Notice {
+    /// The video's pixels were passed through untouched, so it is still in whatever codec the
+    /// export shipped — HEVC, on every memory video observed.
+    NotTranscoded(TranscodeSkip),
+    /// It carries an overlay and nothing burned it in. Only ever reported alongside
+    /// [`Self::NotTranscoded`], because burning a caption into a video **is** a re-encode and a run
+    /// that is not transcoding must not pay one.
+    OverlayNotBurned,
+    /// The video already carries a `udta` LOCATION atom, which both readers resolve ahead of
+    /// anything writable here, so the coordinate was skipped rather than written where it would be
+    /// read past. Unobserved on real memory videos, whose `©eng` sentinel is not one of these.
+    LocationShadowed(LocationAtom),
+}
+
+impl fmt::Display for Notice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotTranscoded(TranscodeSkip::OptedOut) => f.write_str("kept in its original codec, since transcoding is off"),
+            Self::NotTranscoded(TranscodeSkip::NoFfmpeg) => {
+                f.write_str("kept in its original codec, since ffmpeg is not installed; install it and re-run to transcode")
+            }
+            Self::OverlayNotBurned => {
+                f.write_str("its caption layer was not drawn in, because burning one into a video needs the re-encode this run did not do")
+            }
+            Self::LocationShadowed(atom) => write!(
+                f,
+                "its coordinates were left alone: it already carries a {atom} location atom, which every reader resolves \
+                 ahead of anything this build can write, so a second one would be ignored"
+            ),
+        }
+    }
+}
+
+/// Why a video's pixels were not re-encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TranscodeSkip {
+    /// The caller turned transcoding off.
+    OptedOut,
+    /// ffmpeg is not on `PATH`. Decision 2's degrade: an optional tool being absent costs a
+    /// capability, never the run.
+    NoFfmpeg,
 }
 
 /// Fixes everything in `plan` the manifest still owes, checking each result in as it lands.
@@ -416,20 +622,21 @@ pub struct Failure {
 /// # Errors
 ///
 /// Returns [`ManifestError`] when the manifest cannot be read or written.
-pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32) -> Result<FixReport, ManifestError> {
+pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32, video: &VideoOptions) -> Result<FixReport, ManifestError> {
     let resumed = manifest.resume(ItemKind::Memory)?;
     let owed: BTreeSet<String> = manifest.pending(ItemKind::Memory, max_attempts)?.into_iter().map(|item| item.source_id).collect();
 
-    let mut report = FixReport { resumed, fixed: 0, failed: Vec::new(), skipped: 0, deferred: plan.deferred.len() };
+    let mut report = FixReport { resumed, fixed: 0, failed: Vec::new(), skipped: 0, deferred: plan.deferred.len(), notices: Vec::new() };
     for item in &plan.items {
         if !owed.contains(&item.source_id) {
             report.skipped += 1;
             continue;
         }
-        match fix(item) {
-            Ok(()) => {
+        match fix(item, video) {
+            Ok(notices) => {
                 manifest.mark_done(ItemKind::Memory, &item.source_id, &item.output)?;
                 report.fixed += 1;
+                report.notices.extend(notices.into_iter().map(|notice| ItemNotice { source_id: item.source_id.clone(), notice }));
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -441,16 +648,36 @@ pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32) -> Result<Fi
     Ok(report)
 }
 
-/// Composites, stamps, writes and dates one memory.
+/// Composites or transcodes, stamps, writes and dates one memory.
 ///
 /// Nothing is left half-written: the output is one `fs::write` of a finished buffer, so a failure
 /// before it leaves no file at all and a failure after it leaves a complete file whose date the
-/// next run corrects.
+/// next run corrects. A transcode is the one step that cannot be a buffer, and it writes to a
+/// scratch name that is removed however this returns.
+///
+/// Returns what the item was finished without. See [`Notice`].
 ///
 /// # Errors
 ///
 /// Returns [`FixError`] when any step fails.
-pub fn fix(item: &PlannedItem) -> Result<(), FixError> {
+pub fn fix(item: &PlannedItem, video: &VideoOptions) -> Result<Vec<Notice>, FixError> {
+    let notices = match item.leg {
+        Leg::Image => {
+            fix_image(item)?;
+            Vec::new()
+        }
+        Leg::Video => fix_video(item, video)?,
+    };
+    set_modified(&item.output, item.capture.instant()).map_err(|source| FixError::Touch { path: item.output.clone(), source })?;
+    Ok(notices)
+}
+
+/// The pure-Rust leg: composite the overlay in, stamp the EXIF, write a JPEG.
+///
+/// The output directory is made last, right before the write, so a failure earlier leaves no empty
+/// year and month behind. The video leg cannot do the same, since ffmpeg needs somewhere to mux
+/// into before there is anything to write.
+fn fix_image(item: &PlannedItem) -> Result<(), FixError> {
     // A main that is already a JPEG and carries no overlay is copied byte for byte. Re-encoding it
     // would spend a generation of lossy compression for nothing, and the copy is also what keeps
     // whatever EXIF the source carried around for `stamp` to read and preserve.
@@ -467,12 +694,97 @@ pub fn fix(item: &PlannedItem) -> Result<(), FixError> {
     let mut jpeg = Jpeg::new(bytes).map_err(|source| ExifError::NotJpeg { path: item.media.main.path.clone(), source })?;
     let (width, height) = overlay::dimensions(jpeg.as_bytes())?;
     jpeg.stamp(&Stamp { local: item.capture.local(), offset: item.capture.offset(), location: item.location, width, height })?;
+    make_parent(&item.output)?;
+    Ok(jpeg.write(&item.output)?)
+}
 
-    if let Some(parent) = item.output.parent() {
-        fs::create_dir_all(parent).map_err(|source| FixError::Create { path: parent.to_path_buf(), source })?;
+/// The video leg: ffmpeg for pixels when the run is transcoding, pure Rust for metadata always.
+///
+/// **The metadata half never varies.** Whether the frames were re-encoded or copied, the times and
+/// the coordinate go in through [`crate::export::video`], so there is one code path to reason about
+/// and one to test. ffmpeg's job here is pixels and nothing else.
+fn fix_video(item: &PlannedItem, options: &VideoOptions) -> Result<Vec<Notice>, FixError> {
+    let overlay = item.media.overlay.as_ref().map(|file| file.path.as_path());
+    let mut notices = Vec::new();
+
+    let mut video = match options.transcoder() {
+        Ok(ffmpeg) => {
+            make_parent(&item.output)?;
+            let scratch = Scratch::beside(&item.output)?;
+            ffmpeg::transcode(ffmpeg, &item.media.main.path, overlay, scratch.path())?;
+            // Reading the scratch file back is load-bearing, not plumbing: **ffmpeg can exit 0
+            // having written nothing at all** (measured — an argument list it parses but that names
+            // no output file exits 0 with an empty directory behind it). This read is what turns
+            // that into a per-item failure instead of a zero-byte video the manifest records as
+            // done. Do not "optimise" it into a rename.
+            let bytes = fs::read(scratch.path()).map_err(|source| FixError::Read { path: scratch.path().to_path_buf(), source })?;
+            // Blamed on the re-encode, not on the memory: these bytes are ffmpeg's output, and
+            // reporting them as `NotMp4` against the SOURCE path would tell a user their perfectly
+            // good video "needs converting first" when converting it is exactly what broke it.
+            Mp4::new(bytes).map_err(|source| FixError::Transcoded { main: item.media.main.path.clone(), source })?
+        }
+        Err(skip) => {
+            notices.push(Notice::NotTranscoded(skip));
+            // Burning a caption in is a re-encode, so a run that is not transcoding cannot draw
+            // one. Said out loud rather than left for the user to notice a missing caption.
+            if overlay.is_some() {
+                notices.push(Notice::OverlayNotBurned);
+            }
+            Mp4::read(&item.media.main.path)?
+        }
+    };
+
+    // Asked before the stamp so the answer can be reported, rather than inferred from the stamp
+    // having quietly skipped it.
+    if let (Some(atom), Some(_)) = (video.location_atom(), item.location) {
+        notices.push(Notice::LocationShadowed(atom));
     }
-    jpeg.write(&item.output)?;
-    set_modified(&item.output, item.capture.instant()).map_err(|source| FixError::Touch { path: item.output.clone(), source })
+    video.stamp(&VideoStamp { local: item.capture.local(), offset: item.capture.offset(), location: item.location })?;
+    make_parent(&item.output)?;
+    video.write(&item.output)?;
+    Ok(notices)
+}
+
+/// Makes the year and month directories an output lands in. Idempotent, so the video leg calling it
+/// twice — once for the scratch file, once for the real write — costs a stat.
+fn make_parent(output: &Path) -> Result<(), FixError> {
+    match output.parent() {
+        Some(parent) => fs::create_dir_all(parent).map_err(|source| FixError::Create { path: parent.to_path_buf(), source }),
+        None => Ok(()),
+    }
+}
+
+/// The file a transcode writes into, removed whatever happens next.
+///
+/// ffmpeg has to mux into something seekable, so this is the pass's only output that is not one
+/// `fs::write` of a finished buffer. Keeping it under a reserved name beside the real output and
+/// deleting it on drop is what keeps a failed item from leaving a half-made video where a later
+/// run's resume sweep would hash one.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// A scratch path beside `output`, derived from its name so two items in one directory cannot
+    /// pick the same one.
+    fn beside(output: &Path) -> Result<Self, FixError> {
+        let (Some(parent), Some(name)) = (output.parent(), output.file_name()) else {
+            return Err(FixError::Create { path: output.to_path_buf(), source: io::Error::from(io::ErrorKind::InvalidInput) });
+        };
+        let mut scratch = std::ffi::OsString::from(SCRATCH_PREFIX);
+        scratch.push(name);
+        Ok(Self(parent.join(scratch)))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Best-effort: the run has already produced its real answer by here, and a scratch file
+        // that outlives a crash is a hidden file rather than a corrupted memory.
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 /// Sets a file's modification time, which is what a photo browser sorts and groups by.
@@ -494,11 +806,44 @@ fn system_time(instant: DateTime<Utc>) -> SystemTime {
 /// means the run should stop.
 #[derive(Debug)]
 pub enum FixError {
-    Read { path: PathBuf, source: io::Error },
-    Compose { source: OverlayError },
-    Metadata { source: ExifError },
-    Create { path: PathBuf, source: io::Error },
-    Touch { path: PathBuf, source: io::Error },
+    Read {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Compose {
+        source: OverlayError,
+    },
+    Metadata {
+        source: ExifError,
+    },
+    /// The video's container metadata could not be read or written.
+    Container {
+        source: VideoError,
+    },
+    /// ffmpeg could not re-encode this item. Per-item like the rest: a run keeps going and the
+    /// videos ffmpeg is happy with still get transcoded.
+    Transcode {
+        source: FfmpegError,
+    },
+    /// ffmpeg exited cleanly and produced something this build cannot walk.
+    ///
+    /// Split from [`Self::Container`] because the two need opposite advice. A source this build
+    /// cannot read is a memory in the wrong container and the fix is to convert it; **this** is a
+    /// memory that was fine until the re-encode touched it, and the fix is to stop re-encoding.
+    /// Telling the second user the first user's answer sends them to convert a working file.
+    Transcoded {
+        /// The memory, which is what the user recognises — not the scratch file it came out of.
+        main: PathBuf,
+        source: NotMp4,
+    },
+    Create {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Touch {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl From<OverlayError> for FixError {
@@ -513,12 +858,36 @@ impl From<ExifError> for FixError {
     }
 }
 
+impl From<VideoError> for FixError {
+    fn from(source: VideoError) -> Self {
+        Self::Container { source }
+    }
+}
+
+impl From<FfmpegError> for FixError {
+    fn from(source: FfmpegError) -> Self {
+        Self::Transcode { source }
+    }
+}
+
 impl fmt::Display for FixError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read { path, source } => write!(f, "could not read {}: {source}", path.display()),
             Self::Compose { source } => write!(f, "{source}"),
             Self::Metadata { source } => write!(f, "{source}"),
+            Self::Container { source } => write!(f, "{source}"),
+            Self::Transcode { source } => write!(f, "{source}"),
+            // `what()` rather than `{source}`: the full `NotMp4` message ends in the advice that
+            // fits a SOURCE file ("needs converting first"), which is the exact wrong answer here
+            // and would sit inside this sentence contradicting it.
+            Self::Transcoded { main, source } => write!(
+                f,
+                "re-encoding {} produced a video this build cannot read ({}); the memory itself is fine, so this is \
+                 the transcode going wrong rather than the export — re-run with transcoding off to copy it instead",
+                main.display(),
+                source.what()
+            ),
             Self::Create { path, source } => {
                 write!(f, "could not create {}: {source}; check the output directory is writable", path.display())
             }
@@ -533,6 +902,9 @@ impl Error for FixError {
             Self::Read { source, .. } | Self::Create { source, .. } | Self::Touch { source, .. } => Some(source),
             Self::Compose { source } => Some(source),
             Self::Metadata { source } => Some(source),
+            Self::Container { source } => Some(source),
+            Self::Transcode { source } => Some(source),
+            Self::Transcoded { source, .. } => Some(source),
         }
     }
 }
@@ -543,7 +915,7 @@ mod tests {
 
     use chrono::NaiveDate;
 
-    use super::{Capture, TimeSource, output_path};
+    use super::{Capture, Leg, TimeSource, VideoOptions, output_path};
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> chrono::NaiveDateTime {
         NaiveDate::from_ymd_opt(year, month, day).unwrap().and_hms_opt(hour, minute, second).unwrap()
@@ -552,7 +924,9 @@ mod tests {
     #[test]
     fn an_output_path_is_year_month_and_the_local_wall_time() {
         let local = at(2021, 1, 15, 14, 30, 5);
-        assert_eq!(output_path(Path::new("/out"), local, "20210115_143005", 0), Path::new("/out/2021/01/20210115_143005.jpg"));
+        assert_eq!(output_path(Path::new("/out"), local, "20210115_143005", Leg::Image, 0), Path::new("/out/2021/01/20210115_143005.jpg"));
+        // Same tree, same name, and the extension is the only thing the leg moves.
+        assert_eq!(output_path(Path::new("/out"), local, "20210115_143005", Leg::Video, 0), Path::new("/out/2021/01/20210115_143005.mp4"));
     }
 
     #[test]
@@ -560,8 +934,64 @@ mod tests {
         let local = at(2021, 1, 15, 0, 0, 0);
         // The suffix counts from two, so the first file of a colliding set keeps the plain name and
         // nobody has to work out that `_1` means "the second one".
-        assert_eq!(output_path(Path::new("/out"), local, "20210115_000000", 1), Path::new("/out/2021/01/20210115_000000_2.jpg"));
-        assert_eq!(output_path(Path::new("/out"), local, "20210115_000000", 2), Path::new("/out/2021/01/20210115_000000_3.jpg"));
+        let named = |ordinal| output_path(Path::new("/out"), local, "20210115_000000", Leg::Image, ordinal);
+        assert_eq!(named(1), Path::new("/out/2021/01/20210115_000000_2.jpg"));
+        assert_eq!(named(2), Path::new("/out/2021/01/20210115_000000_3.jpg"));
+        assert_eq!(
+            output_path(Path::new("/out"), local, "20210115_000000", Leg::Video, 1),
+            Path::new("/out/2021/01/20210115_000000_2.mp4")
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_ffmpeg_reads_as_degraded_rather_than_as_transcoding() {
+        // The trap a `Default` impl would set: transcoding "on" with nothing to do it. Both halves
+        // have to be true before ffmpeg is invoked, and the run says which one was missing.
+        assert_eq!(VideoOptions { transcode: true, ffmpeg: None }.transcoder(), Err(super::TranscodeSkip::NoFfmpeg));
+        assert_eq!(
+            VideoOptions { transcode: false, ffmpeg: Some("/usr/bin/ffmpeg".into()) }.transcoder(),
+            Err(super::TranscodeSkip::OptedOut)
+        );
+        // Opting out outranks having the tool, so a user's "do not re-encode" is never overridden
+        // by ffmpeg happening to be installed.
+        assert_eq!(VideoOptions { transcode: false, ffmpeg: None }.transcoder(), Err(super::TranscodeSkip::OptedOut));
+        assert_eq!(VideoOptions { transcode: true, ffmpeg: Some("/usr/bin/ffmpeg".into()) }.transcoder(), Ok(Path::new("/usr/bin/ffmpeg")));
+    }
+
+    #[test]
+    fn a_transcode_that_produced_rubbish_blames_the_re_encode_rather_than_the_memory() {
+        // These two failures carry opposite advice and the wrong one sends a user to convert a file
+        // that was already fine. Unreachable today — nothing found an ffmpeg invocation that exits
+        // zero and muxes something unwalkable — so the wording is what a test can hold, and the
+        // wording is the whole point of the variant existing.
+        let source = super::NotMp4::Signature { found: b"\x89PNG".to_vec() };
+        let transcoded = super::FixError::Transcoded { main: "/x/2021-01-15_a-main.mp4".into(), source: source.clone() }.to_string();
+        assert!(transcoded.contains("re-encoding /x/2021-01-15_a-main.mp4 produced"), "{transcoded}");
+        assert!(transcoded.contains("the memory itself is fine"), "{transcoded}");
+        assert!(transcoded.contains("transcoding off"), "{transcoded}");
+
+        // The source-side failure keeps the advice this one must not borrow.
+        let unreadable =
+            super::FixError::Container { source: super::VideoError::NotMp4 { path: "/x/2021-01-15_a-main.mp4".into(), source } }
+                .to_string();
+        assert!(unreadable.contains("needs converting first"), "{unreadable}");
+        assert!(!transcoded.contains("needs converting first"), "the two must not give the same advice: {transcoded}");
+    }
+
+    #[test]
+    fn every_extension_the_export_carries_lands_on_a_leg() {
+        // Ascii-case-insensitive, matching how the rest of the export layer reads an extension.
+        for (extension, leg) in [
+            ("jpg", Some(Leg::Image)),
+            ("JPEG", Some(Leg::Image)),
+            ("png", Some(Leg::Image)),
+            ("mp4", Some(Leg::Video)),
+            ("MP4", Some(Leg::Video)),
+        ] {
+            assert_eq!(Leg::of(extension), leg, "{extension}");
+        }
+        assert_eq!(Leg::of("heic"), None, "an unknown format is deferred rather than guessed at");
+        assert_eq!(Leg::of("mov"), None);
     }
 
     #[test]
