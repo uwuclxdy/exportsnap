@@ -44,7 +44,7 @@ impl Tool {
 ///
 /// `which_global` rather than `which` states the intent that the working dir is never searched,
 /// but for these names it changes nothing and is not load-bearing: `which` consults a cwd only
-/// when the queried name `has_separator()` (`finder.rs:78-99` — a bare name falls to the
+/// when the queried name `has_separator()` (`finder.rs:83` — a bare name falls to the
 /// PATH-only arm), and every [`Tool::command`] is a bare name. Do not write a comment claiming
 /// this guards against an `ffmpeg` sitting in the export dir; it never could, because that lookup
 /// never touches the working dir in the first place.
