@@ -216,9 +216,8 @@ fn with_co64(entries: usize) -> Vec<u8> {
 ///
 /// Every box the metadata write could move precedes `moov`, so a splice inside `moov` must leave
 /// each of them byte-identical: the `trun` sample offsets are relative to the `moof`, and the
-/// `tfra` entry names the `moof` by an absolute offset (24, its position in this layout) that must
-/// stay true. The box bodies are shape-only — spec-plausible, and nothing in this crate or in
-/// `mp4ameta` reads them.
+/// `tfra` entry names the `moof` by an absolute offset (24, its position in this layout). The box
+/// bodies are shape-only — spec-plausible, and nothing in this crate or in `mp4ameta` reads them.
 fn fragmented() -> Vec<u8> {
     let trex = wrap(b"trex", &[0; 24]);
     let mvex = wrap(b"mvex", &trex);
@@ -743,8 +742,10 @@ fn a_fragmented_file_stamps_cleanly_and_everything_before_moov_stays_put() {
     // The header patch landed, so the stamp ran at all on a fragmented file.
     assert_eq!(Mp4::new(out.to_vec()).unwrap().embedded_time().map(|at| at.to_rfc3339()), Some("2021-01-15T13:30:05+00:00".to_owned()));
 
-    // The splice grew moov, and nothing that precedes it moved a byte: the trun offsets are
-    // relative to the moof, and the tfra's absolute moof pointer stays true.
+    // The splice grew moov, and the boxes before it are byte-identical — which pins their CONTENT,
+    // not their position: box_bytes finds by fourcc, so a rewrite that relocated mfra (staling the
+    // tfra's absolute moof pointer at offset 24) would pass. Nothing in the pipeline reorders
+    // top-level boxes and nothing reads tfra, so content identity is the load-bearing half.
     let growth = moov_size(out) - moov_size(&before);
     assert!(growth > 0, "the stamp must grow moov by the spliced tag");
     for kind in [b"moof", b"mdat", b"mfra"] {
