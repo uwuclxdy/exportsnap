@@ -90,6 +90,33 @@ fn write_overlay_sized(dir: &Path, day: &str, seed: u32, width: u32, height: u32
     MemoryFile::parse(path).unwrap()
 }
 
+/// A 64x48 WebP whose left half is opaque red and whose right half is fully transparent, encoded
+/// once by this crate's own `webp` encoder and embedded so the fixture itself needs no encoder.
+///
+/// 9 of the 162 overlays in the observed export are WebP payloads in `.png`-named files (measured
+/// 2026-08-04, header bytes only), and this is written under a `.png` name exactly like them.
+/// Pre-encoded bytes are the point rather than a convenience: with the `webp` Cargo feature
+/// dropped, image's encoder arm is gated away too, so a fixture that encoded at build time would
+/// panic in the fixture instead of failing at `overlay::decode` with `Unsupported(Exact(WebP))`
+/// — the exact failure the test exists to pin, and the one the feature-off mutation must produce.
+const OVERLAY_WEBP_BYTES: &[u8] = &[
+    0x52, 0x49, 0x46, 0x46, 0x9a, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c, 0x8d, 0x00, 0x00, 0x00, 0x2f, 0x3f,
+    0xc0, 0x0b, 0x10, 0xcd, 0x55, 0x20, 0x22, 0x02, 0x1e, 0x88, 0x04, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x80, 0x79, 0x20, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe7, 0xdf, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xe0, 0xf0, 0x40, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xce, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x20, 0x0d, 0x55, 0x71, 0xf7, 0x00,
+];
+
+/// [`write_overlay_webp`]'s fixture under the `.png` name a real WebP-carrying overlay has.
+fn write_overlay_webp(dir: &Path, day: &str, seed: u32) -> MemoryFile {
+    let path = memories_dir(dir).join(format!("{day}_{}-overlay.png", uuid(seed)));
+    fs::write(&path, OVERLAY_WEBP_BYTES).unwrap();
+    MemoryFile::parse(path).unwrap()
+}
+
 /// A main file of an arbitrary format under an arbitrary name, for the paths that have to refuse
 /// or transcode one.
 fn write_raw(dir: &Path, name: &str, bytes: &[u8]) -> MemoryFile {
@@ -537,6 +564,96 @@ fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
     assert!(composite.get_pixel(700, MAIN_H - 60).0[0] > 200, "the scaled overlay's opaque half reached the main's bottom rows");
     assert!(composite.get_pixel(1400, MAIN_H - 60).0[0] < 60, "the scaled transparent half still leaves the main showing, bottom rows");
     assert!(composite.get_pixel(1400, 100).0[0] < 60, "the scaled transparent half still leaves the main showing, a row both sizes reach");
+}
+
+#[test]
+fn an_overlay_whose_aspect_mismatches_the_main_is_scaled_to_fit_centred_rather_than_stretched() {
+    // The shape of the observed export's ninth WebP pair — a portrait 827x1548 overlay over a
+    // video whose DECODED frame is 656x1232 portrait (tkhd says 1232x656, a 90° display-rotation
+    // matrix turns it; see docs/domain-knowledge.md). There is no fill answer for that pair:
+    // scaling the overlay TO the frame would distort the caption. Contain scales it within the
+    // frame instead, preserving its aspect and centring it — the user's pick on 2026-08-04
+    // (agent call contain-vs-skip, recorded in docs/design.md) — and the caption is never
+    // dropped. No observed pair triggers this: all 161 real pairs are same-aspect, where contain
+    // and fill are pixel-identical.
+    const MAIN_W: u32 = 1232;
+    const MAIN_H: u32 = 656;
+    const OVERLAY_W: u32 = 827;
+    const OVERLAY_H: u32 = 1548;
+
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+    let files = vec![
+        write_main_sized(dir.path(), "2021-01-15", 1, MAIN_W, MAIN_H),
+        write_overlay_sized(dir.path(), "2021-01-15", 1, OVERLAY_W, OVERLAY_H),
+    ];
+    let reconciliation = reconciled(&memories, files);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let out = dir.path().join("out");
+    let plan = Plan::build(&memories, &reconciliation, &out);
+    assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
+    assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
+
+    let composite = image::open(&plan.items[0].output).unwrap().to_rgb8();
+    assert_eq!(composite.dimensions(), (MAIN_W, MAIN_H), "the composite keeps the MAIN's size, not the overlay's");
+
+    // Contain scales by min(MAIN_W/OVERLAY_W, MAIN_H/OVERLAY_H) = 656/1548, so the drawn overlay
+    // is height-constrained: it spans the full frame height, and the middle row crosses its
+    // opaque left half (the fixture's red/transparent split). The main fixture's own red channel
+    // never passes 30, so a >200 red channel is unambiguously overlay.
+    let row = MAIN_H / 2;
+    let red: Vec<u32> = (0..MAIN_W).filter(|x| composite.get_pixel(*x, row).0[0] > 200).collect();
+    let left = *red.first().unwrap();
+    let right = *red.last().unwrap();
+    assert!(
+        left > 100,
+        "the opaque half must sit clear of the left edge (it starts at {left}): an unscaled or stretched overlay would reach it"
+    );
+    assert!(
+        composite.get_pixel(MAIN_W - 1, row).0[0] < 60,
+        "the frame's right edge must stay main: the drawn overlay ends well short of it"
+    );
+    // The opaque half is about half the drawn overlay, so its full width is recoverable and the
+    // drawn aspect is preserved: ~827/1548, nowhere near the 1232/656 a stretch would produce.
+    let drawn_w = 2 * (right - left + 1);
+    let drawn_aspect = f64::from(drawn_w) / f64::from(MAIN_H);
+    let expected = f64::from(OVERLAY_W) / f64::from(OVERLAY_H);
+    assert!(
+        (drawn_aspect - expected).abs() < 0.02,
+        "drawn aspect {drawn_aspect:.3} vs the overlay's {expected:.3} — a stretch would give {:.3}",
+        1232.0 / 656.0
+    );
+    // And it is centred: the transparent half has the same width on both sides of the frame.
+    let centred = i64::from(MAIN_W - drawn_w) / 2;
+    assert!((i64::from(left) - centred).abs() <= 3, "the opaque half starts at {left}, centred placement would start it at {centred}");
+    // Height-constrained, so the drawn overlay reaches the main's bottom rows as well.
+    assert!(
+        composite.get_pixel(left + (right - left) / 2, MAIN_H - 60).0[0] > 200,
+        "the drawn overlay's opaque half reached the main's bottom rows"
+    );
+}
+
+#[test]
+fn an_overlay_that_is_webp_bytes_under_a_png_name_composites_through_the_real_pairing() {
+    // 9 of the 162 overlays in the observed export carry WebP payloads in `.png`-named files
+    // (measured 2026-08-04, header bytes only). The decoder guesses from magic bytes rather than
+    // the extension, so these must pair and composite exactly like a real png — and with the
+    // `webp` feature dropped from Cargo.toml this test reds at `overlay::decode` with
+    // `Unsupported(Exact(WebP))` rather than passing by accident (mutation-verified).
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+    let files = vec![write_main(dir.path(), "2021-01-15", 1), write_overlay_webp(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let out = dir.path().join("out");
+    let plan = Plan::build(&memories, &reconciliation, &out);
+    assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
+    assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
+
+    let composite = image::open(&plan.items[0].output).unwrap().to_rgb8();
+    assert_eq!(composite.dimensions(), (WIDTH, HEIGHT));
+    assert!(composite.get_pixel(2, 2).0[0] > 200, "the webp overlay's opaque half reached the composite");
+    assert!(composite.get_pixel(WIDTH - 2, 2).0[0] < 60, "the webp overlay's transparent half left the main showing");
 }
 
 #[test]

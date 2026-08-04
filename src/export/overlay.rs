@@ -7,8 +7,9 @@
 //!
 //! Everything here produces **JPEG bytes**, whatever went in. That is not an aesthetic choice: it
 //! is what keeps a PNG out of `little_exif`, where RUSTSEC-2026-0194 lives (see
-//! [`crate::export::exif`]). The 162 `.png` files in the observed export are all overlays, and an
-//! overlay is a layer in a composite here, never a file that gets stamped.
+//! [`crate::export::exif`]). The 162 overlay files in the observed export all carry `.png` names,
+//! though 9 of them hold WebP payloads under that name (measured 2026-08-04); an overlay is a
+//! layer in a composite here, never a file that gets stamped.
 
 use std::error::Error;
 use std::fmt;
@@ -32,10 +33,15 @@ const JPEG_QUALITY: u8 = 95;
 /// `overlay` is `None` for a main that needs re-encoding but has nothing to composite — a main
 /// this build can decode but that is not already a JPEG.
 ///
-/// An overlay whose dimensions differ from the main's is scaled to fit rather than refused: both
-/// are full-frame captures of the same moment, and an overlay one pixel off would otherwise cost
-/// the caption entirely. Alpha is composited, so the transparent parts of the overlay leave the
-/// main showing through.
+/// An overlay whose dimensions differ from the main's is scaled to fit **within** the frame,
+/// preserving its own aspect ratio, and centred — contain rather than fill. All 161 observed
+/// pairs are same-aspect, and on a pair whose aspect matches exactly — every modal shape observed
+/// — the scale rounds to the frame's own dimensions, so the composite is the fill composite; the
+/// 10 at 1556x3264/1080x2265 differ in aspect by 0.022%, where contain leaves one unpainted row
+/// rather than a sub-pixel stretch. Only a genuinely mismatched pair shows a real difference, and
+/// there the caption is kept, never stretched or dropped (user pick 2026-08-04, agent call
+/// contain-vs-skip). Alpha is composited, so the transparent parts of the overlay leave the main
+/// showing through.
 ///
 /// # Errors
 ///
@@ -49,9 +55,21 @@ pub fn compose(main: &Path, overlay: Option<&Path>) -> Result<Vec<u8>, OverlayEr
         let drawn = if drawn.dimensions() == base.dimensions() {
             drawn
         } else {
-            imageops::resize(&drawn, base.width(), base.height(), FilterType::Lanczos3)
+            // Contain: scale to fit within the frame, preserving the overlay's aspect, then centre
+            // it. On a same-aspect pair the scale caps both dimensions exactly on the main's (the
+            // rounding error of one f64 divide-and-multiply is far under half a pixel), so those
+            // pairs composite identically to the fill resize this replaced — the same-aspect
+            // fixture must stay green. The `max(1.0)` keeps an extreme overlay aspect from
+            // rounding a scaled dimension to zero.
+            let scale = (base.width() as f64 / drawn.width() as f64).min(base.height() as f64 / drawn.height() as f64);
+            let scaled_w = (drawn.width() as f64 * scale).round().max(1.0) as u32;
+            let scaled_h = (drawn.height() as f64 * scale).round().max(1.0) as u32;
+            imageops::resize(&drawn, scaled_w, scaled_h, FilterType::Lanczos3)
         };
-        imageops::overlay(&mut base, &drawn, 0, 0);
+        // The scaled layer fits within the base by construction, so these cannot underflow.
+        let x = i64::from(base.width() - drawn.width()) / 2;
+        let y = i64::from(base.height() - drawn.height()) / 2;
+        imageops::overlay(&mut base, &drawn, x, y);
     }
 
     // JPEG carries no alpha channel, so the composite is flattened before encoding. Anything the
@@ -109,8 +127,8 @@ impl fmt::Display for OverlayError {
             }
             Self::Decode { path, source } => write!(
                 f,
-                "could not decode {}: {source}; this build reads jpeg and png, so a memory in another format needs \
-                 ffmpeg or another tool first",
+                "could not decode {}: {source}; this build reads jpeg, png and webp, so a memory in another format \
+                 needs ffmpeg or another tool first",
                 path.display()
             ),
             Self::Encode { source } => write!(f, "could not encode the composite: {source}"),

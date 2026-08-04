@@ -24,7 +24,11 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 directories = "6.0.0"
 fs4 = "1.1.0"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+# `webp`: 9 of the 162 overlays in the observed export carry WebP payloads under a `.png` name
+# (measured 2026-08-04, header bytes only; see docs/design.md's local-fix section), and the
+# decoder guesses from magic bytes rather than the extension, so the feature is what lets the
+# image leg composite those pairs instead of failing them at decode.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 little_exif = "0.6.23"
 mp4ameta = "0.13.0"
 ratatui = "0.30.2"

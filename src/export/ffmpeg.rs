@@ -25,6 +25,13 @@
 //! the wider install base. Upgrade path is a straight swap once the floor moves past 7.1. Nothing
 //! silently degrades in the meantime — a filter ffmpeg cannot build is a per-item failure carrying
 //! ffmpeg's own message.
+//!
+//! The graph also contains and centres the caption. `scale2ref`'s own
+//! `force_original_aspect_ratio` option is **ignored on this build** (measured on n8.1.2: all
+//! three modes produce the fill size), so the contain math is done in the size expressions with
+//! the primary-input constants `main_w`/`main_h` — added in FFmpeg 3.4 (2017), far below the 6.x
+//! floor — and `min()`, which the expression evaluator has always had. The `\,` before `ih` is
+//! filtergraph escaping: a bare comma would end the filter description.
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -107,15 +114,22 @@ fn argv(main: &Path, overlay: Option<&Path>, output: &Path) -> Vec<OsString> {
 
     match overlay {
         Some(overlay) => {
-            // The caption layer is scaled to the frame rather than refused when the two disagree,
-            // matching what the image leg does with the same pair of files. `scale2ref` reads the
-            // size off the decoded frame, so a rotated video stays right where a dimension copied
-            // out of the container's own header would not.
+            // The caption layer is scaled to fit WITHIN the frame and centred rather than
+            // stretched or refused when the two disagree, matching the image leg's contain
+            // policy on the same pair of files. `scale2ref` reads the size off the decoded
+            // frame, so a rotated video stays right where a dimension copied out of the
+            // container's own header would not. The contain math lives in the size
+            // expressions — `main_w`/`main_h` are the caption's own dimensions, `iw`/`ih` the
+            // frame's, and the min of the two ratios scales it to fit — because scale2ref's
+            // own `force_original_aspect_ratio` is ignored on this ffmpeg build (measured,
+            // see the module doc). No observed pair is aspect-mismatched, so the centring
+            // only ever shows on a pair a future export adds.
             argv.push("-i".into());
             argv.push(overlay.into());
             argv.extend(flags(&[
                 "-filter_complex",
-                "[1:v][0:v]scale2ref=w=iw:h=ih[caption][frame];[frame][caption]overlay=0:0:format=auto[burned]",
+                "[1:v][0:v]scale2ref=w=main_w*min(iw/main_w\\,ih/main_h):h=main_h*min(iw/main_w\\,ih/main_h)[caption][frame];\
+                 [frame][caption]overlay=(W-w)/2:(H-h)/2:format=auto[burned]",
                 "-map",
                 "[burned]",
             ]));
@@ -218,9 +232,16 @@ mod tests {
         let inputs: Vec<&String> = args.iter().enumerate().filter(|(at, _)| *at > 0 && args[at - 1] == "-i").map(|(_, arg)| arg).collect();
         assert_eq!(inputs, ["/in/main.mp4", "/in/over.png"], "{args:?}");
         // Order is load-bearing: the filter graph names the main `[0:v]` and the overlay `[1:v]`,
-        // so swapping the two inputs would composite the video onto the caption.
+        // so swapping the two inputs would composite the video onto the caption. The rest of the
+        // graph is pinned whole because it is the contain contract: scale the caption to fit
+        // within the frame keeping its aspect (the min-of-ratios expression, which is what
+        // works where `force_original_aspect_ratio` does not), then centre it over the frame.
         let graph = args.iter().find(|arg| arg.contains("scale2ref")).expect("no filter graph");
-        assert!(graph.starts_with("[1:v][0:v]scale2ref"), "{graph}");
+        assert_eq!(
+            graph,
+            "[1:v][0:v]scale2ref=w=main_w*min(iw/main_w\\,ih/main_h):h=main_h*min(iw/main_w\\,ih/main_h)[caption][frame];\
+             [frame][caption]overlay=(W-w)/2:(H-h)/2:format=auto[burned]"
+        );
     }
 
     /// Whether `flag` is followed immediately by `value`.
