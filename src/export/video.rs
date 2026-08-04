@@ -1103,6 +1103,38 @@ mod tests {
     }
 
     #[test]
+    fn version_1_track_and_media_headers_keep_both_times_through_the_stamp() {
+        let mut video = Mp4::new(minimal(1, 0)).unwrap();
+        // Read off the unpatched buffer, like the v0 read-back test does, so the offsets are the
+        // ones the patch was aimed at rather than ones re-derived from its own output.
+        let found = layout(video.as_bytes()).unwrap();
+        // The count is asserted rather than relied on, because the walker's own record is what a
+        // test that only iterated it would be proving: drop a fourcc and "every field" shrinks
+        // with the walker, which is exactly the silent failure this test exists to catch.
+        assert_eq!(found.times.len(), 3, "mvhd, tkhd and mdhd, in file order");
+        let (track, media) = (found.times[1], found.times[2]);
+
+        video.stamp(&stamp(at(2021, 1, 15, 13, 30, 5), None)).unwrap();
+        let raw = 1_610_717_405 + MP4_EPOCH_OFFSET;
+        for field in [track, media] {
+            assert_eq!(read_time(video.as_bytes(), field), Some(raw), "{field:?}");
+            // Modification time sits immediately after creation and carries the same value, at
+            // the 64-bit width this version gives both fields.
+            let modification = HeaderTime { at: field.at + 8, version: field.version };
+            assert_eq!(read_time(video.as_bytes(), modification), Some(raw));
+        }
+
+        // A value past 2^32 cannot round-trip through a version 0 field, so this leg pins the
+        // width handling where a date that fits both versions cannot tell the two apart.
+        let future = at(2400, 1, 1, 0, 0, 0).and_utc();
+        video.stamp(&stamp(future.naive_utc(), None)).unwrap();
+        let future_raw = u64::try_from(future.timestamp() + i64::try_from(MP4_EPOCH_OFFSET).unwrap()).unwrap();
+        for field in [track, media] {
+            assert_eq!(read_time(video.as_bytes(), field), Some(future_raw), "{field:?}");
+        }
+    }
+
+    #[test]
     fn the_content_date_states_an_offset_only_when_the_run_knows_one() {
         let local = at(2021, 1, 15, 14, 30, 5);
         let paris = FixedOffset::east_opt(3600).unwrap();
