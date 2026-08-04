@@ -34,6 +34,33 @@ MARKERS = (
     "ZZQQSIGNEDBLOBMARKER1234567890",
 )
 
+# The union of two real exports' json/ schema file sets (2026-07-26 and
+# 2026-08-04), pinned by test_every_real_export_schema_filename_survives_verbatim
+# and reused by the task-21 vocabulary-gap tests: every word here MUST already
+# be in NAME_VOCABULARY, or both tests fail for the same underlying reason.
+REAL_SCHEMA_FILENAMES = (
+    "account.json",
+    "account_history.json",
+    "bitmoji.json",
+    "chat_history.json",
+    "custom_sticker.json",
+    "email_campaign_history.json",
+    "feature_emails.json",
+    "friends.json",
+    "in_app_reports.json",
+    "location_history.json",
+    "memories_history.json",
+    "ranking.json",
+    "snap_ads.json",
+    "snap_history.json",
+    "snap_pro.json",
+    "snapchat_ai.json",
+    "snapchat_plus.json",
+    "story_history.json",
+    "terms_history.json",
+    "user_profile.json",
+)
+
 
 def shape(node):
     """Keys, nesting, array length and leaf TYPE, with every value dropped."""
@@ -78,6 +105,17 @@ class RedactorCase(unittest.TestCase):
 
     def write_raw(self, name, text):
         (self.src / "json" / name).write_text(text, encoding="utf-8")
+
+    def write_json_outside_schema(self, name, payload):
+        """Like write_json, but at SRC root, not under json/. Task 21's
+        vocabulary-gap warning is authorized to print a raw word for anything
+        inside json/ (guaranteed Snapchat schema, never user-derived), so a
+        marker planted AS a json/ filename would legitimately trip it. Use
+        this for a fixture exercising the generic mask_name/advisory
+        mechanism with a marker word standing in for real user data."""
+        (self.src / name).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     def write_media(self, dirname, names):
         target = self.src / dirname
@@ -307,8 +345,19 @@ class TestFormatPreserving(RedactorCase):
         )
 
     def test_url_vocabulary_kept_is_enumerated_in_the_report(self):
+        # Full set, not a subset check: it's deterministic, so assertEqual
+        # catches an unrelated regression too, not just "the URL words are
+        # still there". redact_one's fixture is always json/data.json, and
+        # the default chat_media/memories listing dirs are always looked up,
+        # so name masking (task 21) also contributes "data"/"json" (the
+        # filename) and "chat"/"media"/"memories" (the missing-dir note) --
+        # see test_name_masking_records_into_vocabulary_used for the name
+        # path pinned in isolation, with no value contribution at all.
         self.redact_one("https://app.snapchat.com/a?uid=1")
-        self.assertEqual(self.report()["vocabulary_used"], ["app.snapchat.com", "uid"])
+        self.assertEqual(
+            self.report()["vocabulary_used"],
+            ["app.snapchat.com", "chat", "data", "json", "media", "memories", "uid"],
+        )
 
     def test_an_unknown_url_host_is_synthesized_not_kept(self):
         out = self.redact_one("https://zzqqusernamemarker.example.test/a?uid=1")
@@ -493,33 +542,21 @@ class TestListings(RedactorCase):
         # which also makes any --mask-keys-under rule against them ambiguous. The
         # union of two real exports' schema file sets, one older (no
         # in_app_reports.json) and one newer (no memories_history.json).
-        names = [
-            "account.json",
-            "account_history.json",
-            "bitmoji.json",
-            "chat_history.json",
-            "custom_sticker.json",
-            "email_campaign_history.json",
-            "feature_emails.json",
-            "friends.json",
-            "in_app_reports.json",
-            "location_history.json",
-            "memories_history.json",
-            "ranking.json",
-            "snap_ads.json",
-            "snap_history.json",
-            "snap_pro.json",
-            "snapchat_ai.json",
-            "snapchat_plus.json",
-            "story_history.json",
-            "terms_history.json",
-            "user_profile.json",
-        ]
-        for name in names:
+        for name in REAL_SCHEMA_FILENAMES:
             self.write_json(name, {"Field": "value"})
         self.run_tool()
         mirrored = sorted(path.name for path in (self.dst / "json").glob("*.json"))
-        self.assertEqual(mirrored, sorted(names))
+        self.assertEqual(mirrored, sorted(REAL_SCHEMA_FILENAMES))
+
+    def test_the_real_schema_union_never_trips_the_vocabulary_gap_warning(self):
+        # Negative control for task 21's json/ vocabulary-gap check: the same
+        # 20 real names above must all round-trip through mask_name unchanged,
+        # so the new stderr warning must stay silent for every one of them.
+        for name in REAL_SCHEMA_FILENAMES:
+            self.write_json(name, {"Field": "value"})
+        self.run_tool()
+        self.assertNotIn("warning:", self.stderr)
+        self.assertEqual(self.stderr, "")
 
     def test_non_ascii_filename_chars_are_payload_not_separators(self):
         self.write_json("data.json", {"a": 1})
@@ -941,17 +978,162 @@ class TestOutputChannels(RedactorCase):
         )
 
     def test_the_advisory_names_neither_an_ancestor_key_nor_a_source_filename(self):
+        # Fixture stays under json/ (task 21 review, F6): Half A's own
+        # channel is what's now exercised here, not sidestepped by moving
+        # the file. The marker is <= MAX_SYNTH_WORD (10 chars) ON PURPOSE --
+        # that length is what selects the WORD branch below rather than the
+        # count branch (see the sibling test right after this one for the
+        # over-cap case, and F15 in task 21's review for why both need their
+        # own pin: a marker that happens to exceed the cap would silently
+        # swap which property this test proves, same green tick).
+        self.write_json(
+            "chat_with_zzqqmarker.json",
+            {"zzqqancestormarker": {f"zzqqu{index}": [index] for index in range(5)}},
+        )
+        self.run_tool()
+        for marker in ("zzqqmarker", "zzqqancestormarker", "zzqqu0"):
+            self.assertNotIn(marker, self.stdout)
+        for marker in ("zzqqancestormarker", "zzqqu0"):
+            self.assertNotIn(marker, self.stderr)
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: json/ filename(s) held word(s) outside "
+                "NAME_VOCABULARY: zzqqmarker. Snapchat's schema filenames are "
+                f"fixed, so add them to NAME_VOCABULARY in {rx.TOOL}."
+            ],
+        )
+        self.assertIn("--mask-keys-under 'chat_with_xxxxxxxxxx.json:/*'", self.stdout)
+
+    def test_an_over_cap_marker_filename_takes_the_overcap_branch_not_the_word_branch(self):
+        # The other half of the length-selects-the-branch split above: a
+        # marker OVER MAX_SYNTH_WORD (14 chars) must take the overcap count
+        # branch, never the word branch, and must not appear ANYWHERE --
+        # that's the cap actually doing privacy work, not just a shorter
+        # code path. D4 (task 21 review): this is its OWN bucket, not the
+        # "NAME_VOCABULARY cannot fix these" one -- a word DOES exist here
+        # and adding it WOULD fix the rename (tokenize_name's word -> literal
+        # reclassification has no length limit); pinning the wrong message
+        # would silently reintroduce D4's false remedy claim.
         self.write_json(
             "chat_with_zzqqfilemarker.json",
             {"zzqqancestormarker": {f"zzqqu{index}": [index] for index in range(5)}},
         )
         self.run_tool()
-        printed = self.stdout + self.stderr
         for marker in ("zzqqfilemarker", "zzqqancestormarker", "zzqqu0"):
-            self.assertNotIn(marker, printed)
-        self.assertIn("--mask-keys-under 'chat_with_xxxxxxxxxxxx.json:/*'", self.stdout)
+            self.assertNotIn(marker, self.stdout)
+            self.assertNotIn(marker, self.stderr)
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: 1 json/ filename(s) held a word outside "
+                f"NAME_VOCABULARY longer than {rx.MAX_SYNTH_WORD} characters. Adding "
+                "that word to NAME_VOCABULARY would remove it as a cause of the "
+                "mismatch -- it is withheld here only because this channel will not "
+                f"print a run longer than {rx.MAX_SYNTH_WORD} characters, not because "
+                "of anything about json/ subdirectories. See the rename note above "
+                "for which mirrored name(s), then find the word in your own export."
+            ],
+        )
+
+    def test_a_non_ascii_only_gap_fires_the_count_warning_not_the_word_warning(self):
+        # vocabulary_gap_other's non-ascii branch (task 21 review F2/F12): a
+        # mismatch with no ascii word token at all must still warn -- staying
+        # silent here is the exact blind spot that made a real Japanese name
+        # under json/ invisible before this fix -- but the raw characters
+        # must never be the thing that proves it, since json/ being schema is
+        # an ASSUMPTION, not something this tool verifies.
+        self.write_json("chat_with_山田太郎.json", {"a": 1})
+        self.run_tool()
+        self.assertNotIn("word(s) outside NAME_VOCABULARY", self.stderr)
+        self.assertNotIn("山田太郎", self.stderr)
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: 1 json/ filename(s) mismatched mask_name with no "
+                "word token to name (a digit run, a uuid, a date, non-ascii text, or a "
+                f"run over {rx.MAX_SYNTH_WORD} characters) -- NAME_VOCABULARY cannot fix "
+                "these; see the rename note above for which mirrored name(s)."
+            ],
+        )
+
+    def test_a_digit_run_only_gap_fires_the_count_warning_and_still_exits_0(self):
+        # vocabulary_gap_other's digit-run branch (task 21 review F2/F12): a
+        # numbered-variant name (the OS-dedup shape docs/design.md records
+        # for "memories (1)/memories/") mismatches mask_name on a pure digit
+        # run, no word token anywhere -- must still warn, and must still be
+        # a warning, not an abort (the binding decision: exit stays 0).
+        self.write_json("account (1).json", {"a": 1})
+        self.run_tool()  # default expect=0: still a warning, never an abort
+        self.assertNotIn("word(s) outside NAME_VOCABULARY", self.stderr)
+        self.assertIn("1 json/ filename(s) mismatched mask_name", self.stderr)
+
+    def test_a_mixed_gap_names_the_word_and_separately_counts_the_rest(self):
+        # One filename, one mismatch of each kind: vocabulary_gap_words and
+        # vocabulary_gap_other are independent, not either/or, so both
+        # warnings must fire from a single file, the word branch naming
+        # ONLY "widget" and the count branch naming nothing about the "(1)".
+        self.write_json("widget (1).json", {"a": 1})
+        self.run_tool()
+        self.assertIn("word(s) outside NAME_VOCABULARY: widget", self.stderr)
+        self.assertIn("1 json/ filename(s) mismatched mask_name", self.stderr)
+
+    def test_the_count_warning_counts_files_not_tokens_within_one_file(self):
+        # F10 (task 21 review): a single filename can hold more than one
+        # non-word mismatch (one non-ascii run AND one digit run here), and
+        # the warning counts FILENAMES to match the rename note above it, not
+        # a running sum of tokens -- one file must never read as "2 filename(s)".
+        self.write_json("日本語_名前_2024.json", {"a": 1})
+        self.run_tool()
+        rename_note_lines = [
+            line
+            for line in self.stdout.splitlines()
+            if line.strip().startswith("json/") and ":" not in line
+        ]
+        self.assertEqual(len(rename_note_lines), 1)
+        self.assertIn("1 json/ filename(s) mismatched mask_name", self.stderr)
+
+    def test_vocabulary_gap_words_never_emits_outside_its_declared_alphabet(self):
+        # F5 (task 21 review): the docstring claims every element matches
+        # ^[a-z][a-z0-9]*$ "by CONSTRUCTION". Prose isn't construction until
+        # something asserts it. Literal hostile bytes, not a description of
+        # them -- an ANSI color escape, a path-traversal segment, CJK text,
+        # and an over-cap run, all in one stem, plus a .json tail to prove
+        # split_known_ext doesn't leak the extension into a word either.
+        hostile = "x\x1b[31m_../_山田_" + "y" * 20 + "_widget.json"
+        words = rx.vocabulary_gap_words(hostile)
+        self.assertTrue(words)  # the fixture must actually produce something to check
+        for word in words:
+            self.assertRegex(word, r"^[a-z][a-z0-9]*$")
+        self.assertNotIn("\x1b", "".join(words))
+        self.assertNotIn("山田", "".join(words))
+        self.assertNotIn("y" * 20, "".join(words))
+
+    def test_show_source_names_does_not_change_the_vocabulary_gap_warning(self):
+        # F13 (task 21 review): the docstring now says this channel prints
+        # "unconditionally, ignoring --show-source-names". That's a claim
+        # about a flag this tool already has for a DIFFERENT purpose (the
+        # three abort messages), and Half A deliberately does not consult
+        # it -- pinned here so a later change to either side is a decision,
+        # not a silent side effect of touching one and not the other.
+        self.write_json("foo_widget.json", {"a": 1})
+        self.run_tool()
+        without_flag = self.stderr
+        self.dst = self.root / "again"
+        self.run_tool("--show-source-names")
+        self.assertEqual(without_flag, self.stderr)
 
     def test_the_pasteable_rule_actually_matches_on_the_next_run(self):
+        # Fixture stays under json/ (task 21 review, F6): moved out once,
+        # but nothing in Half A forced it, and at SRC root rel == basename,
+        # which erases the exact basename-vs-rel distinction this test's
+        # name is about. Siblings elsewhere still cover basename matching
+        # for a nested file; this one is back to being one of them. Marker
+        # left at its original length (14 chars, review F15/knock-on): this
+        # test never touches the gap warning, so it has no reason to carry
+        # the short marker that test needs -- see
+        # test_the_advisory_names_neither_an_ancestor_key_nor_a_source_filename
+        # for the branch split the length actually matters to.
         self.write_json(
             "chat_with_zzqqfilemarker.json",
             {"zzqqancestormarker": {f"zzqqu{index}": [index] for index in range(5)}},
@@ -1021,6 +1203,209 @@ class TestOutputChannels(RedactorCase):
         self.run_tool()
         self.assertIn("json/xxxxx_history.json", self.stdout)
         self.assertIn("NAME_VOCABULARY", self.stdout)
+
+    def test_a_vocabulary_gap_under_json_warns_on_stderr_naming_the_word(self):
+        # Positive control for task 21: a filename under json/ that mask_name
+        # would rewrite is a vocabulary GAP, not just a rename -- reported on
+        # its own stderr line naming the word(s), separate from the existing
+        # stdout rename note above. Exit stays 0 (run_tool's default expect).
+        self.write_json("foo_widget.json", {"a": 1})
+        self.run_tool()
+        self.assertIn("foo", self.stderr)
+        self.assertIn("widget", self.stderr)
+        self.assertIn("NAME_VOCABULARY", self.stderr)
+        # Names the words, never the filename itself (chat_media/memories
+        # names are user-derived and must never reach this channel; the
+        # scoping to json/ is what makes printing the word safe at all).
+        self.assertNotIn("foo_widget", self.stderr)
+
+    def test_a_vocabulary_gap_outside_json_is_never_warned_about(self):
+        # Negative control for the json/-only scope. A *.json file OUTSIDE
+        # json/ mismatches mask_name exactly like one inside it would, so
+        # this specifically exercises the directory check (not just "no
+        # *.json files were touched"): only json/ is guaranteed schema-only,
+        # so a tree-wide version of the warning would print words the tool
+        # cannot know are safe -- exactly the false-positive risk decision 21
+        # calls out for chat_media/memories.
+        self.write_json("data.json", {"a": 1})
+        self.write_json_outside_schema("elsewhere_widget.json", {})
+        self.write_media("chat_media", ["zzqqusernamemarker-media.jpg"])
+        self.run_tool()
+        self.assertNotIn("widget", self.stderr)
+        self.assertNotIn("zzqqusernamemarker", self.stderr)
+        self.assertNotIn("warning:", self.stderr)
+
+    def test_a_gap_in_an_intermediate_json_segment_is_not_missed(self):
+        # A mismatch under json/ can come from a nested DIRECTORY segment,
+        # not just the basename. vocabulary_gap_words used to be called on
+        # the basename alone (source_rel.rpartition("/")[2]), so a schema
+        # filename that was itself all-vocabulary (account.json) sitting
+        # under an unrecognized directory produced a rename with NO warning
+        # at all -- the detector inspected a different segment than the one
+        # that actually mismatched. Still true after the user's depth ruling
+        # (below): DETECTION walks every segment regardless of depth, only
+        # NAMING is depth-gated -- so this stays a count, not a silent drop,
+        # and "somedir" itself must never appear (see the depth-boundary
+        # tests for the naming half of this).
+        (self.src / "json" / "somedir").mkdir()
+        (self.src / "json" / "somedir" / "account.json").write_text("{}", encoding="utf-8")
+        self.run_tool()
+        self.assertNotIn("somedir", self.stderr)
+        self.assertIn("1 json/ filename(s) mismatched mask_name", self.stderr)
+
+    def test_a_flat_gap_names_its_word(self):
+        # Depth-boundary pair (user ruling on the --show-source-names
+        # question): the ONLY thing that may vary between this test and its
+        # nested sibling right after it is PATH DEPTH -- same word, same
+        # length, same character class, so a future change to word shape or
+        # length can't be mistaken for a depth-boundary regression or vice
+        # versa. json/widget.json is depth 1 (flat): the basename is the
+        # only segment that could have mismatched, so it's nameable.
+        self.write_json("widget.json", {"a": 1})
+        self.run_tool()
+        self.assertIn(
+            f"{rx.TOOL}: warning: json/ filename(s) held word(s) outside "
+            f"NAME_VOCABULARY: widget. Snapchat's schema filenames are fixed, "
+            f"so add them to NAME_VOCABULARY in {rx.TOOL}.",
+            self.stderr,
+        )
+
+    def test_a_nested_gap_with_an_identically_shaped_word_does_not_name_it(self):
+        # The nested half of the pair above: identical word ("widget"),
+        # identical shape, moved one directory level deeper
+        # (json/widget/account.json). The directory component means the
+        # provenance argument is unevidenced here (user ruling: n=0 for a
+        # nested json/ in docs/), so "widget" must not be named -- but the
+        # mismatch is still real (account.json alone wouldn't rename; the
+        # "widget" DIRECTORY is what caused it) and must still warn, never
+        # silently vanish. It must warn with the WITHHELD message, not the
+        # "NAME_VOCABULARY cannot fix these" message (task 21 review, D1/D3):
+        # a word DOES exist here and adding it WOULD fix the rename, which is
+        # the opposite claim from the flat-non-word case's message, so
+        # pinning the wrong one would silently reintroduce D1's inverted
+        # remedy.
+        (self.src / "json" / "widget").mkdir()
+        (self.src / "json" / "widget" / "account.json").write_text("{}", encoding="utf-8")
+        self.run_tool()
+        self.assertNotIn("widget", self.stderr)
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: 1 json/ filename(s) mismatched mask_name under a "
+                "directory. A word caused it, and adding that word to NAME_VOCABULARY "
+                "would remove it as a cause of the mismatch -- unlike a flat json/ "
+                "filename's word, it is withheld here because there is no evidence a "
+                "name under a json/ subdirectory is Snapchat's own schema rather than "
+                "user-derived. See the rename note above for which mirrored name(s), "
+                "then find the word in your own export."
+            ],
+        )
+
+    def test_a_nested_gap_with_no_word_anywhere_uses_the_cannot_fix_message(self):
+        # The edge case D3's "nested -> a word exists" framing doesn't cover
+        # by itself: a nested directory that is PURELY a digit run (no word
+        # token in it at all) has nothing to withhold. Claiming "a word
+        # caused it" here would be exactly the kind of false-for-its-
+        # population claim D1 exists to close, just moved one level deeper
+        # -- so this must take the SAME "cannot fix" message as the flat
+        # non-word case, not the withheld-word message.
+        (self.src / "json" / "2024").mkdir()
+        (self.src / "json" / "2024" / "account.json").write_text("{}", encoding="utf-8")
+        self.run_tool()
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: 1 json/ filename(s) mismatched mask_name with no "
+                "word token to name (a digit run, a uuid, a date, non-ascii text, or a "
+                f"run over {rx.MAX_SYNTH_WORD} characters) -- NAME_VOCABULARY cannot fix "
+                "these; see the rename note above for which mirrored name(s)."
+            ],
+        )
+
+    def test_a_nested_gap_from_the_basename_alone_is_withheld_not_named(self):
+        # D5 (task 21 review): every OTHER nested fixture in this suite uses
+        # account.json (pure vocabulary) as the basename, so none of them
+        # can tell "the directory's word is withheld" apart from "ANY
+        # nested word is withheld, wherever it sits" -- the reviewer
+        # mutated the nested branch to also name a basename's word and got
+        # 0 red against the suite as it stood. This fixture puts the ENTIRE
+        # gap in the basename (chat_with_bobsmith.json) under a directory
+        # that is itself pure vocabulary (memories, contributes no gap word
+        # of its own), so it can only pass if the basename's word
+        # specifically is withheld, not just the directory's.
+        (self.src / "json" / "memories").mkdir()
+        (self.src / "json" / "memories" / "chat_with_bobsmith.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        self.run_tool()
+        self.assertNotIn("bobsmith", self.stdout)
+        self.assertNotIn("bobsmith", self.stderr)
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: 1 json/ filename(s) mismatched mask_name under a "
+                "directory. A word caused it, and adding that word to NAME_VOCABULARY "
+                "would remove it as a cause of the mismatch -- unlike a flat json/ "
+                "filename's word, it is withheld here because there is no evidence a "
+                "name under a json/ subdirectory is Snapchat's own schema rather than "
+                "user-derived. See the rename note above for which mirrored name(s), "
+                "then find the word in your own export."
+            ],
+        )
+
+    def test_a_nested_over_cap_word_is_still_withheld_not_miscounted(self):
+        # A blind spot the D4 fix closes as a side effect: the nested
+        # has-a-word check used to reuse vocabulary_gap_words, which is
+        # length-capped, so a nested directory whose ONLY word was over
+        # MAX_SYNTH_WORD would have been misread as "no word" and routed to
+        # the cannot-fix bucket -- false, since tokenize_name's word ->
+        # literal reclassification has no length limit and adding the word
+        # would still fix it. vocabulary_gap_has_word (length-independent)
+        # is what run() actually calls for nested paths; this pins that it
+        # lands in the withheld bucket, not cannot-fix.
+        (self.src / "json" / "notificationsettings").mkdir()
+        (self.src / "json" / "notificationsettings" / "account.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        self.run_tool()
+        self.assertNotIn("notificationsettings", self.stderr)
+        self.assertEqual(
+            self.stderr.splitlines(),
+            [
+                f"{rx.TOOL}: warning: 1 json/ filename(s) mismatched mask_name under a "
+                "directory. A word caused it, and adding that word to NAME_VOCABULARY "
+                "would remove it as a cause of the mismatch -- unlike a flat json/ "
+                "filename's word, it is withheld here because there is no evidence a "
+                "name under a json/ subdirectory is Snapchat's own schema rather than "
+                "user-derived. See the rename note above for which mirrored name(s), "
+                "then find the word in your own export."
+            ],
+        )
+
+    def test_name_masking_records_into_vocabulary_used(self):
+        # Half B of task 21: mask_name/mask_relative_path never called
+        # note_vocabulary before this fix, so a word kept verbatim in a
+        # filename left vocabulary_used empty even though it survived in the
+        # mirror. The value here is plain nonsense (no url/latlon/filename
+        # shape), so the ONLY path that can populate vocabulary_used is name
+        # masking of the filename itself.
+        self.write_json("story_history.json", {"a": "zzqqusernamemarker"})
+        self.run_tool()
+        used = self.report()["vocabulary_used"]
+        self.assertIn("story", used)
+        self.assertIn("history", used)
+
+    def test_listing_example_masking_records_into_vocabulary_used(self):
+        # A second, independent call site for the same fix: build_listing's
+        # render_masked (chat_media/memories example filenames) is a
+        # DIFFERENT function from mask_name, so it needs its own recording.
+        # "zip" appears only in the per-file example token, never in the
+        # "chat_media" dir name itself, so it isolates render_masked from
+        # the dir-name mask_name call that also runs in this same listing.
+        self.write_json("data.json", {"a": 1})
+        self.write_media("chat_media", [f"2021-01-15_media~zip-{UUID_IN}.jpg"])
+        self.run_tool()
+        self.assertIn("zip", self.report()["vocabulary_used"])
 
     def test_an_export_root_of_schema_labels_raises_no_advisory(self):
         self.write_json(
@@ -1114,6 +1499,16 @@ class TestErrorPaths(RedactorCase):
         self.run_tool(expect=rx.EXIT_CONFIG)
         self.assertIn("json/xxxxxx.json is not valid json", self.stderr)
         self.assertNotIn("broken", self.stderr)
+
+    def test_the_docstring_names_the_vocabulary_gap_warning_as_its_own_exception(self):
+        """F1 (task 21 review): the older 'mirrored name only ... those three
+        messages' claim went unreconciled with the new warning for one round.
+        Pin the doc's own admission of a fourth exception, not just the
+        warning's behaviour -- so a future edit that reintroduces the
+        absolute claim without touching this sentence reds here instead of
+        only in a human audit."""
+        self.assertIn("DELIBERATE exception", rx.__doc__)
+        self.assertIn("mirrored name only", rx.__doc__)
 
     def test_show_source_names_names_the_real_file_on_an_abort(self):
         self.write_raw("broken.json", "{not json")
@@ -1333,10 +1728,16 @@ class TestUnitHelpers(unittest.TestCase):
         self.assertTrue(rx.looks_id_keyed({"key_names": ("zzqquser", "zzqqother")}, once))
 
     def test_mask_name_keeps_vocabulary_words_and_masks_the_rest(self):
-        self.assertEqual(rx.mask_name("memories_history.json"), "memories_history.json")
+        stats = rx.Stats()
+        self.assertEqual(rx.mask_name("memories_history.json", stats), "memories_history.json")
         self.assertEqual(
-            rx.mask_name("chat_with_zzqqusernamemarker.json"), "chat_with_xxxxxxxxxxxx.json"
+            rx.mask_name("chat_with_zzqqusernamemarker.json", stats), "chat_with_xxxxxxxxxxxx.json"
         )
+
+    def test_mask_name_records_kept_literals_into_vocabulary_used(self):
+        stats = rx.Stats()
+        rx.mask_name("memories_history.json", stats)
+        self.assertEqual(stats.vocabulary_used, {"memories", "history"})
 
 
 if __name__ == "__main__":

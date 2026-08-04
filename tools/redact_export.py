@@ -57,13 +57,63 @@ GUARANTEES
     or a known schema label. That holds on the abort paths too (unreadable file,
     invalid json, duplicate key): they name the MIRRORED file and mask the
     duplicate key. Since no fixture exists after an abort, --show-source-names
-    unmasks those three messages so the file can actually be repaired.
+    unmasks those three messages so the file can actually be repaired. The one
+    DELIBERATE exception to "mirrored name only" is the vocabulary-gap warning
+    below: for a FLAT json/ filename (json/<name>, no directory component) it
+    prints a bare WORD lifted from the SOURCE name, ignoring
+    --show-source-names, because a flat filename's provenance -- that it is
+    Snapchat's own schema, never user-derived -- is the one case this tool
+    has actual evidence for (two real exports, three historical vocabulary
+    incidents, all flat). A NESTED json/ path never gets a word named,
+    --show-source-names or not -- see that bullet for the exact boundary.
   * A self-check re-reads everything written and exits 3 unless all of:
       - no alnum run of --max-alnum-run chars or longer, anywhere;
       - no URL carrying userinfo, a live path segment, or a parameter payload;
       - every coordinate pair in a value inside the fake band;
       - every >=6-char token in a mirror value is generated or vocabulary;
       - every number in a mirror value is one this run generated.
+    This rule does not see the vocabulary-gap warning below: self-check only
+    re-reads DST, and that warning is stderr-only, never written to DST.
+  * Inside SRC/json/, a FLAT filename (json/<name>, no directory component)
+    is ASSUMED to be Snapchat's fixed schema, never user-derived -- an
+    assumption evidenced by two real exports and all three historical
+    vocabulary incidents, every one a flat filename, and that evidence is
+    what makes naming a word from it safe. A NESTED path
+    (json/<dir>/.../<name>) has no such evidence: nothing in this project's
+    docs establishes whether json/ is ever nested, so a directory segment
+    there could be user-derived for all this tool can verify, and NO
+    segment's word is ever named once a directory is involved, the final
+    filename included -- a nested mismatch caused SOLELY by the basename,
+    with an otherwise-vocabulary directory, is withheld exactly the same as
+    one caused by the directory. DETECTION and NAMING are separate
+    guarantees: a mismatch anywhere under json/ is caught regardless of
+    depth, and narrowing what gets named (this bullet) never narrows what
+    gets caught. There are four outcomes, not two, because "NAME_VOCABULARY
+    cannot fix this" and "NAME_VOCABULARY would fix this" are opposite
+    claims and a given mismatch is only ever one of them:
+      - a flat, word-shaped mismatch no longer than MAX_SYNTH_WORD (mask_name
+        would rewrite it, and it tokenizes to an ASCII word outside
+        NAME_VOCABULARY, [a-z][a-z0-9]*) is reported on stderr NAMING the
+        word;
+      - a flat, word-shaped mismatch LONGER than MAX_SYNTH_WORD -- this
+        file's own bound on a masked name-piece, not the operator-tunable
+        --max-alnum-run, which governs the self-check's tolerance for a
+        mirror value and has no business also sizing this channel -- gets
+        its own separate bare count: NAME_VOCABULARY WOULD fix it
+        (tokenize_name's word -> literal reclassification has no length
+        limit of its own; NAME_VOCABULARY already holds a 13-character
+        member, "subscriptions", against this 12-character cap, so a long
+        unknown schema word is a real population, not a hypothetical one),
+        the word is just too long for this channel to print;
+      - a mismatch with no word anywhere in it, flat or nested (a digit run,
+        a uuid, a date, or non-ascii text) is reported as a bare count,
+        since NAME_VOCABULARY genuinely cannot fix it;
+      - a NESTED mismatch that does have a word somewhere in its path, of
+        ANY length, gets its own separate bare count: NAME_VOCABULARY would
+        fix it and the word is only withheld for the provenance reason
+        above -- saying so, without saying which word.
+    Every outcome exits 0: the fixture is still payload-free, only less
+    faithful to the real name.
 
 NOT GUARANTEED
   * The vocabularies and the default-masked file list are BEST EFFORT: they were
@@ -91,9 +141,20 @@ NOT GUARANTEED
     a defect: the vocabulary is a list of words the operator asserts are not
     owner-identifying, and the only mitigation is reading NAME_VOCABULARY in
     this file's source and judging it against the export at hand -- there is
-    no runtime signal for it. The report's vocabulary_used total does NOT
-    cover this: it is fed only by value synthesis, and the name-masking path
-    never records into it.
+    no runtime signal that tells a schema word from a coincidentally matching
+    real one apart. The report's vocabulary_used total DOES include this now:
+    name masking records every literal it keeps, not just value synthesis, so
+    a collision here is visible as a member the operator did not expect to
+    see kept. It still cannot tell you WHY a member is there.
+  * The vocabulary-gap warning's printed word is not guaranteed to be a whole
+    token. tokenize_name splits on character CLASS, so a token whose lead
+    character is non-ascii sheds it as a separate "other" run and the ASCII
+    remainder still matches the word pattern on its own -- "elodie_marchand"
+    (a name starting with an accented letter, stripped here to plain ascii
+    for this docstring) reports "marchand" and the truncated "lodie", not
+    "elodie". The character-class bound above still holds -- what prints is
+    always exactly [a-z][a-z0-9]*, never the accented original -- but that
+    bound is about the ALPHABET, not about semantic wholeness.
 
 Exit codes: 0 clean, 1 bad configuration or unreadable input, 2 argparse usage
 error, 3 self-check failure.
@@ -120,6 +181,10 @@ from urllib.parse import urlsplit, urlunsplit
 TOOL = "redact_export.py"
 REPORT_NAME = "_redaction_report.json"
 LISTINGS_DIRNAME = "listings"
+# The one source dir the vocabulary-gap warning trusts (an ASSUMPTION, not
+# a verified fact -- see this module's own docstring, GUARANTEES section,
+# for what the assumption is and what it makes safe).
+SCHEMA_DIRNAME = "json"
 
 REDACTED = "REDACTED"
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
@@ -781,10 +846,13 @@ def render_pattern(tokens: Sequence[tuple[str, str]]) -> str:
     return "".join(parts)
 
 
-def render_masked(tokens: Sequence[tuple[str, str]]) -> str:
+def render_masked(tokens: Sequence[tuple[str, str]], stats: Stats) -> str:
     parts = []
     for kind, text in tokens:
-        if kind in ("literal", "sep"):
+        if kind == "literal":
+            stats.note_vocabulary(text.lower())
+            parts.append(text)
+        elif kind == "sep":
             parts.append(text)
         elif kind == "other":
             parts.append(MASK_CHAR * len(text))
@@ -793,13 +861,18 @@ def render_masked(tokens: Sequence[tuple[str, str]]) -> str:
     return "".join(parts)
 
 
-def mask_name(name: str) -> str:
+def mask_name(name: str, stats: Stats) -> str:
     """A path segment keeps only vocabulary words, separators and a known
-    extension; every other run becomes a mask run."""
+    extension; every other run becomes a mask run. `stats` is required, not
+    defaulted, so a call site cannot silently forget to record a kept word."""
     stem, ext = split_known_ext(name)
     parts: list[str] = []
     for kind, text in tokenize_name(stem):
-        if kind in ("literal", "sep"):
+        if kind == "literal":
+            stats.note_vocabulary(text.lower())
+            parts.append(text)
+            continue
+        if kind == "sep":
             parts.append(text)
             continue
         piece = NAME_MASK_CHAR * min(len(text), MAX_SYNTH_WORD)
@@ -809,8 +882,85 @@ def mask_name(name: str) -> str:
     return "".join(parts) + ext
 
 
-def mask_relative_path(rel: str) -> str:
-    return "/".join(mask_name(part) for part in rel.split("/"))
+def mask_relative_path(rel: str, stats: Stats) -> str:
+    return "/".join(mask_name(part, stats) for part in rel.split("/"))
+
+
+def vocabulary_gap_words(segment: str) -> list[str]:
+    """Word tokens in a SRC/json/ path segment that fall outside
+    NAME_VOCABULARY -- the reason mask_name would rewrite what is assumed to
+    be one of Snapchat's fixed schema names. run() calls this on a FLAT
+    filename's basename (json/<name>) to get words it actually PRINTS, and
+    on every segment of a NESTED path only to ask whether the return value
+    is non-empty -- a nested segment's words are never taken from the
+    return value and never printed, because a directory segment under json/
+    has no provenance evidence behind it; see the vocabulary-gap warning's
+    own GUARANTEES bullet in this module's docstring for that boundary. That
+    non-printing discipline lives entirely in the CALLER: this function
+    itself makes no distinction and returns real words for any segment it
+    is given. Safe to print verbatim by CONSTRUCTION, not by directory
+    argument alone, wherever the caller chooses to: every element
+    matches ^[a-z][a-z0-9]*$, because NAME_TOKEN_RE's word group is
+    [A-Za-z][A-Za-z0-9]* and nothing else reaches this list (a digit run, a
+    uuid, a date, non-ascii or punctuation text, and any run longer than
+    MAX_SYNTH_WORD all fall to vocabulary_gap_other instead, unprinted). The
+    length cap is MAX_SYNTH_WORD -- this file's OWN bound on a masked
+    name-piece -- and deliberately NOT --max-alnum-run: that flag is the
+    self-check's operator-tunable tolerance for a MIRROR value (20..64), a
+    different consumer with a different job, and reusing it here would let
+    raising it for self-check silently also widen what this channel prints,
+    with no other signal that the two moved together."""
+    stem, _ext = split_known_ext(segment)
+    return [
+        text.lower()
+        for kind, text in tokenize_name(stem)
+        if kind == "word" and len(text) <= MAX_SYNTH_WORD
+    ]
+
+
+def vocabulary_gap_has_word(segment: str) -> bool:
+    """Whether a SRC/json/ path segment has ANY word outside NAME_VOCABULARY,
+    of ANY length -- unlike vocabulary_gap_words, this is never filtered by
+    MAX_SYNTH_WORD, because tokenize_name's word -> literal reclassification
+    (the thing that would make mask_name leave the segment unchanged) has NO
+    length limit of its own: NAME_VOCABULARY already holds a 13-character
+    member ("subscriptions") against a 12-character print cap, so a long
+    unknown word is a real, not hypothetical, population. This answers "does
+    NAME_VOCABULARY have a fix at all", which is a length-independent
+    question -- vocabulary_gap_words answers the narrower, length-bounded
+    "which of those fixes may this channel also NAME"."""
+    stem, _ext = split_known_ext(segment)
+    return any(kind == "word" for kind, _text in tokenize_name(stem))
+
+
+def vocabulary_gap_overcap(segment: str) -> bool:
+    """Whether a FLAT json/ filename's basename holds a word outside
+    NAME_VOCABULARY longer than MAX_SYNTH_WORD: a real vocabulary gap
+    NAME_VOCABULARY COULD fix (see vocabulary_gap_has_word), just one this
+    channel will not NAME because of its own length bound, not because
+    NAME_VOCABULARY is powerless here -- a different population from
+    vocabulary_gap_other's, and a different remedy claim."""
+    stem, _ext = split_known_ext(segment)
+    return any(
+        kind == "word" and len(text) > MAX_SYNTH_WORD for kind, text in tokenize_name(stem)
+    )
+
+
+def vocabulary_gap_other(segment: str) -> int:
+    """Count of mismatches in a FLAT json/ filename's basename that
+    NAME_VOCABULARY genuinely cannot fix: a digit run, a uuid, a date, or a
+    non-ascii/punctuation "other" run. Deliberately excludes EVERY word
+    token, printable or not -- an over-cap word is a real vocabulary gap
+    (vocabulary_gap_overcap), not a "cannot fix" one, so counting it here
+    would repeat D4's exact defect: claiming NAME_VOCABULARY has no fix for
+    a mismatch it actually does fix. A NESTED json/ path never reaches this
+    function at all: run() decides that bucket with vocabulary_gap_has_word
+    instead, because "no word anywhere" and "NAME_VOCABULARY cannot fix it"
+    (this function's claim) is a DIFFERENT, narrower fact than "no word
+    withheld here either" -- see the vocabulary-gap warning's own GUARANTEES
+    bullet in this module's docstring for the four-way split this feeds."""
+    stem, _ext = split_known_ext(segment)
+    return sum(1 for kind, _text in tokenize_name(stem) if kind not in ("literal", "sep", "word"))
 
 
 # --------------------------------------------------------------------------
@@ -1312,12 +1462,12 @@ def build_listing(dir_path: Path, name: str, ctx: Ctx, examples: int) -> dict:
         entry = patterns.setdefault(pattern, {"pattern": pattern, "count": 0, "examples": []})
         entry["count"] += 1
         if len(entry["examples"]) < examples:
-            entry["examples"].append(render_masked(tokens) + ext)
+            entry["examples"].append(render_masked(tokens, ctx.stats) + ext)
     ordered = sorted(patterns.values(), key=lambda e: (-e["count"], e["pattern"]))
     # The name comes from --listing-dir, but it names a real directory in the
     # export, so it is export content and gets the same vocabulary rule.
     return {
-        "dir": mask_name(name),
+        "dir": mask_name(name, ctx.stats),
         "file_count": files,
         "subdir_count": subdirs,
         "patterns": ordered,
@@ -1748,15 +1898,82 @@ def run(args: argparse.Namespace) -> int:
     file_reports = []
     mirror_rels: list[str] = []
     taken: set = set()
+    # Gap words/count are collected during the loop but only PRINTED after
+    # EVERY abort check below (mid-loop, same as renamed_paths, and the
+    # unused-rule check that follows it): the warning is a "the run
+    # succeeded end to end, and here is a smaller thing to also look at"
+    # note, never something that should appear ahead of, or instead of, an
+    # abort that means the fixture is incomplete or the rule needs fixing.
+    schema_gap_words: set[str] = set()
+    # FILES, not tokens: a single filename can hold more than one
+    # non-word mismatch (an "other" run plus a digit run, say), and the
+    # warning below counts filenames, matching what the rename note above
+    # it lists -- so this has to be a set of `rel`, not a running token sum.
+    # Three file sets, not one, because "NAME_VOCABULARY cannot fix this",
+    # "NAME_VOCABULARY WOULD fix this but the word is withheld for lack of
+    # json/ provenance", and "NAME_VOCABULARY WOULD fix this but the word is
+    # withheld for being over MAX_SYNTH_WORD" are three DIFFERENT claims
+    # about the operator's one remedy, and no single count can carry more
+    # than one without being wrong about the others (task 21 review,
+    # D1/D3/D4).
+    schema_gap_other_files: set[str] = set()
+    schema_gap_withheld_files: set[str] = set()
+    schema_gap_overcap_files: set[str] = set()
     for src_file in json_files:
         source_rel = src_file.relative_to(src).as_posix()
         # Rule matching uses the pre-dedup name, so two sources that mask to one
         # name are covered by one rule instead of silently needing two.
-        match_rel = mask_relative_path(source_rel)
+        match_rel = mask_relative_path(source_rel, ctx.stats)
         rel = unique_rel(match_rel, taken)
         taken.add(rel)
         if match_rel != source_rel:
             ctx.stats.renamed_paths.append(rel)
+            if source_rel.partition("/")[0] == SCHEMA_DIRNAME:
+                parts = source_rel.split("/")
+                if len(parts) == 2:
+                    # Flat: json/<file>, so the basename is the only segment
+                    # after "json" that could have mismatched. The provenance
+                    # claim this whole warning rests on -- that a json/
+                    # filename is Snapchat's own schema, never user-derived
+                    # -- is evidenced HERE: two real exports and all three
+                    # historical vocabulary incidents were all flat filenames
+                    # directly under json/. A word-shaped gap no longer than
+                    # MAX_SYNTH_WORD is nameable; one over that length is a
+                    # real gap too (NAME_VOCABULARY's own "subscriptions" is
+                    # 13 characters against a 12-character cap) but this
+                    # channel will not print it, so it gets its own bucket
+                    # rather than falsely joining vocabulary_gap_other's
+                    # "cannot fix" population.
+                    schema_gap_words.update(vocabulary_gap_words(parts[1]))
+                    if vocabulary_gap_overcap(parts[1]):
+                        schema_gap_overcap_files.add(rel)
+                    if vocabulary_gap_other(parts[1]):
+                        schema_gap_other_files.add(rel)
+                else:
+                    # Nested: json/<dir>/.../<file>. The provenance claim is
+                    # UNEVIDENCED here -- nothing in docs/ establishes
+                    # whether json/ is ever nested, so a directory segment
+                    # under json/ could be user-derived for all this tool can
+                    # verify. No segment's word is EVER named, basename
+                    # included -- but every segment after "json" IS still
+                    # checked for whether a word exists AT ALL, of ANY
+                    # length (vocabulary_gap_has_word, not the length-capped
+                    # vocabulary_gap_words: a nested over-cap word is still a
+                    # withheld word, not a "no word" case, since nested
+                    # withholds regardless of length already), because
+                    # "adding a word to NAME_VOCABULARY would fix this" and
+                    # "NAME_VOCABULARY cannot fix this" are different,
+                    # mutually exclusive claims and only the segments can say
+                    # which one is true. A pure digit run, uuid, date, or
+                    # non-ascii run as a directory name (e.g.
+                    # json/2024/account.json) has no word to withhold at all,
+                    # so it is exactly as unfixable-by-vocabulary as the flat
+                    # non-word case and shares that bucket rather than
+                    # falsely claiming a word exists where none does.
+                    if any(vocabulary_gap_has_word(segment) for segment in parts[1:]):
+                        schema_gap_withheld_files.add(rel)
+                    else:
+                        schema_gap_other_files.add(rel)
         ctx.rel_aliases = (match_rel, rel)
         redacted, truncations = redact_file(src_file, source_rel, ctx.rel_aliases, ctx)
         write_json(dst / rel, redacted)
@@ -1781,6 +1998,43 @@ def run(args: argparse.Namespace) -> int:
             f"Nothing was masked there, so the mirror in {dst} still holds those keys: "
             "delete it, re-check the name and the pointer against the lines above, then re-run"
         )
+    if schema_gap_words:
+        print(
+            f"{TOOL}: warning: {SCHEMA_DIRNAME}/ filename(s) held word(s) outside "
+            f"NAME_VOCABULARY: {', '.join(sorted(schema_gap_words))}. Snapchat's schema "
+            f"filenames are fixed, so add them to NAME_VOCABULARY in {TOOL}.",
+            file=sys.stderr,
+        )
+    if schema_gap_other_files:
+        print(
+            f"{TOOL}: warning: {len(schema_gap_other_files)} {SCHEMA_DIRNAME}/ filename(s) "
+            "mismatched mask_name with no word token to name (a digit run, a uuid, a date, "
+            f"non-ascii text, or a run over {MAX_SYNTH_WORD} characters) -- NAME_VOCABULARY "
+            "cannot fix these; see the rename note above for which mirrored name(s).",
+            file=sys.stderr,
+        )
+    if schema_gap_withheld_files:
+        print(
+            f"{TOOL}: warning: {len(schema_gap_withheld_files)} {SCHEMA_DIRNAME}/ filename(s) "
+            "mismatched mask_name under a directory. A word caused it, and adding that word "
+            "to NAME_VOCABULARY would remove it as a cause of the mismatch -- unlike a flat "
+            f"{SCHEMA_DIRNAME}/ filename's word, it is withheld here because there is no "
+            f"evidence a name under a {SCHEMA_DIRNAME}/ subdirectory is Snapchat's own schema "
+            "rather than user-derived. See the rename note above for which mirrored "
+            "name(s), then find the word in your own export.",
+            file=sys.stderr,
+        )
+    if schema_gap_overcap_files:
+        print(
+            f"{TOOL}: warning: {len(schema_gap_overcap_files)} {SCHEMA_DIRNAME}/ filename(s) "
+            f"held a word outside NAME_VOCABULARY longer than {MAX_SYNTH_WORD} characters. "
+            "Adding that word to NAME_VOCABULARY would remove it as a cause of the mismatch "
+            f"-- it is withheld here only because this channel will not print a run longer "
+            f"than {MAX_SYNTH_WORD} characters, not because of anything about "
+            f"{SCHEMA_DIRNAME}/ subdirectories. See the rename note above for which mirrored "
+            "name(s), then find the word in your own export.",
+            file=sys.stderr,
+        )
     for entry in file_reports:
         for truncation in entry["truncated_arrays"]:
             truncation["pointer"] = json_pointer(report_pointer(truncation["pointer"]))
@@ -1792,7 +2046,9 @@ def run(args: argparse.Namespace) -> int:
         listing = build_listing(dir_path, name, ctx, args.examples)
         write_json(dst / LISTINGS_DIRNAME / f"{listing['dir']}.json", listing)
         listings.append(listing)
-    missing = sorted(mask_name(name) for name in set(listing_names) - {n for n, _ in found})
+    missing = sorted(
+        mask_name(name, ctx.stats) for name in set(listing_names) - {n for n, _ in found}
+    )
     if missing:
         print(f"  note: no dir named {', '.join(missing)} under src, so no listing for it")
 
@@ -1804,7 +2060,7 @@ def run(args: argparse.Namespace) -> int:
             "array_sample": args.array_sample,
             "examples": args.examples,
             "max_alnum_run": args.max_alnum_run,
-            "listing_dirs": [mask_name(name) for name in listing_names],
+            "listing_dirs": [mask_name(name, ctx.stats) for name in listing_names],
             "key_mask_rules": [
                 {
                     "origin": "built-in" if rule.builtin else "requested",
