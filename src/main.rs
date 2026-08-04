@@ -1,6 +1,7 @@
 //! Entry point: theme argument, tier detection, terminal bootstrap and teardown.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -8,8 +9,35 @@ use exportsnap::app::App;
 use exportsnap::tui::screens::overview::Overview;
 use exportsnap::tui::theme::{self, Tier};
 
+/// The `--version` text, four lines: the binary name and version, the
+/// OpenStreetMap/ODbL credit with the data's vehicle named, the ODbL URL, and
+/// a pointer at the generated third-party notices. A constant so the inline
+/// tests can pin its whole shape instead of re-implementing what they assert.
+pub const VERSION_TEXT: &str = concat!(
+    "exportsnap ",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "Contains timezone boundary polygons © OpenStreetMap contributors, licensed under the Open Database License (ODbL-1.0)\n",
+    "https://opendatacommons.org/licenses/odbl/1-0/\n",
+    "Timezone data via the tzf-dist crate; full third-party notices: THIRD-PARTY-LICENSES\n",
+);
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `--version` wins over every other flag and prints before the terminal is
+    // taken over, so it works headless, piped, and in scripts. A reader leaving
+    // early (`exportsnap --version | head -1`) is a finished run, not a
+    // failure: exit 0, per the EPIPE convention in the rust learnings.
+    if wants_version_arg(args.iter().cloned())? {
+        let mut out = std::io::stdout().lock();
+        if let Err(e) = out.write_all(VERSION_TEXT.as_bytes())
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e).context("failed to print the version text");
+        }
+        return Ok(());
+    }
 
     let cli_tier = parse_theme_arg(args.iter().cloned())?;
     // The config precedence level has no loader yet; `detect_from_env` still orders it.
@@ -88,6 +116,22 @@ fn parse_source_arg(args: impl IntoIterator<Item = String>) -> Result<Option<Pat
     Ok(source)
 }
 
+/// Hand-parses `--version`, last one wins: any occurrence wins, and the caller
+/// checks it before anything touches the terminal. Same shape as
+/// [`parse_theme_arg`] and for the same reason: a real CLI with subcommands is
+/// phase 5 and brings its own argument parser then.
+fn wants_version_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
+    let mut version = false;
+    for arg in args {
+        if arg == "--version" {
+            version = true;
+        } else if arg.starts_with("--version=") {
+            bail!("--version takes no value; pass --version alone");
+        }
+    }
+    Ok(version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +142,10 @@ mod tests {
 
     fn parse_source(args: &[&str]) -> Result<Option<PathBuf>> {
         parse_source_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn parse_version(args: &[&str]) -> Result<bool> {
+        wants_version_arg(args.iter().map(|arg| (*arg).to_string()))
     }
 
     #[test]
@@ -157,5 +205,34 @@ mod tests {
     fn an_empty_source_value_is_a_hard_error() {
         let error = parse_source(&["--source="]).unwrap_err();
         assert_eq!(error.to_string(), "--source= names no dir; pass --source=<dir> naming the dir that holds the export's zips");
+    }
+
+    #[test]
+    fn version_flag_wins_among_other_args() {
+        assert!(parse_version(&["--version"]).unwrap());
+        assert!(parse_version(&["--theme=full", "--source=/tmp/export", "--version"]).unwrap());
+        assert!(!parse_version(&[]).unwrap());
+        assert!(!parse_version(&["--verbose", "some/path"]).unwrap());
+    }
+
+    #[test]
+    fn version_flag_with_a_value_is_a_hard_error() {
+        let error = parse_version(&["--version=full"]).unwrap_err();
+        assert_eq!(error.to_string(), "--version takes no value; pass --version alone");
+    }
+
+    #[test]
+    fn version_text_is_four_lines_headed_by_name_and_version() {
+        let lines: Vec<&str> = VERSION_TEXT.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], format!("exportsnap {}", env!("CARGO_PKG_VERSION")));
+        assert!(VERSION_TEXT.ends_with('\n'));
+    }
+
+    #[test]
+    fn version_text_carries_the_osm_credit_and_notices_pointer() {
+        for needle in ["OpenStreetMap", "ODbL-1.0", "https://opendatacommons.org/licenses/odbl/1-0/", "tzf-dist", "THIRD-PARTY-LICENSES"] {
+            assert!(VERSION_TEXT.contains(needle), "version text lacks '{needle}'");
+        }
     }
 }

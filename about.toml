@@ -1,0 +1,25 @@
+# cargo-about config — license listing for THIRD-PARTY-LICENSES.
+# The accepted list mirrors deny.toml's `[licenses] allow` exactly, and the
+# per-crate exception mirrors its `[[licenses.exceptions]]`: any change to one
+# file's posture that is not mirrored here makes the generated file either fail
+# to generate or misstate what the binary contains.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+]
+
+# `tzf-dist` is `MIT AND ODbL-1.0`: the code is MIT and the timezone boundary
+# polygons it embeds are OpenStreetMap-derived, which is ODbL. Same scoping
+# argument as deny.toml's exception — not in `accepted`, so a second ODbL
+# dependency still has to be argued for on its own terms.
+[tzf-dist]
+accepted = ["ODbL-1.0"]
