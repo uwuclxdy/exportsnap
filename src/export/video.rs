@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 
-use crate::export::model::LocationPoint;
+use crate::export::model::{Attribution, LocationPoint};
 
 mod library {
     //! The entire surface this crate has on `mp4ameta`, and the boundary that keeps the chapter
@@ -122,6 +122,17 @@ const COORDINATE: [u8; 4] = *b"\xa9xyz";
 /// offset, so it is where the local wall clock survives.
 const CONTENT_DATE: [u8; 4] = *b"\xa9day";
 
+/// The `ilst` tag holding the artist. exiftool renders it `Artist` and ffprobe `artist` — the same
+/// two names the image leg's own `Artist` answers to, so one file's sender reads back the same way
+/// whichever leg wrote it.
+const ARTIST: [u8; 4] = *b"\xa9ART";
+
+/// The `ilst` tag holding the album. exiftool renders it `Album`, ffprobe `album`, and every player
+/// and photo manager groups a library by it — which is the conversation's own meaning here, and why
+/// it beats `©cmt`: a comment is a free note nothing groups on, and the per-conversation directory
+/// decision 46a builds is exactly a grouping.
+const ALBUM: [u8; 4] = *b"\xa9alb";
+
 /// Atoms this build descends into looking for header times.
 const CONTAINERS: [[u8; 4]; 4] = [*b"moov", *b"trak", *b"mdia", *b"udta"];
 
@@ -138,7 +149,7 @@ const TIMED: [[u8; 4]; 3] = [*b"mvhd", *b"tkhd", *b"mdhd"];
 /// Shaped like [`crate::export::exif::Stamp`] on purpose: the two legs derive their values the same
 /// way and a reader moving between them should not have to re-learn the field meanings.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VideoStamp {
+pub struct VideoStamp<'a> {
     /// Local wall-clock time where the memory was taken.
     pub local: NaiveDateTime,
     /// The offset [`Self::local`] is at.
@@ -151,9 +162,21 @@ pub struct VideoStamp {
     /// `None` when the run has no coordinate, or when the pairing that would supply one is too
     /// arbitrary to stamp from. Deciding that is the caller's job.
     pub location: Option<LocationPoint>,
+    /// Where the file came from, or `None` when the run knows nothing about it — which is every
+    /// memory, so the two tags below are the chat-media leg's alone and a memory's own `©ART` or
+    /// `©alb` survives [`Mp4::stamp`]'s read-modify-write untouched.
+    ///
+    /// **`©ART` carries the sender and `©alb` carries the conversation.** `©ART` mirrors the image
+    /// leg's `Artist` under the same reader-facing name, which is the whole reason to prefer it over
+    /// `©nam` (a title, which the output filename already is) or `©cmt` (a free note, which no
+    /// reader attributes to a person). `©alb` is the grouping tag every player and photo manager
+    /// sorts a library into, so a conversation reads as an album — the same shape decision 46a gives
+    /// the output tree. The image leg has no album tag to match it, which is stated on
+    /// [`crate::export::exif::Stamp::attribution`] rather than left to look like an oversight.
+    pub attribution: Option<&'a Attribution>,
 }
 
-impl VideoStamp {
+impl VideoStamp<'_> {
     /// The instant the header fields carry.
     fn instant(&self) -> DateTime<Utc> {
         match self.offset {
@@ -321,7 +344,7 @@ impl Mp4 {
     ///
     /// Returns [`VideoError::Time`] when the instant does not fit the header fields, and
     /// [`VideoError::Tag`] when the metadata item list cannot be spliced.
-    pub fn stamp(&mut self, stamp: &VideoStamp) -> Result<(), VideoError> {
+    pub fn stamp(&mut self, stamp: &VideoStamp<'_>) -> Result<(), VideoError> {
         let layout = layout(&self.0).map_err(|source| VideoError::Structure { source })?;
         let instant = stamp.instant();
         let raw = raw_time(instant).map_err(|source| VideoError::Time { source })?;
@@ -342,6 +365,19 @@ impl Mp4 {
         // `location_atom` first and reports it; this is the second belt on the same trousers.
         if let (Some(location), None) = (stamp.location, layout.location) {
             tags.push((COORDINATE, iso6709(location)));
+        }
+        // Pushed only when the caller supplies one, so the memories leg — which never does — leaves
+        // whatever these two tags already held. See [`VideoStamp::attribution`] for why these two.
+        // Whole, deliberately: an `ilst` atom carries a 32-bit size, so this format has no ceiling to
+        // enforce and borrowing the JPEG leg's would be one format's constraint silently crossing
+        // into another. Pinned by `a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole`.
+        if let Some(attribution) = stamp.attribution {
+            if let Some(sender) = &attribution.sender {
+                tags.push((ARTIST, sender.as_str().to_owned()));
+            }
+            if let Some(conversation) = &attribution.conversation {
+                tags.push((ALBUM, conversation.as_str().to_owned()));
+            }
         }
         self.0 = library::set_text(patched, &tags).map_err(|source| VideoError::Tag { source: Box::new(source) })?;
         Ok(())
@@ -828,8 +864,8 @@ mod tests {
         bytes
     }
 
-    fn stamp(local: chrono::NaiveDateTime, offset: Option<FixedOffset>) -> VideoStamp {
-        VideoStamp { local, offset, location: None }
+    fn stamp(local: chrono::NaiveDateTime, offset: Option<FixedOffset>) -> VideoStamp<'static> {
+        VideoStamp { local, offset, location: None, attribution: None }
     }
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> chrono::NaiveDateTime {

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
-use exportsnap::export::model::{Field, LocationPoint};
+use exportsnap::export::model::{Attribution, ConversationId, Field, LocationPoint, Username};
 use exportsnap::export::video::{LocationAtom, Mp4, NotMp4, VideoError, VideoStamp, header_time};
 use tempfile::TempDir;
 
@@ -363,7 +363,9 @@ fn a_real_encoders_output_is_accepted_and_its_header_time_survives_a_round_trip(
     assert_eq!(video.embedded_time(), None, "an unwritten header reads as absent, not as 1904");
 
     let paris = FixedOffset::east_opt(3600).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: Some(paris), location: Some(point(PARIS)) }).unwrap();
+    video
+        .stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: Some(paris), location: Some(point(PARIS)), attribution: None })
+        .unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
@@ -396,7 +398,7 @@ fn the_seeking_probe_finds_the_movie_box_on_either_side_of_the_media_data() {
 
     for source in [&plain, &faststarted] {
         let mut video = Mp4::read(source).unwrap();
-        video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None }).unwrap();
+        video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None, attribution: None }).unwrap();
         let written = dir.path().join("probed.mp4");
         video.write(&written).unwrap();
         assert_eq!(header_time(&written).map(|at| at.to_rfc3339()), Some("2021-01-15T13:30:05+00:00".to_owned()), "{}", source.display());
@@ -417,7 +419,7 @@ fn a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path() {
     fs::write(&written, &stale).unwrap();
 
     let mut video = Mp4::read(&source).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None, attribution: None }).unwrap();
     video.write(&written).unwrap();
 
     let out = fs::read(&written).unwrap();
@@ -437,7 +439,7 @@ fn the_media_data_comes_through_a_stamp_byte_for_byte() {
     let before = fs::read(&source).unwrap();
 
     let mut video = Mp4::read(&source).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: Some(point(RIO)) }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: Some(point(RIO)), attribution: None }).unwrap();
 
     // The whole point of a fixed-size header patch plus a splicing tag write: not one frame moves.
     // A chapter leg turned on by a `WriteConfig::DEFAULT` would rewrite exactly this box.
@@ -456,6 +458,96 @@ fn the_media_data_comes_through_a_stamp_byte_for_byte() {
         .unwrap();
     assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
     assert!(decoded.stderr.is_empty(), "ffmpeg complained about the stamped file: {}", String::from_utf8_lossy(&decoded.stderr));
+}
+
+// ---- decision 44c: where a sender and a conversation land ----
+
+#[test]
+fn the_sender_and_the_conversation_land_in_the_artist_and_album_tags() {
+    let dir = TempDir::new().unwrap();
+    let Some(source) = hevc(dir.path(), "chat.mp4") else {
+        skipped("the_sender_and_the_conversation_land_in_the_artist_and_album_tags", "ffmpeg", REQUIRE_FFMPEG);
+        return;
+    };
+    let attribution = Attribution {
+        sender: Username::new("sender-handle"),
+        conversation: Some(ConversationId::new("3f2e1d0c-b9a8-4756-8433-2211aabbccdd")),
+    };
+    let mut video = Mp4::read(&source).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 3, 4, 14, 30, 5), offset: None, location: None, attribution: Some(&attribution) }).unwrap();
+    let written = dir.path().join("out.mp4");
+    video.write(&written).unwrap();
+
+    let Some(tags) = exiftool(&written) else {
+        skipped("the_sender_and_the_conversation_land_in_the_artist_and_album_tags", "exiftool", REQUIRE_EXIFTOOL);
+        return;
+    };
+    // Read back through an independent reader, and under the names a reader shows: `©ART` renders
+    // as `Artist`, which is the image leg's own tag name, and `©alb` as `Album`, which is the
+    // grouping a per-conversation folder is.
+    assert_eq!(tags.get("Artist").map(String::as_str), Some("sender-handle"), "{tags:#?}");
+    assert_eq!(tags.get("Album").map(String::as_str), Some("3f2e1d0c-b9a8-4756-8433-2211aabbccdd"), "{tags:#?}");
+    // The date tag survives the attribution write, so the three go in through one splice rather
+    // than through a second read-modify-write that could drop what the first one set.
+    assert_eq!(tags.get("ContentCreateDate").map(String::as_str), Some("2021:03:04 14:30:05"), "{tags:#?}");
+}
+
+/// The JPEG leg caps a tag's text because its APP1 segment carries a 16-bit length and `little_exif`
+/// does not enforce it. **This leg has no such ceiling and must not inherit that one**: an `ilst`
+/// atom's size is 32-bit with a 64-bit extension, so a cap here would be one format's constraint
+/// silently crossing into another, applied before either stamper could report it.
+///
+/// The byte search is unconditional and is the real pin — it needs no external tool and it fails if
+/// even one byte was dropped. exiftool then corroborates that the value is readable as a tag rather
+/// than merely present in the file.
+#[test]
+fn a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole() {
+    let dir = TempDir::new().unwrap();
+    let Some(source) = hevc(dir.path(), "chat.mp4") else {
+        skipped("a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole", "ffmpeg", REQUIRE_FFMPEG);
+        return;
+    };
+    // Past the JPEG ceiling by an order of magnitude, so a cap borrowed from that leg cannot survive
+    // this assertion whatever value it was given.
+    let key = "z".repeat(70_000);
+    let attribution = Attribution { sender: None, conversation: Some(ConversationId::new(&key)) };
+
+    let mut video = Mp4::read(&source).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 3, 4, 14, 30, 5), offset: None, location: None, attribution: Some(&attribution) }).unwrap();
+    let written = dir.path().join("out.mp4");
+    video.write(&written).unwrap();
+
+    let bytes = fs::read(&written).unwrap();
+    assert!(bytes.windows(key.len()).any(|window| window == key.as_bytes()), "the key was shortened on its way into the atom");
+
+    let Some(tags) = exiftool(&written) else {
+        skipped("a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole", "exiftool", REQUIRE_EXIFTOOL);
+        return;
+    };
+    assert_eq!(tags.get("Album").map(String::len), Some(key.len()), "the atom is present but does not read back as a whole tag");
+    // The date still reads back, so the oversized tag did not cost the metadata around it either.
+    assert_eq!(tags.get("ContentCreateDate").map(String::as_str), Some("2021:03:04 14:30:05"), "{:?}", tags.get("ContentCreateDate"));
+}
+
+#[test]
+fn a_stamp_with_no_attribution_writes_neither_tag() {
+    let dir = TempDir::new().unwrap();
+    let Some(source) = hevc(dir.path(), "memory.mp4") else {
+        skipped("a_stamp_with_no_attribution_writes_neither_tag", "ffmpeg", REQUIRE_FFMPEG);
+        return;
+    };
+    // The memories leg passes `None`, and it must stay a leg that writes no artist and no album.
+    let mut video = Mp4::read(&source).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 3, 4, 14, 30, 5), offset: None, location: None, attribution: None }).unwrap();
+    let written = dir.path().join("out.mp4");
+    video.write(&written).unwrap();
+
+    let Some(tags) = exiftool(&written) else {
+        skipped("a_stamp_with_no_attribution_writes_neither_tag", "exiftool", REQUIRE_EXIFTOOL);
+        return;
+    };
+    assert_eq!(tags.get("Artist"), None, "{tags:#?}");
+    assert_eq!(tags.get("Album"), None, "{tags:#?}");
 }
 
 // ---- the udta shadow rule ----
@@ -478,7 +570,7 @@ fn the_sentinel_real_memory_videos_carry_does_not_block_the_coordinate() {
 
     let mut video = Mp4::read(&shaped).unwrap();
     assert_eq!(video.location_atom(), None, "an arbitrary udta child is not a location atom");
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: None, location: Some(point(PARIS)) }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: None, location: Some(point(PARIS)), attribution: None }).unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
@@ -517,7 +609,7 @@ fn a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate() {
 
     // Rio, which is nowhere near the Paris the `loci` names, so a written duplicate is visible in
     // any reader rather than hidden behind rounding.
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: None, location: Some(point(RIO)) }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: None, location: Some(point(RIO)), attribution: None }).unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
@@ -549,7 +641,9 @@ fn every_header_date_and_both_tags_read_back_correctly_through_two_independent_r
 
     let mut video = Mp4::read(&source).unwrap();
     let paris = FixedOffset::east_opt(3600).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: Some(paris), location: Some(point(PARIS)) }).unwrap();
+    video
+        .stamp(&VideoStamp { local: at(2021, 1, 15, 14, 30, 5), offset: Some(paris), location: Some(point(PARIS)), attribution: None })
+        .unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
@@ -586,7 +680,9 @@ fn a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres() {
 
     let mut video = Mp4::read(&source).unwrap();
     let rio = FixedOffset::west_opt(3 * 3600).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 10, 30, 5), offset: Some(rio), location: Some(point(RIO)) }).unwrap();
+    video
+        .stamp(&VideoStamp { local: at(2021, 1, 15, 10, 30, 5), offset: Some(rio), location: Some(point(RIO)), attribution: None })
+        .unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
@@ -609,7 +705,7 @@ fn an_unknown_offset_writes_no_zone_rather_than_claiming_utc() {
     };
 
     let mut video = Mp4::read(&source).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 0, 0, 0), offset: None, location: None }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 0, 0, 0), offset: None, location: None, attribution: None }).unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
@@ -638,7 +734,8 @@ fn a_capture_before_1970_is_refused_and_changes_nothing() {
     let mut video = Mp4::read(&source).unwrap();
     // 1965 is a legal raw value against MP4's 1904 epoch, and both readers would show it as a date
     // in the 2030s because they treat anything under the boundary as unix seconds.
-    let refused = video.stamp(&VideoStamp { local: at(1965, 6, 1, 12, 0, 0), offset: None, location: None }).unwrap_err();
+    let refused =
+        video.stamp(&VideoStamp { local: at(1965, 6, 1, 12, 0, 0), offset: None, location: None, attribution: None }).unwrap_err();
     assert!(refused.to_string().contains("before 1970"), "{refused}");
     assert_eq!(video.as_bytes(), &before[..], "a refused stamp leaves the buffer exactly as it was");
     assert_eq!(fs::read(&source).unwrap(), before, "and the source is never written to at all");
@@ -685,7 +782,7 @@ fn a_video_whose_movie_header_gives_it_no_timescale_is_refused_rather_than_crash
 fn a_co64_chunk_table_is_rewritten_behind_the_tag_splice() {
     let before = with_co64(4);
     let mut video = Mp4::new(before.clone()).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None, attribution: None }).unwrap();
     let out = video.as_bytes();
 
     // The fixed-size header patch still landed on a file carrying a 64-bit table.
@@ -736,7 +833,7 @@ fn a_fragmented_file_stamps_cleanly_and_everything_before_moov_stays_put() {
     assert_eq!(order, [*b"ftyp", *b"moof", *b"mdat", *b"mfra", *b"moov"], "the fixture's top-level order");
 
     let mut video = Mp4::new(before.clone()).unwrap();
-    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None }).unwrap();
+    video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None, attribution: None }).unwrap();
     let out = video.as_bytes();
 
     // The header patch landed, so the stamp ran at all on a fragmented file.
@@ -777,7 +874,8 @@ fn a_chunk_table_the_tagging_crate_refuses_errors_cleanly_and_changes_nothing() 
     before.extend(wrap(b"mdat", &[0; 16]));
 
     let mut video = Mp4::new(before.clone()).unwrap();
-    let refused = video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None }).unwrap_err();
+    let refused =
+        video.stamp(&VideoStamp { local: at(2021, 1, 15, 13, 30, 5), offset: None, location: None, attribution: None }).unwrap_err();
     assert!(matches!(refused, VideoError::Tag { .. }), "{refused}");
     assert!(refused.to_string().contains("co64"), "{refused}");
     // The header patch runs first but against a copy, so the refusal leaves the buffer exactly as

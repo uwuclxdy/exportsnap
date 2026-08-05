@@ -767,6 +767,132 @@ fn the_manifest_dir_is_a_per_user_data_dir_outside_the_repo() {
     assert!(!dir.starts_with(env!("CARGO_MANIFEST_DIR")), "the manifest holds signed urls: {}", dir.display());
 }
 
+// ---- excluding a row this build writes nothing for ----
+
+/// Writing `Excluded` over an already-`Excluded` row must touch nothing, or `updated_at` degrades
+/// from "the last status transition" to "the last run" — and an excluded row is re-derived by every
+/// run from the same rule, so every run would rewrite every one of them.
+///
+/// The sentinel is load-bearing, not decoration: `unixepoch()` has one-second resolution, so a second
+/// call landing in the same second as the first rewrites the row with the value it already had and no
+/// assertion could tell a rewrite from a skip.
+///
+/// **The still-`Pending` row is the positive control, and it shares the pair of calls.** Without it a
+/// `mark_excluded` that had stopped writing anything at all would pass, because a dead call leaves a
+/// backdated row alone just as well as a correct one does.
+#[test]
+fn excluding_an_already_excluded_row_leaves_it_untouched() {
+    /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
+    const SENTINEL: i64 = 1_000_000_000;
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+        manifest.exclude(ItemKind::Memory, &["m-01".to_owned()]).unwrap();
+        assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Excluded, "the row the next call must leave alone");
+        assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending, "and the one it must still be able to exclude");
+    }
+
+    // Only reachable by editing the database, which is the point: it backdates both rows so a
+    // rewrite is distinguishable from a skip.
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET updated_at = ?1", [SENTINEL]).unwrap();
+    drop(conn);
+
+    let mut manifest = work.open();
+    // One call carrying both, which is also the shape `local_fix::run` uses: the already-excluded
+    // row and the newly-excluded one go through a single transaction.
+    manifest.exclude(ItemKind::Memory, &["m-01".to_owned(), "m-02".to_owned()]).unwrap();
+
+    let untouched = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(untouched.updated_at, SENTINEL, "a second call rewrote a row whose status never transitioned");
+    assert_eq!(untouched.status, ItemStatus::Excluded, "and it is still excluded, so the timestamp did not survive by the row moving");
+    let control = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+    assert_eq!(control.status, ItemStatus::Excluded, "positive control: the same call did run, and did exclude a new row");
+    assert_ne!(control.updated_at, SENTINEL, "and it stamped that transition");
+}
+
+#[test]
+fn an_excluded_row_is_never_offered_as_work_and_comes_back_through_reset() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+    manifest.exclude(ItemKind::Memory, &["m-01".to_owned()]).unwrap();
+
+    assert_eq!(owed(&manifest, 3), ["m-02"], "an excluded row is not work, whatever the retry cap");
+    // Counted apart from every other status, which is the whole reason the status exists.
+    let report = manifest.resume(ItemKind::Memory).unwrap();
+    assert_eq!(report.excluded, 1);
+    assert_eq!((report.pending, report.failed, report.source_missing, report.retired, report.verified), (1, 0, 0, 0, 0));
+    assert!(report.demoted.is_empty(), "resume never demotes an excluded row: {:?}", report.demoted);
+
+    // The way back, for the build whose rule about what to write has changed.
+    manifest.reset(ItemKind::Memory, "m-01").unwrap();
+    assert_eq!(owed(&manifest, 3), ["m-01", "m-02"]);
+}
+
+#[test]
+fn excluding_a_row_no_run_enrolled_is_refused_rather_than_silently_doing_nothing() {
+    // The `status <> excluded` clause means a zero row count no longer implies the row is absent, so
+    // this is the case that would go quiet if the read that discriminates them were dropped.
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    match manifest.exclude(ItemKind::Memory, &["never-enrolled".to_owned()]) {
+        Err(ManifestError::UnknownItem { kind, source_id }) => {
+            assert_eq!((kind, source_id.as_str()), (ItemKind::Memory, "never-enrolled"));
+        }
+        other => panic!("expected UnknownItem, got {other:?}"),
+    }
+}
+
+/// The batch is one transaction, and an unknown id in it rolls the whole thing back rather than
+/// leaving half the set excluded. That is the observable the transaction buys — the fsync it saves
+/// is not something a test can see from outside — and it is also the behaviour a caller has to be
+/// able to reason about: a partially-applied exclusion would leave the plan and the manifest
+/// disagreeing about which rows this build writes nothing for.
+#[test]
+fn one_unknown_id_rolls_the_whole_exclusion_back() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+
+    match manifest.exclude(ItemKind::Memory, &["m-01".to_owned(), "never-enrolled".to_owned(), "m-02".to_owned()]) {
+        Err(ManifestError::UnknownItem { source_id, .. }) => assert_eq!(source_id, "never-enrolled"),
+        other => panic!("expected UnknownItem, got {other:?}"),
+    }
+    // `m-01` sorted before the bad id and was written inside the transaction, so it is the one that
+    // proves the rollback rather than the one that was never reached.
+    assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Pending, "the write before the failure was rolled back");
+    assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending);
+}
+
+/// Excluding is a decision about OUTPUT; the retirement sweep is a fact about the SOURCE. So an
+/// excluded row the enumeration can no longer name is retired like any other, because "gone from the
+/// export" is a thing only `Retired` records and leaving it excluded would have the row claiming an
+/// enrolled source that is not there.
+///
+/// It costs no churn either, which is what separates this from the `Retired` exemption: the row this
+/// writes is `Retired`, and that one IS exempt, so the rewrite happens once and never again.
+#[test]
+fn a_vanished_excluded_row_is_retired() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    manifest.exclude(ItemKind::Memory, &["m-01".to_owned()]).unwrap();
+
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
+    assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Retired, "the source left the export, so the row says so");
+
+    // And the second sweep is a no-op, because the status it wrote is the exempt one.
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET updated_at = ?1", [1_000_000_000_i64]).unwrap();
+    drop(conn);
+    let mut manifest = work.open();
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
+    assert_eq!(manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap().updated_at, 1_000_000_000);
+}
+
 // ---- the on-disk vocabulary ----
 
 #[test]
@@ -774,7 +900,7 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
     // These words are in every user's database. Renaming one silently orphans their rows, so the
     // list is a contract rather than an implementation detail.
     assert_eq!(ItemKind::ALL.map(ItemKind::as_stored), ["memory", "chat_media", "history_export"]);
-    assert_eq!(ItemStatus::ALL.map(ItemStatus::as_stored), ["pending", "done", "failed", "source_missing", "retired"]);
+    assert_eq!(ItemStatus::ALL.map(ItemStatus::as_stored), ["pending", "done", "failed", "source_missing", "retired", "excluded"]);
 
     // Second witness for each; `ItemKind::as_stored`/`ItemStatus::as_stored` above are the first,
     // and `ItemStatus` also has `resume`'s per-status match (src/export/manifest.rs) as a second.
@@ -790,7 +916,12 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
     }
     for status in ItemStatus::ALL {
         match status {
-            ItemStatus::Pending | ItemStatus::Done | ItemStatus::Failed | ItemStatus::SourceMissing | ItemStatus::Retired => {}
+            ItemStatus::Pending
+            | ItemStatus::Done
+            | ItemStatus::Failed
+            | ItemStatus::SourceMissing
+            | ItemStatus::Retired
+            | ItemStatus::Excluded => {}
         }
     }
 }

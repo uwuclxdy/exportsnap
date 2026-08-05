@@ -45,6 +45,10 @@
 //!   gap above. [`Manifest::retire_absent`] is what puts a row here: an enumeration that can no
 //!   longer name the row at all. Same way back as the gap, [`Manifest::reset`], for the run that
 //!   finds the source again.
+//! - [`ItemStatus::Excluded`] — untouched, never handed back as work, and counted apart from both
+//!   of the above. [`Manifest::mark_excluded`] is what puts a row here: a source that is present
+//!   and readable and that this build deliberately writes no output for. Same way back,
+//!   [`Manifest::reset`].
 //!
 //! Nothing here deletes a row, so a re-enumeration ([`Manifest::enroll`]) of the same export is
 //! idempotent and never costs finished work. Retiring is what a row that outlived its source gets
@@ -227,10 +231,23 @@ pub enum ItemStatus {
     /// say how many items vanished since the first run. [`Manifest::retire_absent`] is the only
     /// producer.
     Retired,
+    /// Enrolled, and deliberately never written. The source is present and readable and this build
+    /// produces no output for it at all — decision 44d's dropped chat-media thumbnails are the only
+    /// producer today, through [`Manifest::mark_excluded`].
+    ///
+    /// Counted apart from every neighbour because it is a different fact from each of them. Not
+    /// [`Self::Done`]: nothing was written, so there are no bytes to re-hash. Not [`Self::Failed`]:
+    /// no attempt was made and retrying would change nothing. Not [`Self::SourceMissing`] or
+    /// [`Self::Retired`]: the source is right there, and it is this build's own rule rather than the
+    /// export that decides the row produces nothing. Folding it into any of those would report a gap
+    /// the export does not have.
+    ///
+    /// [`Manifest::reset`] is the way back, for the build whose rules change.
+    Excluded,
 }
 
 impl ItemStatus {
-    pub const ALL: [Self; 5] = [Self::Pending, Self::Done, Self::Failed, Self::SourceMissing, Self::Retired];
+    pub const ALL: [Self; 6] = [Self::Pending, Self::Done, Self::Failed, Self::SourceMissing, Self::Retired, Self::Excluded];
 
     /// The word stored in the `status` column.
     #[must_use]
@@ -241,6 +258,7 @@ impl ItemStatus {
             Self::Failed => "failed",
             Self::SourceMissing => "source_missing",
             Self::Retired => "retired",
+            Self::Excluded => "excluded",
         }
     }
 
@@ -386,6 +404,11 @@ pub struct ResumeReport {
     /// between two runs. Counted apart from [`Self::source_missing`] because the two are different
     /// facts and only the first is a gap in the export as it stands.
     pub retired: u64,
+    /// Items this build deliberately writes no output for. Counted apart from both of the above
+    /// because nothing is missing and nothing vanished: the source is present and the build chose
+    /// not to write it, so a run reporting these as a gap would send a user looking for media that
+    /// is exactly where it always was.
+    pub excluded: u64,
 }
 
 // ---- errors ----
@@ -716,12 +739,94 @@ impl Manifest {
         self.require_hit(changed, kind, source_id)
     }
 
+    /// Records that this build writes no output for these items at all.
+    ///
+    /// Not an attempt and not a gap, so the retry count is left alone. The note is a constant this
+    /// module owns rather than caller text, for the reason [`Self::retire_absent`]'s note gives: a
+    /// fixed string holds no secret, so it skips the redactor and the per-row url read that would
+    /// pay for it.
+    ///
+    /// **Writing `Excluded` over an already-`Excluded` row touches nothing.** That is the same
+    /// property [`Self::retire_absent`] pays for and it is load-bearing for the same reason: an
+    /// excluded row is re-derived by every later run from the same rule, so a statement matching it
+    /// unconditionally would rewrite `updated_at` — documented on [`Item::updated_at`] as the last
+    /// status TRANSITION — on every run, for every excluded row, turning that column into the last
+    /// RUN. The `status <> ?1` clause is what makes the write conditional, and the read below is
+    /// what keeps [`ManifestError::UnknownItem`] answerable once a zero row count no longer implies
+    /// the row is absent. Pinned by `excluding_an_already_excluded_row_leaves_it_untouched`.
+    ///
+    /// Every other status is overwritten, [`ItemStatus::Done`] included: the plan deciding this row
+    /// produces nothing is a statement about the row as it stands rather than about what an earlier
+    /// build did with it, and the module's own rule is that a transition out of `Done` clears the
+    /// output path, the checksum and the length. The residual, stated rather than hidden: an output
+    /// an earlier run wrote and checked in is orphaned on disk by that transition, since nothing
+    /// here deletes files.
+    ///
+    /// **One transaction for the whole set**, the same shape [`Self::retire_absent`] uses and for the
+    /// same reason: a per-item commit is a per-item fsync, and both of these can touch every row of a
+    /// kind. The two used to disagree on that question and no longer do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::UnknownItem`] when nothing enrolled one of the items — the whole
+    /// transaction rolls back — and [`ManifestError::Sqlite`] when a read or a write fails.
+    pub fn exclude(&mut self, kind: ItemKind, source_ids: &[String]) -> Result<(), ManifestError> {
+        /// What an excluded row's `last_error` says.
+        const EXCLUDED_NOTE: &str = "this build writes no output for this item";
+
+        if source_ids.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| sqlite_error("record excluded items", &path, source))?;
+        {
+            let mut write = tx
+                .prepare(
+                    "UPDATE items SET status = ?1, output_path = NULL, checksum = NULL, bytes = NULL, last_error = ?2, \
+                     updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4 AND status <> ?1",
+                )
+                .map_err(|source| sqlite_error("record excluded items", &path, source))?;
+            // The status column alone, not a whole row. This runs once per already-excluded item on
+            // every run after the first, and a full-row read would materialize an output path, a url
+            // and a checksum the verdict never looks at — the narrowing `retire_absent`'s own warning
+            // asks for, which is safe here only because nothing pushes the status filter into sql.
+            let mut status_of = tx
+                .prepare("SELECT status FROM items WHERE kind = ?1 AND source_id = ?2")
+                .map_err(|source| sqlite_error("record excluded items", &path, source))?;
+
+            for source_id in source_ids {
+                let changed = write
+                    .execute(params![ItemStatus::Excluded.as_stored(), EXCLUDED_NOTE, kind.as_stored(), source_id])
+                    .map_err(|source| sqlite_error("record excluded items", &path, source))?;
+                if changed != 0 {
+                    continue;
+                }
+                // Nothing changed means one of exactly two things, since the only row the statement
+                // above can miss is one already carrying the status it writes: the row is already
+                // excluded, or nothing enrolled it. Only a read tells them apart.
+                let stored: Option<String> = status_of
+                    .query_row(params![kind.as_stored(), source_id], |row| row.get(0))
+                    .optional()
+                    .map_err(|source| sqlite_error("record excluded items", &path, source))?;
+                match stored {
+                    Some(stored) if ItemStatus::from_stored(&stored)? == ItemStatus::Excluded => {}
+                    _ => return Err(ManifestError::UnknownItem { kind, source_id: source_id.clone() }),
+                }
+            }
+        }
+        tx.commit().map_err(|source| sqlite_error("record excluded items", &path, source))
+    }
+
     /// Puts an item back on the work list as if no run had ever touched it, retry count included.
     ///
-    /// This is the way out of [`ItemStatus::SourceMissing`] and of [`ItemStatus::Retired`]: a caller
-    /// that finds the media a previous run could not — in an export part that was not extracted
-    /// yet — calls this. Neither status is ever offered as work, so a source that comes back needs
-    /// this call or its row stays parked for ever.
+    /// This is the way out of [`ItemStatus::SourceMissing`], of [`ItemStatus::Retired`] and of
+    /// [`ItemStatus::Excluded`]: a caller that finds the media a previous run could not — in an
+    /// export part that was not extracted yet — calls this, and so does a build whose rule about
+    /// what to write has changed. None of the three is ever offered as work, so a row that becomes
+    /// workable again needs this call or it stays parked for ever.
     ///
     /// # Errors
     ///
@@ -754,6 +859,15 @@ impl Manifest {
     /// disappearing afterwards does not un-do it; [`Self::resume`] is what still re-checks those
     /// bytes. And [`ItemStatus::Retired`], because it is already the answer this sweep would write —
     /// see the comment on the filter for what re-writing it would cost.
+    ///
+    /// **[`ItemStatus::Excluded`] is deliberately NOT a third exemption**, and the choice is pinned
+    /// by `a_vanished_excluded_row_is_retired`. Excluding is a decision about output; this sweep is
+    /// a fact about the source. An excluded thumbnail whose file left the export is gone, not merely
+    /// unwritten, and `Retired` is the only status that records when. Exempting it would leave the
+    /// row claiming an enrolled source that is not there, which is the exact state this sweep
+    /// exists to close. It costs no churn either, which is what separates it from the `Retired`
+    /// case: the row this writes is `Retired`, and that one IS exempt, so the rewrite happens once
+    /// and never again.
     ///
     /// **`unreadable` is the guard, and it is why this takes the walk's own list rather than a
     /// caller's verdict about it.** A directory that could not be listed is not evidence a file is
@@ -835,8 +949,10 @@ impl Manifest {
     ///
     /// [`ItemStatus::Pending`] and [`ItemStatus::Failed`] items whose recorded failure count is
     /// below `max_attempts`. [`ItemStatus::Done`] is skipped, which is what a resume buys, and
-    /// [`ItemStatus::SourceMissing`] and [`ItemStatus::Retired`] are skipped because there is
-    /// nothing to fetch under either.
+    /// [`ItemStatus::SourceMissing`], [`ItemStatus::Retired`] and [`ItemStatus::Excluded`] are
+    /// skipped because there is nothing to fetch or write under any of them. The statement names
+    /// the two statuses it wants rather than excluding the ones it does not, so a status added
+    /// later is out of the work list until someone puts it in deliberately.
     ///
     /// The cap is compared against never-attempted items too, whose count is zero, so a
     /// `max_attempts` of 0 offers no work at all rather than offering the untried ones: it reads as
@@ -923,7 +1039,7 @@ impl Manifest {
             tx.commit().map_err(|source| sqlite_error("demote unverified items", &path, source))?;
         }
 
-        let mut report = ResumeReport { demoted, verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0 };
+        let mut report = ResumeReport { demoted, verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 };
         for (status, count) in self.counts(kind)? {
             match status {
                 ItemStatus::Done => report.verified = count,
@@ -931,6 +1047,7 @@ impl Manifest {
                 ItemStatus::Failed => report.failed = count,
                 ItemStatus::SourceMissing => report.source_missing = count,
                 ItemStatus::Retired => report.retired = count,
+                ItemStatus::Excluded => report.excluded = count,
             }
         }
         Ok(report)

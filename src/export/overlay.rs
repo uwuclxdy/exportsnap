@@ -30,8 +30,11 @@ const JPEG_QUALITY: u8 = 95;
 
 /// `main` with `overlay` drawn over it, encoded as JPEG bytes.
 ///
-/// `overlay` is `None` for a main that needs re-encoding but has nothing to composite — a main
-/// this build can decode but that is not already a JPEG.
+/// **There is always an overlay.** The parameter used to be optional, for a main that needed
+/// re-encoding with nothing to composite; decision 47 emptied that set — a lone `png` is copied
+/// through untouched and a lone `jpg` was already — and the signature now says so, rather than a
+/// comment claiming an arm was unreached. An "X cannot happen" is a guarantee only when the compiler
+/// rejects the counterexample.
 ///
 /// An overlay whose dimensions differ from the main's is scaled to fit **within** the frame,
 /// preserving its own aspect ratio, and centred — contain rather than fill. All 161 observed
@@ -47,33 +50,32 @@ const JPEG_QUALITY: u8 = 95;
 ///
 /// Returns [`OverlayError`] when either file cannot be read or decoded, or when the composite
 /// cannot be encoded.
-pub fn compose(main: &Path, overlay: Option<&Path>) -> Result<Vec<u8>, OverlayError> {
+pub fn compose(main: &Path, overlay: &Path) -> Result<Vec<u8>, OverlayError> {
     let mut base = decode(main)?;
 
-    if let Some(overlay) = overlay {
-        let drawn = decode(overlay)?;
-        let drawn = if drawn.dimensions() == base.dimensions() {
-            drawn
-        } else {
-            // Contain: scale to fit within the frame, preserving the overlay's aspect, then centre
-            // it. On a same-aspect pair the scale caps both dimensions exactly on the main's (the
-            // rounding error of one f64 divide-and-multiply is far under half a pixel), so those
-            // pairs composite identically to the fill resize this replaced — the same-aspect
-            // fixture must stay green. The `max(1.0)` keeps an extreme overlay aspect from
-            // rounding a scaled dimension to zero.
-            let scale = (base.width() as f64 / drawn.width() as f64).min(base.height() as f64 / drawn.height() as f64);
-            let scaled_w = (drawn.width() as f64 * scale).round().max(1.0) as u32;
-            let scaled_h = (drawn.height() as f64 * scale).round().max(1.0) as u32;
-            imageops::resize(&drawn, scaled_w, scaled_h, FilterType::Lanczos3)
-        };
-        // The scaled layer fits within the base by construction, so these cannot underflow.
-        let x = i64::from(base.width() - drawn.width()) / 2;
-        let y = i64::from(base.height() - drawn.height()) / 2;
-        imageops::overlay(&mut base, &drawn, x, y);
-    }
+    let drawn = decode(overlay)?;
+    let drawn = if drawn.dimensions() == base.dimensions() {
+        drawn
+    } else {
+        // Contain: scale to fit within the frame, preserving the overlay's aspect, then centre
+        // it. On a same-aspect pair the scale caps both dimensions exactly on the main's (the
+        // rounding error of one f64 divide-and-multiply is far under half a pixel), so those
+        // pairs composite identically to the fill resize this replaced — the same-aspect
+        // fixture must stay green. The `max(1.0)` keeps an extreme overlay aspect from
+        // rounding a scaled dimension to zero.
+        let scale = (base.width() as f64 / drawn.width() as f64).min(base.height() as f64 / drawn.height() as f64);
+        let scaled_w = (drawn.width() as f64 * scale).round().max(1.0) as u32;
+        let scaled_h = (drawn.height() as f64 * scale).round().max(1.0) as u32;
+        imageops::resize(&drawn, scaled_w, scaled_h, FilterType::Lanczos3)
+    };
+    // The scaled layer fits within the base by construction, so these cannot underflow.
+    let x = i64::from(base.width() - drawn.width()) / 2;
+    let y = i64::from(base.height() - drawn.height()) / 2;
+    imageops::overlay(&mut base, &drawn, x, y);
 
     // JPEG carries no alpha channel, so the composite is flattened before encoding. Anything the
-    // overlay left transparent already shows the main through it.
+    // overlay left transparent already shows the main through it — which holds because there is
+    // always a main under the layer, the property decision 47's pass-through exists to keep true.
     let flattened = image::DynamicImage::ImageRgba8(base).to_rgb8();
     let mut bytes = Vec::new();
     JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY).encode_image(&flattened).map_err(|source| OverlayError::Encode { source })?;

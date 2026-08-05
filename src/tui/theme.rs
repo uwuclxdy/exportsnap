@@ -134,11 +134,13 @@ impl Palette {
     /// default state and nothing has gone wrong yet; `source_missing` is a real gap to report.
     /// `retired` is neutral for the opposite reason to `source_missing`: the export stopped naming
     /// that row, so there is nothing left to go looking for and nothing for a reader to act on.
+    /// `excluded` is neutral for a third reason again — the source is right there and the build
+    /// chose not to write it, so there is nothing wrong to point at.
     #[must_use]
     pub const fn status_pill(self, status: crate::export::manifest::ItemStatus) -> Color {
         use crate::export::manifest::ItemStatus;
         match status {
-            ItemStatus::Pending | ItemStatus::Retired => self.text_dim,
+            ItemStatus::Pending | ItemStatus::Retired | ItemStatus::Excluded => self.text_dim,
             ItemStatus::Done => self.success,
             ItemStatus::Failed => self.danger,
             ItemStatus::SourceMissing => self.warning,

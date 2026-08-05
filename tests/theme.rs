@@ -300,4 +300,7 @@ fn the_status_pill_colors_follow_the_manifest_statuses() {
     // Neutral, and for the opposite reason to `pending`: a retired row is not the start of some
     // work, it is a row the export stopped naming, so there is nothing for a reader to act on.
     assert_eq!(palette.status_pill(ItemStatus::Retired), palette.text_dim);
+    // Neutral for a third reason again: the source is present and this build chose not to write it,
+    // so there is nothing wrong for the colour to point at.
+    assert_eq!(palette.status_pill(ItemStatus::Excluded), palette.text_dim);
 }

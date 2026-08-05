@@ -858,6 +858,10 @@ fn pill_spans(palette: &Palette, status: ItemStatus) -> Vec<Span<'static>> {
         ItemStatus::Failed => "failed",
         ItemStatus::SourceMissing => "missing",
         ItemStatus::Retired => "retired",
+        // The user-facing verb, not the stored word `excluded`, the same way `source_missing`
+        // renders as `missing`: decision 44d's own word for what happens to a thumbnail is
+        // "dropped", and at seven characters it also fits the column every other pill pads out to.
+        ItemStatus::Excluded => "dropped",
     };
     let bracket = Style::new().fg(palette.text_dim);
     let width = 2 + label.len() + 2;

@@ -396,11 +396,13 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
             failed: 0,
             source_missing: 0,
             retired: 0,
+            excluded: 0,
         },
         fixed: 1,
         failed: vec![],
         skipped: 2,
         deferred: 0,
+        excluded: 0,
         notices: vec![],
     };
     sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();
@@ -566,11 +568,12 @@ fn a_worker_that_exits_after_finished_does_not_overwrite_the_outcome() {
     let mut app = app_on_memories(&dir);
     let (sender, receiver) = mpsc::channel();
     let report = FixReport {
-        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0 },
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
         fixed: 1,
         failed: vec![],
         skipped: 0,
         deferred: 0,
+        excluded: 0,
         notices: vec![],
     };
     sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();
@@ -783,11 +786,12 @@ fn the_completion_summary_hides_zero_counts() {
     let mut app = app_on_memories(&dir);
     let (sender, receiver) = mpsc::channel();
     let report = FixReport {
-        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0 },
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
         fixed: 0,
         failed: vec![],
         skipped: 3,
         deferred: 0,
+        excluded: 0,
         notices: vec![],
     };
     sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();

@@ -39,7 +39,17 @@
 //! Decision 33: output lands under [`default_out_root`], and the source is only ever read. A bad
 //! run is deleted rather than recovered, and the manifest's checksum resume can tell a finished
 //! file from a corrupted one precisely because the file it hashes is one this run created.
+//!
+//! # The item-level pass is shared, the planning is not
+//!
+//! [`Plan::build`] is the memories planner and it is the only memories-specific thing left here.
+//! [`PlannedItem`], [`fix`] and [`run`] are leg-agnostic: they take a [`SourceMedia`], a
+//! [`Capture`], a coordinate that may be `None` and an output path, and they neither know nor ask
+//! which enumeration produced them. [`super::chat_fix`] is the second planner, and it fills the
+//! same [`Plan`] rather than growing a second copy of the composite-stamp-write-date sequence —
+//! two copies of that sequence would be two places a metadata rule has to be kept true.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -54,8 +64,8 @@ use crate::export::env::{self, Tool};
 use crate::export::exif::{ExifError, Jpeg, Stamp};
 use crate::export::ffmpeg::{self, FfmpegError};
 use crate::export::manifest::{ItemKind, Manifest, ManifestError, ResumeReport};
-use crate::export::memories::{Bucket, Day, MemoryMedia, Pairing, Reconciliation};
-use crate::export::model::{LocationPoint, Memories, Memory, Timestamp};
+use crate::export::memories::{Bucket, Day, Pairing, Reconciliation};
+use crate::export::model::{Attribution, LocationPoint, Memories, Memory, Timestamp};
 use crate::export::overlay::{self, OverlayError};
 use crate::export::timezone;
 use crate::export::video::{LocationAtom, Mp4, NotMp4, VideoError, VideoStamp};
@@ -67,16 +77,47 @@ use crate::export::video::{LocationAtom, Mp4, NotMp4, VideoError, VideoStamp};
 const OUT_DIR: &str = "exportsnap-out";
 
 /// Extensions the image leg reads. A main outside this set is deferred rather than attempted.
+///
+/// **The ceiling, and its upgrade path.** The image leg admits exactly these three today, and adding
+/// a fourth is not one edit — it needs two separate answers, because they have different
+/// user-visible outcomes:
+///
+/// 1. **Does it copy through?** That is [`PASS_THROUGH_EXTENSIONS`], and it decides whether the
+///    output keeps the source's own format and bytes or becomes a JPEG.
+/// 2. **Can this build stamp it?** That is whether [`crate::export::exif`] can write metadata into
+///    it at all, which today means "is it a JPEG" and nothing else.
+///
+/// **Today's three answer the pair as a package only by coincidence**: `jpg`/`jpeg` are stamped and
+/// not copied through, `png` is copied through and not stamped. A fourth could want both — a format
+/// this build learns to write metadata into — or neither, in which case it belongs nowhere near this
+/// list and stays deferred at [`Leg::of`]. Reading the current pairing as a rule is the mistake this
+/// paragraph exists to stop.
+///
+/// A format added here but NOT to [`PASS_THROUGH_EXTENSIONS`] reaches [`crate::export::exif::Jpeg`]
+/// and is refused by name, one item at a time. That failure is chosen: the alternative is silently
+/// re-encoding a format nobody validated into a JPEG and keeping no original, which is the defect
+/// class decision 47 exists to close, one format over.
 const IMAGE_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
 
 /// Extensions the video leg reads.
 const VIDEO_EXTENSIONS: [&str; 1] = ["mp4"];
 
-/// Image extensions whose bytes can be copied straight through instead of re-encoded.
+/// The image formats this build copies through under their OWN extension instead of as a JPEG.
 ///
-/// Only the image leg consults this. The video leg has no equivalent list because it has no
-/// equivalent choice: a video's pixels are touched by a transcode or by nothing.
-const VERBATIM_EXTENSIONS: [&str; 2] = ["jpg", "jpeg"];
+/// The question is whether the OUTPUT is still a JPEG, not whether the bytes are re-encoded — a
+/// `.jpg` main with no overlay is copied through too, and is still stamped. A `.png` cannot be,
+/// because this build writes EXIF only into a JPEG.
+///
+/// **Read as a membership set and nowhere as a position.** It used to be indexed for the output
+/// extension, which made its LENGTH load-bearing at a call site that never mentioned the length: the
+/// two readings agreed only while it held exactly one member, and a second one added at the front
+/// would have had [`output_extension`] answer with the wrong format's name while `passes_through`
+/// admitted the right one. [`output_extension`] now takes the item's own extension instead, so this
+/// may grow at either end and nothing downstream moves.
+///
+/// Growing it is the FIRST of the two questions [`IMAGE_EXTENSIONS`] sets out; a format has to be in
+/// that list to reach this one at all.
+const PASS_THROUGH_EXTENSIONS: [&str; 1] = ["png"];
 
 /// What a transcode writes before the finished file replaces it.
 ///
@@ -113,6 +154,11 @@ pub fn default_out_root(source: impl AsRef<Path>) -> PathBuf {
 pub enum TimeSource {
     /// The entry's own `Date`, which only an exact bucket may hand over.
     Entry,
+    /// The `Created` of the chat message that named the file: the chat-media leg's first step, and
+    /// the one thing in either chain with no twin on the other side. Kept apart from [`Self::Entry`]
+    /// rather than reworded to cover both, because the two are different records in different files
+    /// and a user reading "the memory's own entry" against a chat photo learns something false.
+    Message,
     /// The `-main` file's own metadata: an image's `DateTimeOriginal`, `CreateDate` or
     /// `ModifyDate`, a video's `mvhd` creation time.
     Embedded,
@@ -124,6 +170,7 @@ impl fmt::Display for TimeSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Entry => "the memory's own entry",
+            Self::Message => "the message that sent it",
             Self::Embedded => "the file's embedded timestamp",
             Self::Filename => "the day in the filename",
         })
@@ -176,7 +223,7 @@ impl Capture {
     /// The offset is always stated on this path, `+00:00` included, because the instant itself is
     /// exactly known either way: with GPS the wall time is real local time, and without it the
     /// wall time is UTC, so saying so keeps the instant recoverable from the file.
-    fn from_utc(utc: NaiveDateTime, location: Option<LocationPoint>, source: TimeSource) -> Self {
+    pub(crate) fn from_utc(utc: NaiveDateTime, location: Option<LocationPoint>, source: TimeSource) -> Self {
         let offset = location.and_then(|location| timezone::offset(location, utc)).unwrap_or_else(|| Utc.fix());
         Self { local: utc.and_utc().with_timezone(&offset).naive_local(), offset: Some(offset), source }
     }
@@ -184,6 +231,21 @@ impl Capture {
     /// The entry's own `Date`, which an exact bucket hands over.
     fn from_entry(utc: NaiveDateTime, location: Option<LocationPoint>) -> Self {
         Self::from_utc(utc, location, TimeSource::Entry)
+    }
+
+    /// The `Created` of the message that named a chat-media file.
+    ///
+    /// No location argument, and that is the chat leg's whole GPS story rather than an omission:
+    /// `chat_history.json` carries no coordinate field anywhere, so there is nothing to place the
+    /// instant with and the wall time stays UTC with the offset saying so.
+    pub(crate) fn from_message(utc: NaiveDateTime) -> Self {
+        Self::from_utc(utc, None, TimeSource::Message)
+    }
+
+    /// The day in the filename at midnight: the last step of both legs' chains, and the only one
+    /// that invents a time of day. `None` when the day names no real calendar date.
+    pub(crate) fn from_day(day: Day) -> Option<Self> {
+        Some(Self { local: midnight(day)?, offset: None, source: TimeSource::Filename })
     }
 }
 
@@ -204,10 +266,12 @@ pub enum Leg {
 impl Leg {
     /// The extension every one of this leg's outputs carries.
     ///
-    /// **Images come out as JPEG whatever went in**, including a `-main.png` the observed export
-    /// does not contain, because the encoder is what keeps a PNG out of `little_exif` (see
-    /// [`crate::export::exif`]). Videos come out as MP4 whether they were re-encoded or copied,
-    /// since both routes end in an MP4 container.
+    /// **The default, not the whole answer for the image leg** — [`output_extension`] is, and it is
+    /// what every output path and every collision key goes through. An image that is composited or
+    /// re-encoded comes out as JPEG whatever went in, which is also what keeps a PNG out of
+    /// `little_exif` (see [`crate::export::exif`]); a PNG with nothing to composite is copied through
+    /// under its own extension instead, per decision 47. Videos come out as MP4 whether they were
+    /// re-encoded or copied, since both routes end in an MP4 container.
     #[must_use]
     pub const fn extension(self) -> &'static str {
         match self {
@@ -217,7 +281,7 @@ impl Leg {
     }
 
     /// Which leg reads a main with this extension, or `None` for a format this build does not read.
-    fn of(extension: &str) -> Option<Self> {
+    pub(crate) fn of(extension: &str) -> Option<Self> {
         if matches(extension, &IMAGE_EXTENSIONS) {
             Some(Self::Image)
         } else if matches(extension, &VIDEO_EXTENSIONS) {
@@ -282,7 +346,7 @@ impl VideoOptions {
 ///
 /// [`Timestamp`] is range-checked rather than calendar-checked, so `2021-02-30` parses. This is
 /// the first caller handing one to a date crate, which the design says has to convert fallibly.
-fn calendar(timestamp: Timestamp) -> Option<NaiveDateTime> {
+pub(crate) fn calendar(timestamp: Timestamp) -> Option<NaiveDateTime> {
     NaiveDate::from_ymd_opt(i32::from(timestamp.year()), u32::from(timestamp.month()), u32::from(timestamp.day()))?.and_hms_opt(
         u32::from(timestamp.hour()),
         u32::from(timestamp.minute()),
@@ -331,22 +395,53 @@ fn agreements(memories: &Memories) -> BTreeMap<Bucket, Agreement> {
 
 // ---- the plan ----
 
-/// One memory this run is going to fix, and everything it needs to do it.
+/// The source bytes one planned item is built from, with no leg-specific record attached.
+///
+/// **Both legs plan against this, which is what lets one [`fix`] serve both.** A memory's
+/// `-main`/`-overlay` pair and a chat-media unit's file plus its zip-paired overlay reduce to the
+/// same four facts, and the item-level pass asks nothing beyond them: it composites, stamps, writes
+/// and dates. What each leg's own discovery type carries past this — a uuid, a date bucket, a
+/// filename family, a history token — decides which items exist and where they land, and both of
+/// those questions are answered before a byte is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMedia {
+    /// The file the output is made from.
+    pub main: PathBuf,
+    /// The day [`Self::main`]'s own filename leads with, which is the last step of either leg's
+    /// date chain. Carried here rather than re-parsed, because the two legs spell a filename
+    /// differently and each has already parsed its own.
+    pub day: Day,
+    /// [`Self::main`]'s extension, verbatim as its name spells it. Carried rather than re-derived
+    /// from the path, so the leg reads back the same string its own discovery parsed.
+    pub extension: String,
+    /// The caption layer composited over it, where the export ships one as a separate file.
+    pub overlay: Option<PathBuf>,
+}
+
+/// One item this run is going to fix, and everything it needs to do it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlannedItem {
-    /// The manifest's identity for this memory: the media's uuid.
+    /// The manifest's identity: a memory's uuid, or a chat-media unit's file id.
     pub source_id: String,
-    /// Where the entry sits in `memories_history.json`.
-    pub entry_index: usize,
-    pub media: MemoryMedia,
+    pub media: SourceMedia,
     /// Which half of the pass fixes it. Also what decides [`Self::output`]'s extension.
     pub leg: Leg,
     pub capture: Capture,
     /// The coordinate this item is allowed to carry, after decision 32. `None` means it gets none,
-    /// whether because the entry had none or because its bucket disagreed.
+    /// whether because the entry had none, because its bucket disagreed, or — on the chat-media
+    /// leg, always — because the export states no coordinate for chat media anywhere.
     pub location: Option<LocationPoint>,
+    /// Who sent it and in which thread, decision 44c: metadata only, never the filename. `None` on
+    /// the memories leg, which has neither.
+    pub attribution: Option<Attribution>,
     /// Where the fixed copy lands.
     pub output: PathBuf,
+    /// The directory the export's own files are copied into verbatim, beside the output.
+    ///
+    /// Decision 44b's `both` overlay mode, which only the chat-media leg runs: the merged file is
+    /// what the run produces and the originals are what it refuses to lose. `None` on the memories
+    /// leg, whose composite is the only artifact it has ever written.
+    pub originals: Option<PathBuf>,
 }
 
 /// Why a paired memory is not in [`Plan::items`].
@@ -389,10 +484,21 @@ pub struct Deferred {
 /// in this list instead, so it does not move.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
-    /// One per paired memory whose media this build can fix, in `memories_history.json` order.
+    /// Which manifest rows this plan is about. Carried here rather than passed to [`run`] beside
+    /// it, so a plan and the kind it transitions cannot be handed over out of step.
+    pub kind: ItemKind,
+    /// One per item whose media this build can fix, in the enumeration's own order.
     pub items: Vec<PlannedItem>,
-    /// Paired memories this pass will not touch, in the same order.
+    /// Items this pass will not touch, in the same order.
     pub deferred: Vec<Deferred>,
+    /// Source ids this plan deliberately produces no output for, in the same order.
+    ///
+    /// Decision 44d's dropped chat-media thumbnails. Different from [`Self::deferred`] in the one
+    /// way that matters to a resume: a deferred row stays
+    /// [`crate::export::manifest::ItemStatus::Pending`] so a later build can pick it up, while these
+    /// are written [`crate::export::manifest::ItemStatus::Excluded`] and taken off the work list, so
+    /// nothing re-offers them every run for ever. Always empty on the memories leg.
+    pub excluded: Vec<String>,
 }
 
 impl Plan {
@@ -421,31 +527,46 @@ impl Plan {
                 continue;
             };
 
+            let source = SourceMedia {
+                main: media.main.path.clone(),
+                day: media.main.day,
+                extension: media.main.extension.clone(),
+                overlay: media.overlay.as_ref().map(|file| file.path.clone()),
+            };
             let location = permitted_location(&item.pairing, memory, &agreements);
-            let Some(capture) = capture_of(&item.pairing, memory, media, leg, location) else {
+            let Some(capture) = capture_of(&item.pairing, memory, &source, leg, location) else {
                 defer(DeferralReason::NoCalendarDate);
                 continue;
             };
 
             // Keyed by the whole file name rather than the stem: two memories collide only when
-            // they would land on one path, and a video and an image on the same second do not.
+            // they would land on one path, and a video and an image on the same second do not. The
+            // extension is the RESOLVED one, so a copied-through PNG and a stamped JPEG on the same
+            // second do not claim each other's suffix.
             let stem = capture.local.format("%Y%m%d_%H%M%S").to_string();
-            let ordinal = taken.entry(format!("{stem}.{}", leg.extension())).or_default();
-            let output = output_path(out_root, capture.local, &stem, leg, *ordinal);
+            let extension = output_extension(leg, &source);
+            let ordinal = taken.entry(format!("{stem}.{extension}")).or_default();
+            let output = output_path(out_root, capture.local, &stem, &extension, *ordinal);
             *ordinal += 1;
 
             items.push(PlannedItem {
                 source_id: item.source_id.clone(),
-                entry_index: item.entry_index,
-                media: media.clone(),
+                media: source,
                 leg,
                 capture,
                 location,
+                // A memory has no sender and no thread, so nothing reaches the two metadata fields
+                // decision 44c defines and whatever a source file already held in them survives.
+                attribution: None,
                 output,
+                // The memories leg has always written its composite and nothing else; decision 44b's
+                // `both` mode is the chat leg's, and widening it here would change what a memories
+                // run produces.
+                originals: None,
             });
         }
 
-        Self { items, deferred }
+        Self { kind: ItemKind::Memory, items, deferred, excluded: Vec::new() }
     }
 }
 
@@ -466,7 +587,7 @@ fn permitted_location(pairing: &Pairing, memory: &Memory, agreements: &BTreeMap<
 
 /// When this item was taken, working down decision 32's fallback chain. `None` when no step of it
 /// yields a real calendar date.
-fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, leg: Leg, location: Option<LocationPoint>) -> Option<Capture> {
+fn capture_of(pairing: &Pairing, memory: &Memory, media: &SourceMedia, leg: Leg, location: Option<LocationPoint>) -> Option<Capture> {
     let from_entry = match pairing {
         Pairing::Exact(_) => memory.date.and_then(calendar),
         // An ambiguous bucket can span hours, so its entry's time says nothing about this file.
@@ -484,7 +605,7 @@ fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, leg: Leg,
 
     // The day in the filename, which is the only date left. Midnight is a placeholder rather than
     // a claim, which is what [`TimeSource::Filename`] exists to say.
-    Some(Capture { local: midnight(media.main.day)?, offset: None, source: TimeSource::Filename })
+    Capture::from_day(media.day)
 }
 
 /// The capture time the main file carries in its own metadata, if it carries one.
@@ -494,27 +615,84 @@ fn capture_of(pairing: &Pairing, memory: &Memory, media: &MemoryMedia, leg: Leg,
 /// separate tag that may be absent. An MP4 header time is a **UTC instant** with no zone field at
 /// all, so it goes through the same conversion an entry's `Date` does and comes out in the zone the
 /// coordinate places it in.
-fn embedded(leg: Leg, media: &MemoryMedia, location: Option<LocationPoint>) -> Option<Capture> {
+pub(crate) fn embedded(leg: Leg, media: &SourceMedia, location: Option<LocationPoint>) -> Option<Capture> {
     match leg {
         Leg::Image => {
-            let jpeg = Jpeg::read(&media.main.path).ok()?;
+            let jpeg = Jpeg::read(&media.main).ok()?;
             Some(Capture { local: jpeg.embedded_time()?, offset: jpeg.embedded_offset(), source: TimeSource::Embedded })
         }
         // Reads the movie box alone rather than the whole file: this runs at plan time for every
         // video whose time falls back to it, and those same files are read in full again when the
         // run reaches them.
         Leg::Video => {
-            let utc = crate::export::video::header_time(&media.main.path)?;
+            let utc = crate::export::video::header_time(&media.main)?;
             Some(Capture::from_utc(utc.naive_utc(), location, TimeSource::Embedded))
         }
     }
 }
 
-/// `<root>/YYYY/MM/YYYYMMDD_HHMMSS.<ext>`, with `_2`, `_3` and so on for a name already claimed.
-fn output_path(root: &Path, local: NaiveDateTime, stem: &str, leg: Leg, ordinal: u32) -> PathBuf {
-    let extension = leg.extension();
-    let name = if ordinal == 0 { format!("{stem}.{extension}") } else { format!("{stem}_{}.{extension}", ordinal + 1) };
-    root.join(local.format("%Y").to_string()).join(local.format("%m").to_string()).join(name)
+/// Whether this item's bytes are copied through under their own extension rather than becoming a
+/// JPEG.
+///
+/// **Decision 47**: a PNG with nothing to composite is not re-encoded, so its transparency survives
+/// — `image`'s flatten drops the alpha channel rather than compositing it, and with no main behind
+/// the layer there is nothing for it to show through to. That is the rule the video leg already
+/// follows: nothing is touched when there is nothing to touch it for.
+///
+/// **Both the plan and [`fix_image`] ask this one function**, which is what keeps the extension a
+/// name claims and the bytes that land under it from disagreeing. The plan needs it because every
+/// output path AND every collision key is decided before a byte is written; `fix_image` needs it
+/// because it decides whether to encode. Pinned at both call sites rather than only here: a fixture
+/// with a lone PNG and one with a lone JPEG make the two answers differ.
+#[must_use]
+pub(crate) fn passes_through(leg: Leg, media: &SourceMedia) -> bool {
+    leg == Leg::Image && media.overlay.is_none() && matches(&media.extension, &PASS_THROUGH_EXTENSIONS)
+}
+
+/// The extension an item's output carries.
+///
+/// Worked out at PLAN time and never at fix time, because the collision key and the output name both
+/// depend on it: an extension decided later would let two items that collide stop colliding, which
+/// moves a `_2` suffix between runs.
+///
+/// The pass-through arm answers with the item's OWN extension rather than with a member of
+/// [`PASS_THROUGH_EXTENSIONS`], so that list's length is not load-bearing here — see the constant for
+/// what indexing it cost. **Normalized to lower case**, which is the load-bearing half of that: the
+/// membership test is ascii-case-insensitive, so a `.PNG` source is admitted, and answering with its
+/// own spelling would put `.PNG` in the output path while the same file spelled `.png` produced
+/// `.png`. Both planners key their collision map on this string, so a divergence there moves output
+/// paths rather than staying cosmetic. Pinned by
+/// `a_shouted_extension_is_normalized_rather_than_carried_into_the_output_path`.
+#[must_use]
+pub(crate) fn output_extension(leg: Leg, media: &SourceMedia) -> Cow<'_, str> {
+    if !passes_through(leg, media) {
+        return Cow::Borrowed(leg.extension());
+    }
+    // Borrowed on the common path — every observed name is already lower case — and owned only when
+    // normalizing actually changes something.
+    if media.extension.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(media.extension.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(media.extension.as_str())
+    }
+}
+
+/// `<stem>.<ext>`, with `_2`, `_3` and so on for a name an earlier position in the plan claimed.
+///
+/// The suffix counts from two, so the first file of a colliding set keeps the plain name and nobody
+/// has to work out that `_1` means "the second one". Shared by both legs: they disagree about which
+/// directory an item lands in and about what a collision is keyed on, and not at all about how a
+/// broken collision is spelled.
+///
+/// Takes the resolved extension rather than the [`Leg`], so a caller cannot key a collision on one
+/// answer and emit a name carrying another.
+pub(crate) fn output_name(stem: &str, extension: &str, ordinal: u32) -> String {
+    if ordinal == 0 { format!("{stem}.{extension}") } else { format!("{stem}_{}.{extension}", ordinal + 1) }
+}
+
+/// The memories tree: `<root>/YYYY/MM/YYYYMMDD_HHMMSS.<ext>`.
+fn output_path(root: &Path, local: NaiveDateTime, stem: &str, extension: &str, ordinal: u32) -> PathBuf {
+    root.join(local.format("%Y").to_string()).join(local.format("%m").to_string()).join(output_name(stem, extension, ordinal))
 }
 
 /// Ascii-case-insensitive membership, matching how the rest of the export layer reads an
@@ -537,8 +715,11 @@ pub struct FixReport {
     /// Planned items the manifest did not offer as work: already finished, or parked past the
     /// retry cap. This is what a resume saves.
     pub skipped: usize,
-    /// Paired memories left to another leg. See [`Plan::deferred`].
+    /// Items left to another leg. See [`Plan::deferred`].
     pub deferred: usize,
+    /// Items this build deliberately writes nothing for, each parked
+    /// [`crate::export::manifest::ItemStatus::Excluded`]. See [`Plan::excluded`].
+    pub excluded: usize,
     /// What the run finished but did not do in full, per item. See [`Notice`].
     pub notices: Vec<ItemNotice>,
 }
@@ -577,6 +758,13 @@ pub enum Notice {
     /// anything writable here, so the coordinate was skipped rather than written where it would be
     /// read past. Unobserved on real memory videos, whose `©eng` sentinel is not one of these.
     LocationShadowed(LocationAtom),
+    /// Its bytes were copied through under their own extension, so it carries no capture metadata at
+    /// all — decision 47's PNG pass-through. The date still reaches the file's own modification
+    /// time; the sender and the conversation reach nothing.
+    ///
+    /// Reported for the reason every notice is: an item finished with less repair than a fuller run
+    /// could have given it is a thing a user gets to be told, not to discover by opening the file.
+    NotStamped,
 }
 
 impl fmt::Display for Notice {
@@ -593,6 +781,10 @@ impl fmt::Display for Notice {
                 f,
                 "its coordinates were left alone: it already carries a {atom} location atom, which every reader resolves \
                  ahead of anything this build can write, so a second one would be ignored"
+            ),
+            Self::NotStamped => f.write_str(
+                "copied through as a PNG so its transparency survives, which means the capture date reached only the file's \
+                 own date and the sender and conversation reached nothing: this build writes that metadata into JPEG alone",
             ),
         }
     }
@@ -623,10 +815,24 @@ pub enum TranscodeSkip {
 ///
 /// Returns [`ManifestError`] when the manifest cannot be read or written.
 pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32, video: &VideoOptions) -> Result<FixReport, ManifestError> {
-    let resumed = manifest.resume(ItemKind::Memory)?;
-    let owed: BTreeSet<String> = manifest.pending(ItemKind::Memory, max_attempts)?.into_iter().map(|item| item.source_id).collect();
+    // Before the sweep, not after it: an excluded row has to already be excluded when `resume`
+    // counts the statuses and when `pending` reads the work list, or the first run of a plan reports
+    // every one of them as owed work it then never does. Idempotent from the second run on —
+    // `mark_excluded` leaves an already-excluded row's timestamp alone — and a no-op loop on the
+    // memories leg, whose `excluded` is always empty.
+    manifest.exclude(plan.kind, &plan.excluded)?;
+    let resumed = manifest.resume(plan.kind)?;
+    let owed: BTreeSet<String> = manifest.pending(plan.kind, max_attempts)?.into_iter().map(|item| item.source_id).collect();
 
-    let mut report = FixReport { resumed, fixed: 0, failed: Vec::new(), skipped: 0, deferred: plan.deferred.len(), notices: Vec::new() };
+    let mut report = FixReport {
+        resumed,
+        fixed: 0,
+        failed: Vec::new(),
+        skipped: 0,
+        deferred: plan.deferred.len(),
+        excluded: plan.excluded.len(),
+        notices: Vec::new(),
+    };
     for item in &plan.items {
         if !owed.contains(&item.source_id) {
             report.skipped += 1;
@@ -634,13 +840,13 @@ pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32, video: &Vide
         }
         match fix(item, video) {
             Ok(notices) => {
-                manifest.mark_done(ItemKind::Memory, &item.source_id, &item.output)?;
+                manifest.mark_done(plan.kind, &item.source_id, &item.output)?;
                 report.fixed += 1;
                 report.notices.extend(notices.into_iter().map(|notice| ItemNotice { source_id: item.source_id.clone(), notice }));
             }
             Err(error) => {
                 let reason = error.to_string();
-                manifest.mark_failed(ItemKind::Memory, &item.source_id, &reason)?;
+                manifest.mark_failed(plan.kind, &item.source_id, &reason)?;
                 report.failed.push(Failure { source_id: item.source_id.clone(), reason });
             }
         }
@@ -650,10 +856,17 @@ pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32, video: &Vide
 
 /// Composites or transcodes, stamps, writes and dates one memory.
 ///
-/// Nothing is left half-written: the output is one `fs::write` of a finished buffer, so a failure
+/// The OUTPUT is never left half-written: it is one `fs::write` of a finished buffer, so a failure
 /// before it leaves no file at all and a failure after it leaves a complete file whose date the
 /// next run corrects. A transcode is the one step that cannot be a buffer, and it writes to a
 /// scratch name that is removed however this returns.
+///
+/// **That claim is about the output and does not extend to [`keep_originals`]' copies**, which are
+/// `fs::copy` and carry the same create-truncate-write window `fs::write` does. What makes the
+/// difference is what the manifest checks: it hashes [`PlannedItem::output`] and nothing else, so a
+/// truncated original is not something a later resume can notice. The window is a crash mid-copy
+/// and the cost is one un-merged file, which the source still holds; closing it would mean hashing
+/// the copies too, and nothing has asked for that.
 ///
 /// Returns what the item was finished without. See [`Notice`].
 ///
@@ -662,40 +875,101 @@ pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32, video: &Vide
 /// Returns [`FixError`] when any step fails.
 pub fn fix(item: &PlannedItem, video: &VideoOptions) -> Result<Vec<Notice>, FixError> {
     let notices = match item.leg {
-        Leg::Image => {
-            fix_image(item)?;
-            Vec::new()
-        }
+        Leg::Image => fix_image(item)?,
         Leg::Video => fix_video(item, video)?,
     };
     set_modified(&item.output, item.capture.instant()).map_err(|source| FixError::Touch { path: item.output.clone(), source })?;
+    keep_originals(item)?;
     Ok(notices)
 }
 
-/// The pure-Rust leg: composite the overlay in, stamp the EXIF, write a JPEG.
+/// Copies the export's own files beside the output, decision 44b's `both` overlay mode.
+///
+/// Verbatim, under the names the export gave them, which is the point of keeping them at all: the
+/// output is the repaired file and these are the bytes it was made from, so putting them under the
+/// output's `YYYYMMDD_HHMMSS` shape would leave the run with two files claiming to be the same
+/// thing. They get the output's modification time so a browser sorts the set together, and nothing
+/// else about them is touched — no composite, no stamp.
+///
+/// A no-op unless the item names a [`PlannedItem::originals`] directory **and** carries an overlay:
+/// with nothing composited there is no un-merged version to lose, and decision 46c's "the two
+/// originals" is exactly the pair a composite consumed. Decision 47 closed the case that used to sit
+/// here as a residual — a lone PNG is no longer re-encoded at all, so its own bytes ARE the output
+/// and there is nothing left to keep a copy of.
+fn keep_originals(item: &PlannedItem) -> Result<(), FixError> {
+    let (Some(dir), Some(overlay)) = (&item.originals, &item.media.overlay) else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir).map_err(|source| FixError::Create { path: dir.clone(), source })?;
+    for source in [&item.media.main, overlay] {
+        // A discovered file always has a name; a source that somehow does not is skipped rather
+        // than joined onto the directory itself, which would overwrite the directory's own path.
+        let Some(name) = source.file_name() else { continue };
+        let copy = dir.join(name);
+        fs::copy(source, &copy).map_err(|error| FixError::Copy { from: source.clone(), to: copy.clone(), source: error })?;
+        set_modified(&copy, item.capture.instant()).map_err(|source| FixError::Touch { path: copy, source })?;
+    }
+    Ok(())
+}
+
+/// The pure-Rust leg: composite the overlay in, stamp the EXIF, write a JPEG — or, for a PNG with
+/// nothing to composite, copy the bytes through untouched.
 ///
 /// The output directory is made last, right before the write, so a failure earlier leaves no empty
 /// year and month behind. The video leg cannot do the same, since ffmpeg needs somewhere to mux
 /// into before there is anything to write.
-fn fix_image(item: &PlannedItem) -> Result<(), FixError> {
-    // A main that is already a JPEG and carries no overlay is copied byte for byte. Re-encoding it
-    // would spend a generation of lossy compression for nothing, and the copy is also what keeps
-    // whatever EXIF the source carried around for `stamp` to read and preserve.
-    let bytes = if item.media.overlay.is_none() && matches(&item.media.main.extension, &VERBATIM_EXTENSIONS) {
-        fs::read(&item.media.main.path).map_err(|source| FixError::Read { path: item.media.main.path.clone(), source })?
-    } else {
-        overlay::compose(&item.media.main.path, item.media.overlay.as_ref().map(|file| file.path.as_path()))?
+///
+/// Returns what the item was finished without. See [`Notice`].
+fn fix_image(item: &PlannedItem) -> Result<Vec<Notice>, FixError> {
+    // Decision 47. Nothing is composited, so nothing is re-encoded and the alpha survives: `image`'s
+    // flatten DROPS the alpha channel rather than compositing it, and with no main behind the layer
+    // there is nothing for a transparent region to show through to, so it would land as whatever RGB
+    // happened to sit under `alpha = 0`.
+    //
+    // **No metadata call on this path, deliberately and by construction.** `Jpeg` never sees these
+    // bytes, so no `little_exif` entry point is reachable from here under any spelling — which is
+    // what keeps RUSTSEC-2026-0194 unreachable rather than merely unobserved. See `exif.rs`'s
+    // `library` module doc before adding anything to this branch.
+    if passes_through(item.leg, &item.media) {
+        let bytes = fs::read(&item.media.main).map_err(|source| FixError::Read { path: item.media.main.clone(), source })?;
+        make_parent(&item.output)?;
+        fs::write(&item.output, &bytes).map_err(|source| FixError::Create { path: item.output.clone(), source })?;
+        return Ok(vec![Notice::NotStamped]);
+    }
+
+    // Matched on the overlay itself rather than on a predicate, so the composite arm can only be
+    // reached with an overlay in hand — which is what let `overlay::compose` drop its `Option`.
+    let bytes = match item.media.overlay.as_deref() {
+        Some(overlay) => overlay::compose(&item.media.main, overlay)?,
+        // No overlay, so nothing is composited and re-encoding would spend a generation of lossy
+        // compression for nothing; the copy is also what keeps whatever EXIF the source carried
+        // around for `stamp` to read and preserve.
+        //
+        // Everything reaching this arm is already a JPEG, which is why there is no extension check:
+        // `Leg::of` admits `jpg`, `jpeg` and `png` alone, and `passes_through` answered `png`
+        // above. A fourth image format added to that list would arrive here and be refused by
+        // `Jpeg::new` below, naming the file — a loud per-item failure rather than a silent
+        // re-encode of a format nobody validated.
+        None => fs::read(&item.media.main).map_err(|source| FixError::Read { path: item.media.main.clone(), source })?,
     };
 
     // The gate, and it runs before anything else looks at the bytes. Ordering matters: reading the
     // dimensions first means a corrupt file is reported by the image decoder, whose message is
     // about a byte count rather than about the file being unusable, and the guard never gets to say
     // what it refused. A `.jpg` that is really something else fails here, not further in.
-    let mut jpeg = Jpeg::new(bytes).map_err(|source| ExifError::NotJpeg { path: item.media.main.path.clone(), source })?;
+    let mut jpeg = Jpeg::new(bytes).map_err(|source| ExifError::NotJpeg { path: item.media.main.clone(), source })?;
     let (width, height) = overlay::dimensions(jpeg.as_bytes())?;
-    jpeg.stamp(&Stamp { local: item.capture.local(), offset: item.capture.offset(), location: item.location, width, height })?;
+    jpeg.stamp(&Stamp {
+        local: item.capture.local(),
+        offset: item.capture.offset(),
+        location: item.location,
+        width,
+        height,
+        attribution: item.attribution.as_ref(),
+    })?;
     make_parent(&item.output)?;
-    Ok(jpeg.write(&item.output)?)
+    jpeg.write(&item.output)?;
+    Ok(Vec::new())
 }
 
 /// The video leg: ffmpeg for pixels when the run is transcoding, pure Rust for metadata always.
@@ -704,14 +978,14 @@ fn fix_image(item: &PlannedItem) -> Result<(), FixError> {
 /// the coordinate go in through [`crate::export::video`], so there is one code path to reason about
 /// and one to test. ffmpeg's job here is pixels and nothing else.
 fn fix_video(item: &PlannedItem, options: &VideoOptions) -> Result<Vec<Notice>, FixError> {
-    let overlay = item.media.overlay.as_ref().map(|file| file.path.as_path());
+    let overlay = item.media.overlay.as_deref();
     let mut notices = Vec::new();
 
     let mut video = match options.transcoder() {
         Ok(ffmpeg) => {
             make_parent(&item.output)?;
             let scratch = Scratch::beside(&item.output)?;
-            ffmpeg::transcode(ffmpeg, &item.media.main.path, overlay, scratch.path())?;
+            ffmpeg::transcode(ffmpeg, &item.media.main, overlay, scratch.path())?;
             // Reading the scratch file back is load-bearing, not plumbing: **ffmpeg can exit 0
             // having written nothing at all** (measured — an argument list it parses but that names
             // no output file exits 0 with an empty directory behind it). This read is what turns
@@ -721,7 +995,7 @@ fn fix_video(item: &PlannedItem, options: &VideoOptions) -> Result<Vec<Notice>, 
             // Blamed on the re-encode, not on the memory: these bytes are ffmpeg's output, and
             // reporting them as `NotMp4` against the SOURCE path would tell a user their perfectly
             // good video "needs converting first" when converting it is exactly what broke it.
-            Mp4::new(bytes).map_err(|source| FixError::Transcoded { main: item.media.main.path.clone(), source })?
+            Mp4::new(bytes).map_err(|source| FixError::Transcoded { main: item.media.main.clone(), source })?
         }
         Err(skip) => {
             notices.push(Notice::NotTranscoded(skip));
@@ -730,7 +1004,7 @@ fn fix_video(item: &PlannedItem, options: &VideoOptions) -> Result<Vec<Notice>, 
             if overlay.is_some() {
                 notices.push(Notice::OverlayNotBurned);
             }
-            Mp4::read(&item.media.main.path)?
+            Mp4::read(&item.media.main)?
         }
     };
 
@@ -739,7 +1013,12 @@ fn fix_video(item: &PlannedItem, options: &VideoOptions) -> Result<Vec<Notice>, 
     if let (Some(atom), Some(_)) = (video.location_atom(), item.location) {
         notices.push(Notice::LocationShadowed(atom));
     }
-    video.stamp(&VideoStamp { local: item.capture.local(), offset: item.capture.offset(), location: item.location })?;
+    video.stamp(&VideoStamp {
+        local: item.capture.local(),
+        offset: item.capture.offset(),
+        location: item.location,
+        attribution: item.attribution.as_ref(),
+    })?;
     make_parent(&item.output)?;
     video.write(&item.output)?;
     Ok(notices)
@@ -840,6 +1119,15 @@ pub enum FixError {
         path: PathBuf,
         source: io::Error,
     },
+    /// One of the export's own files could not be copied beside the output.
+    ///
+    /// Split from [`Self::Create`] and [`Self::Read`] because it is the only step naming two paths,
+    /// and a message that picked one of them would send a user to check the wrong end.
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+        source: io::Error,
+    },
     Touch {
         path: PathBuf,
         source: io::Error,
@@ -891,6 +1179,12 @@ impl fmt::Display for FixError {
             Self::Create { path, source } => {
                 write!(f, "could not create {}: {source}; check the output directory is writable", path.display())
             }
+            Self::Copy { from, to, source } => write!(
+                f,
+                "could not keep a copy of {} at {}: {source}; check the source is readable and the output directory is writable",
+                from.display(),
+                to.display()
+            ),
             Self::Touch { path, source } => write!(f, "wrote {} but could not set its date: {source}", path.display()),
         }
     }
@@ -899,7 +1193,9 @@ impl fmt::Display for FixError {
 impl Error for FixError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Read { source, .. } | Self::Create { source, .. } | Self::Touch { source, .. } => Some(source),
+            Self::Read { source, .. } | Self::Create { source, .. } | Self::Copy { source, .. } | Self::Touch { source, .. } => {
+                Some(source)
+            }
             Self::Compose { source } => Some(source),
             Self::Metadata { source } => Some(source),
             Self::Container { source } => Some(source),
@@ -924,9 +1220,15 @@ mod tests {
     #[test]
     fn an_output_path_is_year_month_and_the_local_wall_time() {
         let local = at(2021, 1, 15, 14, 30, 5);
-        assert_eq!(output_path(Path::new("/out"), local, "20210115_143005", Leg::Image, 0), Path::new("/out/2021/01/20210115_143005.jpg"));
+        assert_eq!(
+            output_path(Path::new("/out"), local, "20210115_143005", Leg::Image.extension(), 0),
+            Path::new("/out/2021/01/20210115_143005.jpg")
+        );
         // Same tree, same name, and the extension is the only thing the leg moves.
-        assert_eq!(output_path(Path::new("/out"), local, "20210115_143005", Leg::Video, 0), Path::new("/out/2021/01/20210115_143005.mp4"));
+        assert_eq!(
+            output_path(Path::new("/out"), local, "20210115_143005", Leg::Video.extension(), 0),
+            Path::new("/out/2021/01/20210115_143005.mp4")
+        );
     }
 
     #[test]
@@ -934,11 +1236,11 @@ mod tests {
         let local = at(2021, 1, 15, 0, 0, 0);
         // The suffix counts from two, so the first file of a colliding set keeps the plain name and
         // nobody has to work out that `_1` means "the second one".
-        let named = |ordinal| output_path(Path::new("/out"), local, "20210115_000000", Leg::Image, ordinal);
+        let named = |ordinal| output_path(Path::new("/out"), local, "20210115_000000", Leg::Image.extension(), ordinal);
         assert_eq!(named(1), Path::new("/out/2021/01/20210115_000000_2.jpg"));
         assert_eq!(named(2), Path::new("/out/2021/01/20210115_000000_3.jpg"));
         assert_eq!(
-            output_path(Path::new("/out"), local, "20210115_000000", Leg::Video, 1),
+            output_path(Path::new("/out"), local, "20210115_000000", Leg::Video.extension(), 1),
             Path::new("/out/2021/01/20210115_000000_2.mp4")
         );
     }

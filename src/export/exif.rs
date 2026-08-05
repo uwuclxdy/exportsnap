@@ -45,7 +45,7 @@ use little_exif::exif_tag::ExifTag;
 use little_exif::metadata::Metadata;
 use little_exif::rational::uR64;
 
-use crate::export::model::LocationPoint;
+use crate::export::model::{Attribution, LocationPoint};
 
 mod library {
     //! The entire surface this crate has on `little_exif`, and the boundary that keeps
@@ -147,6 +147,33 @@ const YCBCR_POSITIONING_CENTERED: u16 = 1;
 /// GPS tag version 2.3.0.0, the version the coordinate tags below are defined by.
 const GPS_VERSION: [u8; 4] = [2, 3, 0, 0];
 
+/// The longest a caller-supplied string may be when it reaches a tag, in bytes.
+///
+/// **This is a JPEG ceiling and it belongs to this module**, which is why it is not on
+/// [`Attribution`]: the APP1 segment carries a 16-bit length, and `little_exif` does not enforce it.
+/// `little_exif-0.6.23`'s `src/jpg.rs:37` builds that field as
+/// `2u16 + (EXIF_HEADER.len() as u16) + (exif_vec.len() as u16)` — the cast lands **before** the
+/// add, so an oversized payload wraps the declared length with no arithmetic an overflow check could
+/// catch, silently, in release *and* in debug. Measured on that version: at a 70,000-byte
+/// description `write_to_vec` returns `Ok` and declares 4,504 bytes for a ~70,044-byte segment;
+/// exiftool then reports `Bad ExifOffset SubDirectory start` and emits no row at all for
+/// `DateTimeOriginal`, the offset tags, `Artist` or the description. **The whole APP1 this program
+/// exists to write is lost, and `Jpeg::stamp` returns `Ok`.** So the failure is not a mangled field,
+/// it is every field.
+///
+/// Truncating rather than refusing is decision 2's degrade posture: a capability is lost, never the
+/// run. The number is far above both observed shapes — a Snapchat handle and a 36-character uuid —
+/// so it costs no real value, and far below the point where the sum of two could matter.
+///
+/// **What it does not close, stated rather than implied.** [`Jpeg::stamp`] is a read-modify-write:
+/// `docs/domain-knowledge.md` records (measured 2026-07-26) that the decode-and-reencode preserves
+/// foreign tags and an embedded IFD1 thumbnail byte-identically, so the payload is `preserved
+/// foreign tags + preserved thumbnail + this build's tags` and only the last term is bounded here. A
+/// source carrying a large enough thumbnail can still overflow the segment. How large a real
+/// Snapchat thumbnail is has not been measured, so that is an unquantified residual and not a
+/// claim either way.
+const MAX_TAG_TEXT: usize = 256;
+
 /// Denominator for the seconds component of a coordinate, giving ~3 mm of resolution — far past
 /// what a phone's GPS or the export's six-decimal-place coordinates carry.
 const ARCSECOND_SCALE: f64 = 10_000.0;
@@ -158,7 +185,7 @@ const ARCSECOND_SCALE: f64 = 10_000.0;
 /// Split from the pipeline that derives it so this module needs to know nothing about buckets,
 /// pairings or output paths.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Stamp {
+pub struct Stamp<'a> {
     /// Local wall-clock time where the memory was taken, which is what `DateTimeOriginal` means.
     /// Never a UTC instant unless [`Self::offset`] says so.
     pub local: NaiveDateTime,
@@ -173,6 +200,30 @@ pub struct Stamp {
     pub location: Option<LocationPoint>,
     pub width: u32,
     pub height: u32,
+    /// Where the file came from, or `None` when the run knows nothing about it.
+    ///
+    /// The memories leg passes `None` — a memory has no sender and no thread — so the two tags
+    /// below are written on the chat-media leg alone, and a memory's own `Artist` or
+    /// `ImageDescription` survives [`Jpeg::stamp`]'s read-modify-write byte for byte, which is what
+    /// that method's preservation promise means here.
+    ///
+    /// Both halves are bounded at [`MAX_TAG_TEXT`] on the way into the tag — see that constant for
+    /// what an unbounded one costs, which is the whole APP1 rather than the field. The bound is here
+    /// and not on [`Attribution`] because the ceiling is JPEG's: the video leg's `ilst` atoms carry a
+    /// 32-bit size and shortening them would be this format's constraint crossing into another.
+    ///
+    /// **`Artist` carries the sender and `ImageDescription` carries the conversation**, and both
+    /// picks are against a named neighbour rather than for a vibe:
+    ///
+    /// - `Artist` is IFD0's only string field whose defined meaning is a PERSON, so every reader
+    ///   that shows an author shows the sender. `Copyright` is the near neighbour and asserts a
+    ///   legal claim this build cannot know; `UserComment` sits in the Exif IFD behind an 8-byte
+    ///   character-code prefix and is rendered as a free-form note, not as a name.
+    /// - `ImageDescription` is IFD0's free-text caption, which is where a line of per-file context
+    ///   belongs, and it is the only IFD0 string tag not already spoken for by a camera fact.
+    ///   **EXIF has no album or grouping tag at all**, which is why the video leg's answer for the
+    ///   conversation (`©alb`) has no counterpart here and the two legs' tag names differ.
+    pub attribution: Option<&'a Attribution>,
 }
 
 // ---- the guard type ----
@@ -335,7 +386,7 @@ impl Jpeg {
     ///
     /// Returns [`ExifError::Decode`] when the bytes carry an APP1 this build cannot read, and
     /// [`ExifError::Encode`] when the new metadata cannot be written back into them.
-    pub fn stamp(&mut self, stamp: &Stamp) -> Result<(), ExifError> {
+    pub fn stamp(&mut self, stamp: &Stamp<'_>) -> Result<(), ExifError> {
         let mut metadata = if matches!(walk(&self.0), Structure::Walkable { exif: true }) {
             library::read(&self.0).map_err(|source| ExifError::Decode { source })?
         } else {
@@ -374,6 +425,17 @@ impl Jpeg {
             metadata.set_tag(ExifTag::GPSLongitude(sexagesimal(longitude)));
         }
 
+        // Set only when the caller supplies one, so the memories leg — which never does — keeps
+        // whatever these two tags already held. See [`Stamp::attribution`] for why these two tags.
+        if let Some(attribution) = stamp.attribution {
+            if let Some(sender) = &attribution.sender {
+                metadata.set_tag(ExifTag::Artist(bounded(sender.as_str())));
+            }
+            if let Some(conversation) = &attribution.conversation {
+                metadata.set_tag(ExifTag::ImageDescription(bounded(conversation.as_str())));
+            }
+        }
+
         library::write(&metadata, &mut self.0).map_err(|source| ExifError::Encode { source })
     }
 
@@ -381,6 +443,30 @@ impl Jpeg {
     fn metadata(&self) -> Result<Metadata, io::Error> {
         library::read(&self.0)
     }
+}
+
+/// `text` cut to [`MAX_TAG_TEXT`] bytes on a character boundary.
+///
+/// Built up character by character rather than sliced at a byte index, so the boundary is right by
+/// construction: `&text[..MAX_TAG_TEXT]` **panics** when that index lands inside a multi-byte
+/// codepoint, and a conversation key is arbitrary UTF-8 off `chat_history.json`. Neither
+/// `clippy::unwrap_used` nor `expect_used` sees a slice panic, so nothing in the gate would have
+/// caught it.
+///
+/// **The crate's other cap is safe for a reason this one does not inherit, which is why it is not
+/// the model to copy.** `chat_fix::dir_name`'s `.take(MAX_DIR_NAME)` runs *after* its `portable()`
+/// pass has already mapped every non-ASCII character to `_`, so every element it counts is one byte
+/// and the count is a byte count for free. This cap sits on the raw key, before anything has
+/// narrowed it. Refactoring `portable()` would break that coupling over there and not here.
+fn bounded(text: &str) -> String {
+    let mut kept = String::new();
+    for character in text.chars() {
+        if kept.len() + character.len_utf8() > MAX_TAG_TEXT {
+            break;
+        }
+        kept.push(character);
+    }
+    kept
 }
 
 /// Something went wrong reading, decoding or writing an image's metadata.

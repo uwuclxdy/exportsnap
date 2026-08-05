@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use chrono::{FixedOffset, NaiveDate};
 use exportsnap::export::exif::{Jpeg, Stamp};
-use exportsnap::export::model::{Field, LocationPoint};
+use exportsnap::export::model::{Attribution, ConversationId, Field, LocationPoint, Username};
 use image::{ImageFormat, RgbImage};
 
 fn repo() -> PathBuf {
@@ -79,9 +79,24 @@ fn a_jpeg_round_trips_through_the_only_route_this_crate_has_into_little_exif() {
     let paris = LocationPoint::parse(Field::Location, "Latitude, Longitude: 48.858844, 2.294351").unwrap();
     let local = NaiveDate::from_ymd_opt(2021, 1, 15).unwrap().and_hms_opt(14, 30, 5).unwrap();
 
+    // The third and fourth rows execute the attribution branch, which the first two do not reach at
+    // all. `embedded_time` is the discriminator and it needs no external tool: it reads back through
+    // `little_exif`, so a write that burst the APP1 segment cannot answer it. That makes the last row
+    // a real pin on the tag-length cap rather than a length assertion, which would pass just as well
+    // with the Exif SubIFD destroyed.
+    let attributed = Attribution { sender: Username::new("sender-handle"), conversation: Some(ConversationId::new("friend-handle")) };
+    let oversized = Attribution { sender: Username::new("sender-handle"), conversation: Some(ConversationId::new("z".repeat(70_000))) };
     for (label, stamp) in [
-        ("bare", Stamp { local, offset: None, location: None, width: 8, height: 8 }),
-        ("located and offset", Stamp { local, offset: FixedOffset::east_opt(3600), location: Some(paris), width: 8, height: 8 }),
+        ("bare", Stamp { local, offset: None, location: None, width: 8, height: 8, attribution: None }),
+        (
+            "located and offset",
+            Stamp { local, offset: FixedOffset::east_opt(3600), location: Some(paris), width: 8, height: 8, attribution: None },
+        ),
+        ("attributed", Stamp { local, offset: None, location: None, width: 8, height: 8, attribution: Some(&attributed) }),
+        (
+            "attribution past the segment ceiling",
+            Stamp { local, offset: None, location: None, width: 8, height: 8, attribution: Some(&oversized) },
+        ),
     ] {
         let mut jpeg = Jpeg::new(encoded_jpeg()).expect("the encoder's own output is a jpeg");
         jpeg.stamp(&stamp).unwrap_or_else(|error| panic!("{label}: stamping a jpeg failed ({error}); check `exif.rs`'s library module"));

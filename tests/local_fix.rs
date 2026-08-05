@@ -51,6 +51,54 @@ fn uuid(seed: u32) -> String {
     format!("{seed:08x}-3ff7-45f1-95f9-a2fda6ba0f8e")
 }
 
+/// The colour [`write_main`] paints at `(x, y)`, which is what a transparent overlay region has to
+/// leave showing.
+fn main_colour(x: u32, y: u32) -> [u8; 3] {
+    [(x % 7) as u8 * 5, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]
+}
+
+/// Asserts the overlay's transparent region left the MAIN showing through, on all three channels.
+///
+/// **What used to stand here was a brightness threshold on subpixel 0, and it could not discriminate
+/// at all.** The main's red in the asserted region is 20-30 against black's 0, so `< 60` passed
+/// whether the transparent half showed the main through or the alpha had been dropped to black —
+/// the fixture held the asserted channel near-constant across the two outcomes, which is this repo's
+/// own recorded trap. Green and blue separate them, and matching all three also reds on a composite
+/// onto any invented background rather than only on black.
+///
+/// **Asserted as a block MEAN rather than as one pixel, and that is the load-bearing half.** The
+/// main fixture is high-frequency by design — `write_main`'s doc says so, because the byte-for-byte
+/// copy test needs it — and JPEG's DCT smears neighbours: measured on these fixtures, a lone pixel
+/// drifts up to 21 levels across the two generations they carry, which is close enough to the gap
+/// being detected that a per-pixel tolerance would be guessing. A block mean is essentially the DC
+/// coefficient, which JPEG preserves closely, so the comparison is tight and the margin to the
+/// failure it must catch is about 125 on the chroma channels instead of single digits.
+fn assert_shows_main_through(composite: &RgbImage, label: &str) {
+    /// A block wholly inside the overlay's transparent half and away from its edge.
+    const BLOCK: [u32; 4] = [48, 8, 56, 16];
+    /// Comfortably above the drift a preserved block mean shows and far below the ~125 that
+    /// separates the main from black on green and blue.
+    const TOLERANCE: f64 = 8.0;
+
+    let [left, top, right, bottom] = BLOCK;
+    let count = f64::from((right - left) * (bottom - top));
+    let mut actual = [0.0; 3];
+    let mut expected = [0.0; 3];
+    for y in top..bottom {
+        for x in left..right {
+            let painted = main_colour(x, y);
+            for channel in 0..3 {
+                actual[channel] += f64::from(composite.get_pixel(x, y).0[channel]) / count;
+                expected[channel] += f64::from(painted[channel]) / count;
+            }
+        }
+    }
+    for channel in 0..3 {
+        let drift = actual[channel] - expected[channel];
+        assert!(drift.abs() <= TOLERANCE, "{label}: channel {channel} averaged {actual:?} over {BLOCK:?}, expected about {expected:?}");
+    }
+}
+
 /// Writes a JPEG main file into `dir/memories` and returns its parsed name.
 ///
 /// The pattern is high-frequency on purpose: a solid colour survives a JPEG re-encode with every
@@ -317,6 +365,33 @@ fn first_frame_pixel(path: &Path, x: u32, y: u32, width: u32) -> [u8; 3] {
 
 // ---- the plan ----
 
+/// The refactor that gave the memories and chat-media legs one `PlannedItem` must not have handed
+/// this leg either of the two fields the other one brought. A memory has no sender and no thread, so
+/// nothing may reach the metadata fields decision 44c defines; and this leg has only ever written
+/// its composite, so decision 44b's `both` mode must not follow the shared type across.
+#[test]
+fn a_memory_carries_no_attribution_and_keeps_no_originals() {
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+    // With an overlay, which is the case the other leg would keep originals for.
+    let files = vec![write_main(dir.path(), "2021-01-15", 1), write_overlay(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
+    let out = dir.path().join("out");
+    let plan = Plan::build(&memories, &reconciliation, &out);
+
+    assert_eq!(plan.kind, ItemKind::Memory);
+    assert!(plan.excluded.is_empty(), "the memories leg excludes nothing: {:?}", plan.excluded);
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].attribution, None);
+    assert_eq!(plan.items[0].originals, None, "even with an overlay composited in");
+
+    // And the run agrees with the plan: one file out, no `originals/` anywhere under the out root.
+    let mut manifest = manifest(&dir, &reconciliation);
+    assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
+    assert_eq!(outputs(&plan, &out), ["2021/01/20210115_143005.jpg"]);
+    assert!(!out.join("2021/01/originals").exists());
+}
+
 #[test]
 fn an_exact_bucket_takes_its_time_and_place_from_the_entry() {
     let dir = TempDir::new().unwrap();
@@ -484,6 +559,7 @@ fn a_file_whose_own_metadata_dates_it_uses_that_before_falling_back_to_its_filen
             location: None,
             width: WIDTH,
             height: HEIGHT,
+            attribution: None,
         })
         .unwrap();
     stamped.write(&files[0].path).unwrap();
@@ -521,7 +597,7 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
     let composite = image::open(&written).unwrap().to_rgb8();
     assert_eq!(composite.dimensions(), (WIDTH, HEIGHT));
     assert!(composite.get_pixel(2, 2).0[0] > 200, "the overlay's opaque half reached the composite");
-    assert!(composite.get_pixel(WIDTH - 2, 2).0[0] < 60, "the overlay's transparent half left the main showing");
+    assert_shows_main_through(&composite, "the overlay's transparent half left the main showing");
 
     // The file's own date is the derived instant, not today.
     let modified = fs::metadata(&written).unwrap().modified().unwrap();
@@ -810,7 +886,7 @@ fn nothing_but_jpeg_bytes_can_be_handed_to_the_metadata_writer() {
 }
 
 #[test]
-fn a_png_main_is_transcoded_so_the_metadata_writer_still_only_ever_sees_jpeg() {
+fn a_png_main_with_an_overlay_is_composited_so_the_metadata_writer_still_only_ever_sees_jpeg() {
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
 
@@ -821,7 +897,11 @@ fn a_png_main_is_transcoded_so_the_metadata_writer_still_only_ever_sees_jpeg() {
     let path = memories_dir(dir.path()).join(format!("2021-01-15_{}-main.png", uuid(1)));
     pixels.save_with_format(&path, ImageFormat::Png).unwrap();
 
-    let reconciliation = reconciled(&memories, vec![MemoryFile::parse(path).unwrap()]);
+    // WITH an overlay, which is what keeps this on the composite path after decision 47 sent a LONE
+    // png through untouched. The property under test is unchanged and is the one that matters:
+    // whatever went in, `little_exif` is handed a JPEG and never a PNG.
+    let files = vec![MemoryFile::parse(path).unwrap(), write_overlay(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
     let plan = Plan::build(&memories, &reconciliation, &out);
@@ -831,6 +911,62 @@ fn a_png_main_is_transcoded_so_the_metadata_writer_still_only_ever_sees_jpeg() {
     let written = &plan.items[0].output;
     assert_eq!(written.extension().unwrap(), "jpg");
     assert_eq!(&fs::read(written).unwrap()[..3], &[0xff, 0xd8, 0xff], "the stamped output is a jpeg, never the png that went in");
+    assert!(report.notices.is_empty(), "a composited item is fully repaired: {:?}", report.notices);
+}
+
+/// Decision 47. A PNG with nothing to composite is copied through byte for byte, so its alpha
+/// survives — `image`'s flatten DROPS the alpha channel rather than compositing it, and with no main
+/// behind the layer a transparent region would land as whatever RGB sat under `alpha = 0`.
+///
+/// On the memories leg this shape is unreachable in the observed export (`memories.rs` records that
+/// every `.png` in a memories dir is an overlay), but it is representable in the code — `png` is in
+/// `MemoryKind::IMAGE` — so the shared rule is pinned here rather than assumed never to fire.
+#[test]
+fn a_lone_png_main_is_copied_through_with_its_transparency_intact() {
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+
+    // Opaque red left half, fully transparent right half — and the transparent half's stored RGB is
+    // BLACK, which is the colour a flatten would leave behind. So an assertion that the right half
+    // is non-black cannot be satisfied by the defect.
+    let mut pixels = RgbaImage::new(WIDTH, HEIGHT);
+    for (x, _, pixel) in pixels.enumerate_pixels_mut() {
+        *pixel = if x < WIDTH / 2 { Rgba([255, 0, 0, 255]) } else { Rgba([0, 0, 0, 0]) };
+    }
+    let path = memories_dir(dir.path()).join(format!("2021-01-15_{}-main.png", uuid(1)));
+    pixels.save_with_format(&path, ImageFormat::Png).unwrap();
+    let source = fs::read(&path).unwrap();
+
+    let reconciliation = reconciled(&memories, vec![MemoryFile::parse(path).unwrap()]);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let out = dir.path().join("out");
+    let plan = Plan::build(&memories, &reconciliation, &out);
+    let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
+    assert_eq!(report.fixed, 1, "{:?}", report.failed);
+
+    // The plan decided the extension, not the fix step: the collision key and the emitted name have
+    // to agree or a `_2` suffix moves between runs.
+    let written = &plan.items[0].output;
+    assert_eq!(written.extension().unwrap(), "png");
+    assert_eq!(outputs(&plan, &out), ["2021/01/20210115_143005.png"]);
+
+    // Byte-for-byte, which is what proves a copy rather than a re-encode that happened to survive.
+    assert_eq!(fs::read(written).unwrap(), source, "the bytes are the export's own");
+
+    // And the alpha really is still there, read back independently of the byte comparison.
+    let kept = image::open(written).unwrap().to_rgba8();
+    assert_eq!(kept.get_pixel(WIDTH - 4, 4).0[3], 0, "the transparent half stayed transparent");
+    assert_eq!(kept.get_pixel(4, 4).0, [255, 0, 0, 255], "and the opaque half is untouched");
+
+    // Constraint 3: the date still reaches the file even though no metadata was written.
+    let modified = fs::metadata(written).unwrap().modified().unwrap();
+    let expected = UNIX_EPOCH + Duration::from_secs(u64::try_from(plan.items[0].capture.instant().timestamp()).unwrap());
+    assert_eq!(modified, expected, "the capture date still reached the file's own timestamp");
+
+    // Constraint 5: the run says what it did not do, rather than leaving a user to open the file.
+    assert_eq!(report.notices.len(), 1, "{:?}", report.notices);
+    assert_eq!(report.notices[0].notice, Notice::NotStamped);
+    assert!(report.notices[0].notice.to_string().contains("transparency"), "{}", report.notices[0].notice);
 }
 
 #[test]
@@ -862,7 +998,7 @@ fn a_main_whose_existing_metadata_cannot_be_read_fails_instead_of_being_replaced
     assert_eq!(report.failed.len(), 1);
     assert!(report.failed[0].reason.contains("cannot read"), "{}", report.failed[0].reason);
     assert!(!plan.items[0].output.exists(), "a failure before the write must leave no output behind");
-    assert_eq!(fs::read(&plan.items[0].media.main.path).unwrap(), damaged, "the source is read-only to this pass, damaged or not");
+    assert_eq!(fs::read(&plan.items[0].media.main).unwrap(), damaged, "the source is read-only to this pass, damaged or not");
 }
 
 #[test]
@@ -1035,7 +1171,7 @@ fn a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it() {
     assert_eq!(probe_video(&written), Some(("h264".to_owned(), WIDTH, HEIGHT)));
     assert_ne!(fs::read(&written).unwrap(), source, "the pixels were re-encoded, so the bytes cannot match");
     // The source is read-only to this pass, transcode or not.
-    assert_eq!(fs::read(&plan.items[0].media.main.path).unwrap(), source);
+    assert_eq!(fs::read(&plan.items[0].media.main).unwrap(), source);
 
     // The file's own date is the derived instant, exactly as on the image leg.
     let modified = fs::metadata(&written).unwrap().modified().unwrap();
@@ -1268,6 +1404,7 @@ fn a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename(
             local: NaiveDate::from_ymd_opt(2021, 1, 15).unwrap().and_hms_opt(9, 17, 42).unwrap(),
             offset: None,
             location: None,
+            attribution: None,
         })
         .unwrap();
     stamped.write(&dated.path).unwrap();

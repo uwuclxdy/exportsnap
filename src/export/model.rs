@@ -343,6 +343,44 @@ macro_rules! string_newtype {
 string_newtype!(Username);
 string_newtype!(ConversationId);
 
+/// Where a file came from: who sent it, and which thread it arrived in.
+///
+/// Decision 44c puts both of these into the output file's own metadata and into **nothing else** —
+/// no filename prefix — so a file a message named and a file none did keep one filename shape. The
+/// two stamping legs read it: [`crate::export::exif::Stamp`] and
+/// [`crate::export::video::VideoStamp`] each carry one, and each says which tag takes which half.
+///
+/// Held as the two model types rather than as strings, so neither can be passed where the other
+/// belongs — the same reason [`Username`] and [`ConversationId`] are separate types at all. Both
+/// halves are absent on the memories leg, which has no sender and no thread.
+///
+/// **Deliberately unbounded here, and the bound lives at each sink instead.** The length that
+/// matters is JPEG's: the APP1 segment carries a 16-bit length and `little_exif` does not enforce it
+/// (see [`crate::export::exif::Jpeg::stamp`]). MP4 has no equivalent — an `ilst` atom's size is
+/// 32-bit with a 64-bit extension — so capping on this type would apply a JPEG ceiling to `©ART` and
+/// `©alb`, shortening a tag the video leg has no reason to shorten, before either stamper could
+/// report it. It would also make this type's own documentation stop being true: a truncated
+/// [`Self::conversation`] is no longer the export's key, and nothing downstream could tell the key
+/// from a prefix of it. [`Username::new`] and [`crate::export::manifest::ExportId::new`] are
+/// validating constructors that **reject**; a truncating one is a different thing wearing the same
+/// shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribution {
+    /// Who sent it, as the message spells `From`, and `None` where the export wrote none.
+    ///
+    /// Carried without [`crate::export::chat_media::Message::is_sender`] beside it, because nothing
+    /// observed establishes what `From` holds on a row the account owner sent; a build that filled
+    /// this in from the direction flag would be attributing off an inference it cannot check.
+    pub sender: Option<Username>,
+    /// The export's own conversation key — a friend's handle for a one-to-one thread, a uuid for a
+    /// group — and `None` for the empty key the export writes for a thread it names no key for.
+    ///
+    /// The key rather than the thread's human `Conversation Title`, for the same reason decision 44a
+    /// names a directory after the key: a title is written per message, so a group renamed mid-thread
+    /// carries two of them under one key and neither of the two is the thread's identity.
+    pub conversation: Option<ConversationId>,
+}
+
 /// The `Media Type` word, kept open because the observed export is n=1.
 ///
 /// **Matching is ascii-case-insensitive, and the three files carrying this key are why.**
