@@ -152,7 +152,17 @@ mod issued {
     //! This module is what makes the counterexample fail to compile. The `BTreeSet` is private to
     //! this module rather than merely private to the struct, because a sibling in the parent module
     //! can reach a tuple field: `self.used.0.remove(..)` compiles from `Conversations` if the type
-    //! is declared beside it. Same shape and same reason as `exif`'s `library` module.
+    //! is declared beside it — measured, `error[E0616]`. Same shape and same reason as `exif`'s
+    //! `library` module.
+    //!
+    //! **What is left, stated so nobody reads more into this than it holds.** The rejection is from
+    //! OUTSIDE this module only. An edit inside it can add a `remove`, or a second method that hands
+    //! the set out, and the walk goes unsound with nothing objecting — so this narrows the blast
+    //! radius to the few lines below rather than closing the hole. That is the same concession
+    //! `exif`'s `library` module makes about its own five path-inferred entry points, and it is the
+    //! house style because it is the truth: both bottom out in "subverting it is new code visible in
+    //! a diff", and the difference between a guard type and a comment is how much code a reviewer
+    //! has to read carefully, not whether the property can be broken at all.
 
     use std::collections::BTreeSet;
 
