@@ -59,7 +59,9 @@ use crate::export::model::ParseError;
 /// and add one neither export has shown. [`read_schema`] already treats every file as optional, so
 /// a name from this list missing off a given export's `json/` dir is expected, not a failure. It is
 /// mirrored by the redactor's `test_every_real_export_schema_filename_survives_verbatim`, which
-/// pins the same union.
+/// pins the same union. `tests/export.rs`'s
+/// `schema_files_and_the_redactors_real_schema_filenames_agree` cross-checks the two lists against
+/// each other, since a pin on each side alone does not catch a name landing on only one of them.
 pub const SCHEMA_FILES: [&str; 20] = [
     "account.json",
     "account_history.json",

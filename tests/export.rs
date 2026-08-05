@@ -386,6 +386,79 @@ fn schema_files_is_sorted_deduplicated_and_names_every_observed_file() {
     );
 }
 
+/// Reads the redactor's `REAL_SCHEMA_FILENAMES` tuple out of `tools/test_redact_export.py` by
+/// text, via `CARGO_MANIFEST_DIR` (`tools/` is tracked, so this reaches the file in CI too, unlike
+/// anything gated on `fixtures/`). The scan is line-oriented, section-scoped the same way
+/// `ignored_advisories` in `tests/supply_chain.rs` scopes to `[advisories]`: it reads a literal
+/// only when trimming a line leaves that literal alone on it, between the line where
+/// `REAL_SCHEMA_FILENAMES = (` starts and the line that is exactly `)`. What a line outside that
+/// shape does is this function's problem, not this comment's: the empty-guard in
+/// `schema_files_and_the_redactors_real_schema_filenames_agree` is what turns an unreadable file
+/// into a red instead of a silent "agrees with nothing".
+///
+/// Two boundaries this scan does not close, named rather than assumed impossible:
+/// - the anchor line's `continue` skips the rest of that same line unconditionally. If
+///   `REAL_SCHEMA_FILENAMES = (` and its entries — or its closing `)` — ever land on one line (the
+///   tuple collapsed onto fewer lines than it holds today), the skipped content is not merely
+///   missed: the scan stays "inside" past the real close and can read unrelated later lines as
+///   names, a wrong result rather than an empty one, which the empty-guard cannot be relied on to
+///   catch. Nothing about today's 20-name tuple makes this unreachable; it is simply not the file's
+///   current shape.
+/// - the equality check below compares `BTreeSet`s, so it sees membership, not multiplicity: a name
+///   duplicated only inside `REAL_SCHEMA_FILENAMES`, where the duplicate already matches a name
+///   `SCHEMA_FILES` also holds, changes neither set and is invisible here.
+///   `schema_files_is_sorted_deduplicated_and_names_every_observed_file` already catches a
+///   duplicate on the `SCHEMA_FILES` side; task 35 is scoped to a name landing on only one side,
+///   not to multiplicity on either, so this is a stated gap in that scope, not a silent one.
+fn real_schema_filenames() -> Vec<String> {
+    let body = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/test_redact_export.py")).unwrap();
+    let mut inside = false;
+    let mut names = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            inside = trimmed.starts_with("REAL_SCHEMA_FILENAMES = (");
+            continue;
+        }
+        if trimmed == ")" {
+            break;
+        }
+        if let Some(name) = trimmed.strip_prefix('"').and_then(|rest| rest.strip_suffix("\",").or_else(|| rest.strip_suffix('"'))) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+#[test]
+fn schema_files_and_the_redactors_real_schema_filenames_agree() {
+    // Task 35: `SCHEMA_FILES` above and the redactor's `REAL_SCHEMA_FILENAMES`
+    // (`tools/test_redact_export.py`) are two independently maintained copies of the same union of
+    // real export schema filenames, and nothing but this test compares them. The redactor's own
+    // tests run only via `python3 -m unittest discover -s tools -p 'test*.py'`, which `cargo.sh`
+    // never invokes and CI does not run, so a pin living only on the Python side would never catch
+    // a name landing on one side and not the other. This test lives on the Rust side instead, in
+    // the suite `cargo.sh` always runs.
+    let scraped = real_schema_filenames();
+    // Guards the SCRAPE, not the content: if the tuple gets renamed, reformatted onto one line, or
+    // the file moves, this is what turns "found nothing, so nothing disagreed" into a red instead
+    // of a silent green that only means the extraction broke.
+    assert!(
+        !scraped.is_empty(),
+        "found no REAL_SCHEMA_FILENAMES entries in tools/test_redact_export.py: either \
+         `REAL_SCHEMA_FILENAMES = (` was not found verbatim, or the tuple closed before any \
+         quoted name was read"
+    );
+
+    let rust_side: std::collections::BTreeSet<&str> = SCHEMA_FILES.iter().copied().collect();
+    let python_side: std::collections::BTreeSet<&str> = scraped.iter().map(String::as_str).collect();
+    assert_eq!(
+        rust_side, python_side,
+        "SCHEMA_FILES (src/export/mod.rs) and REAL_SCHEMA_FILENAMES (tools/test_redact_export.py) \
+         disagree — update both, they are meant to hold the same union"
+    );
+}
+
 // ---- the loader's own failure modes (no fixtures needed) ----
 
 #[test]
