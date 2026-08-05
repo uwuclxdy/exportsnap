@@ -33,6 +33,41 @@
 //! "cannot be joined" are different facts about a file, and the 23 tokens with no file become
 //! manifest rows of their own the way memories' 90 entries do rather than a number in a summary.
 //!
+//! **What a join carries is separate from which message it found.** [`Join::Named`] holds a
+//! [`Message`]: the conversation key, the thread's title, the sender, the direction, and the
+//! `Created` instant, all copied onto the item. The position is kept alongside them
+//! ([`Message::at`]) for anything not carried, and it is deliberately not the only thing kept. A
+//! position is meaningful only against the exact [`ChatHistory`] this join ran against, and an
+//! in-range stale one reads back the WRONG message without failing — which, for the build that
+//! names an output directory after the conversation, files a stranger's media under a friend's
+//! name. So the conversation travels as the export's own [`ConversationId`] key rather than as an
+//! index into a list that has to be passed around beside it, and the human `Conversation Title`
+//! travels next to it rather than instead of it: a title is written per message, so a group renamed
+//! mid-thread carries two of them under one key, and only the key is stable enough to name a
+//! directory after.
+//!
+//! **A file no message names is dated by the day in its own filename.** [`ChatMediaItem::date`]
+//! answers with a [`MediaDate`], and its two variants are the two different facts rather than one
+//! field a caller has to remember the provenance of: `Message` for the 2588 files a message names,
+//! `Filename` for the other 6877 — 6413 of them as ITEMS, a zip pair's overlay half riding on the
+//! media it pairs with rather than answering for itself. The census makes the fallback sound and
+//! also bounds it: for all 2588 matched files the filename's `YYYY-MM-DD` equals the message's
+//! `Created` date, which establishes the day and says nothing whatever about the time of day.
+//!
+//! What this module will not do is collapse those two into one instant. The memories leg's chain is
+//! the entry's time, then the file's own embedded timestamp, then the filename day at midnight, and
+//! the middle step opens the file — which discovery here never does. Resolving to a single value
+//! would also pre-empt that middle step: a stamping pass would have to unpick this module's answer
+//! to slot the embedded read in above it, and the two legs would disagree about a chain they should
+//! share. Rejected alternative: a resolved instant with a `TimeSource` tag beside it, midnight
+//! standing in for the unjoined files' unknown time. It reads better at one call site, at the cost
+//! of inventing a time of day inside the layer whose whole job is to report what the export says.
+//!
+//! Rejected separately, and for a different reason: carrying the record's OTHER date,
+//! `Created(microseconds)`, beside its `Created`. Serde hands an absent key back as `0`, which is a
+//! well-formed 1970 instant nothing above the deserializer can tell from a real one, so the field
+//! cannot be carried without inventing a rule about `0`. The full account is on [`Message::created`].
+//!
 //! Framework-free like the rest of `export/`: nothing here writes an output file, composites an
 //! overlay, or knows a screen exists. Where the output lands is a later task's question.
 
@@ -44,7 +79,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest, ManifestError, NewItem};
-use crate::export::model::ChatHistory;
+use crate::export::model::{ChatHistory, ConversationId, Timestamp, Username};
 use crate::export::walk::{Walk, walk};
 
 pub use crate::export::memories::Day;
@@ -223,8 +258,8 @@ pub struct ChatMediaFile {
     /// Where it sits, as the walk found it.
     pub path: PathBuf,
     /// The day the filename leads with. For all 2588 files a message names, this equals the
-    /// message's own `Created` date, which is what makes it a sound timestamp source for the 5417
-    /// that no message names.
+    /// message's own `Created` date, which is what makes it a sound date for the 6877 no message
+    /// names — [`MediaDate::Filename`], where it is the answer rather than a cross-check.
     pub day: Day,
     pub token: Token,
     pub family: Family,
@@ -503,13 +538,85 @@ pub struct MessageRef {
     pub message: usize,
 }
 
+/// The message that named a file, reduced to what a later pass may stamp onto it.
+///
+/// Every field is a value rather than a lookup, and [`Self::at`] is what reaches the rest of the
+/// record. See the module docs for why the conversation is carried as a key and not as the index
+/// that found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// Where the message sits in the [`ChatHistory`] this join ran against, for whatever that
+    /// record holds and this struct does not. `Media Type` is the live one: it splits the observed
+    /// export's 2588 matches into `MEDIA` 2509, `NOTE` 77, `STICKER` 1 and `SHARESAVEDSTORY` 1, and
+    /// a pass wanting to tell an audio note from a photo has no other route to it.
+    ///
+    /// **Spending it means re-reading THAT history, not a freshly parsed one.** A position is
+    /// meaningful only against the value it was taken from, and a stale one still in range reads
+    /// back a different message without failing — which is exactly why the fields below are values
+    /// and not a second index. So a pass needing more than they hold takes this and its own
+    /// `ChatHistory` together, or gets the field it needs carried here beside them.
+    pub at: MessageRef,
+    /// The export's own conversation key: a friend's username for a one-to-one thread and a uuid
+    /// for a group. Decision 44a names an output directory after this — filesystem-cleaned and
+    /// collision-suffixed, both of which are the output task's job and neither of which happens
+    /// here.
+    pub conversation: ConversationId,
+    /// The thread's own name, `None` where the export wrote none.
+    ///
+    /// Read per RECORD, not per thread: the export writes this on every message, so a group renamed
+    /// mid-thread carries two titles under one [`Self::conversation`] key. That is also why decision
+    /// 44a names a directory after the key and not after this — a key is stable and a title is not.
+    ///
+    /// The census's 657 group against 1931 one-to-one matches is a split it DEFINED by this field
+    /// being non-null, so it counts how many matches carry a title and is not evidence that a title
+    /// means a group. Reading `None` as "one-to-one" is a further guess on top of a definition,
+    /// which is why nothing in this crate branches on it.
+    pub conversation_title: Option<String>,
+    /// `From`, as the message spells it, and `None` for the empty string.
+    ///
+    /// Carried beside [`Self::is_sender`] rather than resolved with it into one "who sent this"
+    /// answer. Nothing observed establishes what `From` holds on a row the account owner sent, and
+    /// a build that assumed would attribute 1041 of the observed export's 2588 matches off an
+    /// inference it has no way to check.
+    pub from: Option<Username>,
+    /// Whether the account owner sent it: 1041 of the observed export's 2588 matched messages
+    /// against 1547 received.
+    pub is_sender: bool,
+    /// The message's own `Created`, a UTC instant. `None` where the export wrote `""`, which is
+    /// unobserved on a matched message and still leaves the file dated, by
+    /// [`ChatMediaItem::date`]'s fallback.
+    ///
+    /// **The record's other date, `Created(microseconds)`, is deliberately not carried beside it**,
+    /// and the reason is that it cannot express the absence this one can. `schema::ChatEntry` is
+    /// `#[serde(default)]` over a bare `i64`, so an absent key arrives as `0` — a well-formed
+    /// 1970-01-01 instant, indistinguishable from a real one. Carrying it naively would turn a
+    /// missing field into a message-STATED 1970 date that then outranks the filename day this
+    /// file's fallback would otherwise have used, which is the one shape where the extra field is
+    /// strictly worse than no field. Pinned from both sides by
+    /// `a_message_that_names_a_file_without_dating_it_leaves_it_on_the_filename_day`.
+    ///
+    /// What it would buy does not pay for a sentinel rule every consumer has to reinvent: the two
+    /// agree to the second on every row of the observed export (`docs/design.md`, 13-digit values),
+    /// so it adds only sub-second precision, which this crate's own writer discards before it
+    /// reaches a file: [`super::local_fix`]'s `system_time` reduces an instant to `timestamp()`
+    /// seconds. `Created` therefore wins whenever both are present, by being the
+    /// only one here at all, and [`Self::at`] reaches the other for a pass that ever needs it.
+    pub created: Option<Timestamp>,
+}
+
 /// What `chat_history.json` had to say about one discovered file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Join {
-    /// A message's `Media IDs` names it. The FIRST such message: all 2611 observed tokens are
-    /// distinct, so a second one naming the same file is unobserved, and keeping the first makes
-    /// which one wins a fact about the export's own order rather than about a hash seed.
-    Named(MessageRef),
+    /// A message's `Media IDs` names it, and this is what that message said. The FIRST such
+    /// message: all 2611 observed tokens are distinct, so a second one naming the same file is
+    /// unobserved, and keeping the first makes which one wins a fact about the export's own order
+    /// rather than about a hash seed.
+    ///
+    /// **Which message wins now settles more than a position.** It is where the item's timestamp,
+    /// its sender and its conversation come from, so a build that kept the LAST would stamp a
+    /// different sender and file the media under a different conversation. Pinned by
+    /// `a_token_two_messages_name_carries_the_first_messages_own_facts`.
+    Named(Message),
     /// It carries a token a message could have named and none did. 5417 of the observed export's
     /// 8005 `b` files.
     Unnamed,
@@ -523,9 +630,33 @@ pub enum Join {
 impl Join {
     /// Whether a message claimed this file.
     #[must_use]
-    pub const fn is_named(self) -> bool {
+    pub const fn is_named(&self) -> bool {
         matches!(self, Self::Named(_))
     }
+}
+
+/// The date a file is dated by, and what said so.
+///
+/// Two variants rather than an instant with a provenance flag beside it: the two are different
+/// facts, and a caller that can read one as the other will stamp a filename day with a message
+/// time's confidence. [`Self::Message`] is a UTC instant a message stated; [`Self::Filename`] is a
+/// calendar day carrying no time of day at all.
+///
+/// There is no absent case. Every discovered file's name leads with a day — [`ChatMediaFile::parse`]
+/// rejects one that does not — so the fallback is always there to take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaDate {
+    /// The `Created` of the message that named the file: 2588 of the observed export's 9465 files.
+    Message(Timestamp),
+    /// The day the filename leads with, along with any matched message carrying no `Created`.
+    ///
+    /// The other 6877 FILES, which is 6413 [`ChatMediaItem`]s: a zip pair's 464 overlay halves are
+    /// answered for by the media they pair with rather than asking on their own, the same gap
+    /// [`Reconciliation::enroll`] accounts for one way and the `NoToken` census count another. The
+    /// census measured this day equal to the message's own date for all 2588 files where both
+    /// exist, which is what makes it sound at day granularity and is the whole of what it
+    /// establishes.
+    Filename(Day),
 }
 
 /// One discovered unit and what the history said about it.
@@ -540,6 +671,29 @@ impl ChatMediaItem {
     #[must_use]
     pub fn source_id(&self) -> &str {
         self.media.source_id()
+    }
+
+    /// The message that named this file, or `None` for the ones no message did.
+    #[must_use]
+    pub const fn message(&self) -> Option<&Message> {
+        match &self.join {
+            Join::Named(message) => Some(message),
+            Join::Unnamed | Join::NoToken => None,
+        }
+    }
+
+    /// What dates this file, and what said so.
+    ///
+    /// The message's `Created` where there is one, and the day in the filename otherwise — which
+    /// covers both a file no message names and a message that names one without dating it. Not a
+    /// resolved instant: see the module docs for why the embedded-timestamp step of the stamping
+    /// chain belongs between these two and so cannot be applied from here.
+    #[must_use]
+    pub fn date(&self) -> MediaDate {
+        match self.message().and_then(|message| message.created) {
+            Some(created) => MediaDate::Message(created),
+            None => MediaDate::Filename(self.media.file.day),
+        }
     }
 }
 
@@ -693,10 +847,15 @@ impl Reconciliation {
     }
 }
 
-/// Joins `history`'s `Media IDs` tokens to `discovery`'s files.
+/// Joins `history`'s `Media IDs` tokens to `discovery`'s files, and carries what each joined
+/// message said onto the file it named.
 ///
 /// A string equality, one token at a time. Nothing is bucketed, nothing is guessed, and a token
-/// that matches no file becomes a [`MissingMedia`] rather than being dropped.
+/// that matches no file becomes a [`MissingMedia`] rather than being dropped. A joined item carries
+/// its [`Message`] by value, so nothing downstream needs `history` again to know when a file was
+/// sent, by whom, or in which conversation — the facts a later pass stamps. Everything else the
+/// record holds stays reachable only by spending [`Message::at`] against this same value, which is
+/// a narrower claim than "read once" and is the one that is true.
 #[must_use]
 pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation {
     let Discovery { media, unmatched_overlays, unparsed, duplicates, unreadable } = discovery;
@@ -711,7 +870,7 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
         .collect();
     items.sort_by(|left, right| left.source_id().cmp(right.source_id()));
 
-    let mut named: Vec<(usize, MessageRef)> = Vec::new();
+    let mut named: Vec<(usize, Message)> = Vec::new();
     let mut missing: BTreeMap<String, MessageRef> = BTreeMap::new();
     let mut unparsed_tokens: BTreeMap<String, MessageRef> = BTreeMap::new();
     {
@@ -741,7 +900,20 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
                         continue;
                     };
                     match by_token.get(token.as_str()) {
-                        Some(&index) => named.push((index, at)),
+                        // Minted here, from the one `record` this position names, rather than
+                        // handed on as the position for someone downstream to read back. There is
+                        // no second lookup that could name a different message than `at` does.
+                        Some(&index) => named.push((
+                            index,
+                            Message {
+                                at,
+                                conversation: thread.id.clone(),
+                                conversation_title: record.conversation_title.clone(),
+                                from: record.from.clone(),
+                                is_sender: record.is_sender,
+                                created: record.created,
+                            },
+                        )),
                         None => {
                             missing.entry(token).or_insert(at);
                         }
@@ -751,12 +923,14 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
         }
     }
 
-    for (index, at) in named {
+    for (index, message) in named {
         // The index came from an enumerate over this same vector, which nothing has resized since.
+        // The `Unnamed` guard is what makes the FIRST message the one whose facts the item carries;
+        // see [`Join::Named`] for what a later one would overwrite.
         if let Some(item) = items.get_mut(index)
-            && item.join == Join::Unnamed
+            && matches!(item.join, Join::Unnamed)
         {
-            item.join = Join::Named(at);
+            item.join = Join::Named(message);
         }
     }
 

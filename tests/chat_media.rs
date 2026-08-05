@@ -18,11 +18,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use exportsnap::export::chat_media::{
-    ChatMedia, ChatMediaFile, ChatMediaItem, Day, Discovery, Family, Join, MessageRef, MissingReason, Reconciliation, Token, UnreadableDir,
-    discover, reconcile,
+    ChatMedia, ChatMediaFile, ChatMediaItem, Day, Discovery, Family, Join, MediaDate, Message, MessageRef, MissingReason, Reconciliation,
+    Token, UnreadableDir, discover, reconcile,
 };
 use exportsnap::export::manifest::{ExportId, Item, ItemKind, ItemStatus, Manifest};
-use exportsnap::export::model::ChatHistory;
+use exportsnap::export::model::{ChatHistory, ConversationId, Field, Timestamp, Username};
 use exportsnap::export::schema;
 use tempfile::TempDir;
 
@@ -31,6 +31,12 @@ const EXPORT_ID: &str = "1784667002819";
 
 /// The 8-character word every one of the observed export's 928 zip filenames shares.
 const ZIP_WORD: &str = "vantsnap";
+
+/// A one-to-one thread's key is the friend's own handle; a group's is a bare uuid. Decision 44a
+/// names an output directory after whichever of the two the export carried, so both shapes are
+/// exercised.
+const SOLO_KEY: &str = "friend-handle";
+const GROUP_KEY: &str = "3f2e1d0c-b9a8-4756-8433-2211aabbccdd";
 
 const DIR: &str = "/export/chat_media";
 
@@ -65,23 +71,27 @@ fn zip(day: &str, token: Token, seed: u32, extension: &str) -> ChatMediaFile {
 /// `chat_history.json` conversations, built through the real schema-to-model path so the
 /// reconciliation never sees a state the loader could not produce.
 ///
-/// Each row is one conversation: its key, then one message per `Media IDs` value.
-fn history(rows: &[(&str, &[&str])]) -> ChatHistory {
-    let conversations: BTreeMap<String, Vec<schema::ChatEntry>> = rows
-        .iter()
-        .map(|(key, lists)| {
-            let entries = lists
-                .iter()
-                .map(|media_ids| schema::ChatEntry {
-                    media_type: "MEDIA".to_owned(),
-                    media_ids: (*media_ids).to_owned(),
-                    ..schema::ChatEntry::default()
-                })
-                .collect();
-            ((*key).to_owned(), entries)
-        })
-        .collect();
+/// Each row is one conversation: its key, then the messages in it.
+fn history_from(rows: Vec<(&str, Vec<schema::ChatEntry>)>) -> ChatHistory {
+    let conversations: BTreeMap<String, Vec<schema::ChatEntry>> =
+        rows.into_iter().map(|(key, entries)| (key.to_owned(), entries)).collect();
     ChatHistory::try_from(schema::ChatHistory { conversations }).expect("the synthesized entries parse")
+}
+
+/// [`history_from`] for the tests that care only about which message named what: one message per
+/// `Media IDs` value, every other field left at the loader's own default.
+fn history(rows: &[(&str, &[&str])]) -> ChatHistory {
+    history_from(rows.iter().map(|(key, lists)| (*key, lists.iter().map(|media_ids| names(media_ids)).collect())).collect())
+}
+
+/// One message naming whatever `media_ids` spells.
+fn names(media_ids: &str) -> schema::ChatEntry {
+    schema::ChatEntry { media_type: "MEDIA".to_owned(), media_ids: media_ids.to_owned(), ..schema::ChatEntry::default() }
+}
+
+/// The UTC instant `text` spells, through the same parser the loader uses.
+fn at(text: &str) -> Timestamp {
+    Timestamp::parse(Field::Created, text).expect("the synthesized timestamp parses")
 }
 
 fn reconciled(rows: &[(&str, &[&str])], files: Vec<ChatMediaFile>) -> Reconciliation {
@@ -92,8 +102,17 @@ fn source_ids(reconciliation: &Reconciliation) -> Vec<&str> {
     reconciliation.items.iter().map(ChatMediaItem::source_id).collect()
 }
 
+fn item_of<'a>(reconciliation: &'a Reconciliation, source_id: &str) -> &'a ChatMediaItem {
+    reconciliation.items.iter().find(|item| item.source_id() == source_id).expect("the item is in the reconciliation")
+}
+
 fn join_of<'a>(reconciliation: &'a Reconciliation, source_id: &str) -> &'a Join {
-    &reconciliation.items.iter().find(|item| item.source_id() == source_id).expect("the item is in the reconciliation").join
+    &item_of(reconciliation, source_id).join
+}
+
+/// The message that named `source_id`, or a failure naming what it got instead.
+fn message_of<'a>(reconciliation: &'a Reconciliation, source_id: &str) -> &'a Message {
+    item_of(reconciliation, source_id).message().expect("the item joined to a message")
 }
 
 // ---- the filename grammar ----
@@ -430,7 +449,7 @@ fn a_b_file_a_message_names_joins_to_that_message() {
     let reconciliation = reconciled(&[("alice", &[""]), ("bob", &["", &token])], vec![bare("2021-03-04", 1)]);
 
     // Conversations are sorted by key, so `bob` is index 1 and the token is its second message.
-    assert_eq!(join_of(&reconciliation, &token), &Join::Named(MessageRef { conversation: 1, message: 1 }));
+    assert_eq!(message_of(&reconciliation, &token).at, MessageRef { conversation: 1, message: 1 });
     assert!(reconciliation.missing.is_empty());
 }
 
@@ -524,12 +543,45 @@ fn an_empty_media_ids_value_names_nothing() {
     assert!(reconciliation.missing.is_empty(), "{:?}", reconciliation.missing);
 }
 
+/// Which message wins decides the file's timestamp, its sender and the conversation a later pass
+/// files it under, so "the first one" has to hold for the whole carried record and not only for the
+/// position it came from.
 #[test]
-fn a_token_two_messages_name_keeps_the_first() {
+fn a_token_two_messages_name_carries_the_first_messages_own_facts() {
     let token = format!("b~{}", id(1));
-    let reconciliation = reconciled(&[("alice", &[&token]), ("bob", &[&token])], vec![bare("2021-03-04", 1)]);
+    let first = schema::ChatEntry {
+        from: "first-sender".to_owned(),
+        created: "2021-03-04 09:15:00 UTC".to_owned(),
+        is_sender: false,
+        ..names(&token)
+    };
+    let second = schema::ChatEntry {
+        from: "second-sender".to_owned(),
+        created: "2021-03-06 22:00:00 UTC".to_owned(),
+        conversation_title: Some("the group".to_owned()),
+        is_sender: true,
+        ..names(&token)
+    };
+    // Sorted by key, so `alice` is the first conversation and its message is the one that wins.
+    let history = history_from(vec![("alice", vec![first]), ("bob", vec![second])]);
 
-    assert_eq!(join_of(&reconciliation, &token), &Join::Named(MessageRef { conversation: 0, message: 0 }));
+    let reconciliation = reconcile(&history, Discovery::from_files(vec![bare("2021-03-04", 1)], Vec::new()));
+
+    // The whole record in ONE assertion, deliberately: field-at-a-time asserts abort at the first
+    // one that fires, so a build taking the second message would red on its position and never
+    // reach the fields this test is named for.
+    assert_eq!(
+        *message_of(&reconciliation, &token),
+        Message {
+            at: MessageRef { conversation: 0, message: 0 },
+            conversation: ConversationId::new("alice"),
+            conversation_title: None,
+            from: Username::new("first-sender"),
+            is_sender: false,
+            created: Some(at("2021-03-04 09:15:00 UTC")),
+        }
+    );
+    assert_eq!(item_of(&reconciliation, &token).date(), MediaDate::Message(at("2021-03-04 09:15:00 UTC")));
 }
 
 #[test]
@@ -553,7 +605,7 @@ fn a_shouted_token_in_the_history_lands_on_the_same_row_as_the_file() {
     let file = ChatMediaFile::parse("/export/chat_media/2021-03-04_B~aB3xY9.JPG").unwrap();
     let reconciliation = reconcile(&history(&[("alice", &["B~aB3xY9"])]), Discovery::from_files(vec![file], Vec::new()));
 
-    assert_eq!(join_of(&reconciliation, "b~aB3xY9"), &Join::Named(MessageRef { conversation: 0, message: 0 }));
+    assert_eq!(message_of(&reconciliation, "b~aB3xY9").at, MessageRef { conversation: 0, message: 0 });
     assert!(reconciliation.missing.is_empty());
 
     reconciliation.enroll(&mut manifest).unwrap();
@@ -612,7 +664,7 @@ fn two_messages_naming_one_absent_token_leave_one_gap_row() {
 
     // One token, one row. A second message naming it must not enrol it twice, and the reference
     // kept is the first, matching what a present file gets in
-    // `a_token_two_messages_name_keeps_the_first`.
+    // `a_token_two_messages_name_carries_the_first_messages_own_facts`.
     assert_eq!(reconciliation.missing.len(), 1);
     assert_eq!(reconciliation.missing[0].token, absent);
     assert_eq!(reconciliation.missing[0].message, MessageRef { conversation: 0, message: 0 });
@@ -622,25 +674,22 @@ fn two_messages_naming_one_absent_token_leave_one_gap_row() {
 /// which is a fact about the export rather than a rule the join may lean on. The join is a string
 /// equality over the token and reads neither date, so a disagreement joins anyway.
 ///
-/// **This pin locks in an absence and no mutation can kill it**, because there is no date comparison
-/// to break — it exists so that ADDING one stops being silent.
+/// **The join half of this pin locks in an absence and no mutation can kill it**, because there is
+/// no date comparison there to break — it exists so that ADDING one stops being silent. The date
+/// half is a live assertion: where the two disagree the message wins, because it is the one that
+/// states a time of day.
 #[test]
 fn a_filename_day_that_disagrees_with_the_message_date_still_joins() {
     let token = format!("b~{}", id(1));
-    let entry = schema::ChatEntry {
-        media_type: "MEDIA".to_owned(),
-        created: "2019-11-30 12:41:51 UTC".to_owned(),
-        media_ids: token.clone(),
-        ..schema::ChatEntry::default()
-    };
-    let history =
-        ChatHistory::try_from(schema::ChatHistory { conversations: BTreeMap::from([("alice".to_owned(), vec![entry])]) }).unwrap();
+    let entry = schema::ChatEntry { created: "2019-11-30 12:41:51 UTC".to_owned(), ..names(&token) };
+    let history = history_from(vec![("alice", vec![entry])]);
 
     // The file says 2021-03-04 and the message says 2019-11-30.
     let reconciliation = reconcile(&history, Discovery::from_files(vec![bare("2021-03-04", 1)], Vec::new()));
 
-    assert_eq!(join_of(&reconciliation, &token), &Join::Named(MessageRef { conversation: 0, message: 0 }));
+    assert_eq!(message_of(&reconciliation, &token).at, MessageRef { conversation: 0, message: 0 });
     assert!(reconciliation.missing.is_empty(), "a date disagreement is not a missing file");
+    assert_eq!(item_of(&reconciliation, &token).date(), MediaDate::Message(at("2019-11-30 12:41:51 UTC")));
 }
 
 /// A dir the walk could not list means the run cannot say a file does not exist — it can only say it
@@ -678,11 +727,167 @@ fn a_missing_reason_says_which_gap_it_is_in_prose_the_manifest_can_store() {
     assert_eq!(BTreeSet::from(spellings.clone()).len(), spellings.len(), "each reason reads differently: {spellings:?}");
 }
 
+// ---- what a join carries ----
+
+/// The four facts task 32 puts on the item, read back off both thread shapes the export has. The
+/// conversation is asserted as the KEY rather than the title because that is what an output
+/// directory is named from, and a title is null on every one-to-one thread.
+#[test]
+fn a_named_file_carries_its_messages_time_sender_and_conversation() {
+    let sent_token = format!("b~{}", id(1));
+    let received_token = format!("b~{}", id(2));
+    let renamed_token = format!("b~{}", id(3));
+    // The two dimensions are crossed on purpose: a message SENT in the one-to-one thread against
+    // one RECEIVED in the group. Pair them the other way — sent-and-group, received-and-solo — and
+    // a build reading either field off the other passes every assertion below.
+    let sent = schema::ChatEntry {
+        from: "my-handle".to_owned(),
+        created: "2021-03-04 09:15:00 UTC".to_owned(),
+        is_sender: true,
+        ..names(&sent_token)
+    };
+    let received = schema::ChatEntry {
+        from: "friend-handle".to_owned(),
+        created: "2021-03-05 22:41:07 UTC".to_owned(),
+        conversation_title: Some("weekend plans".to_owned()),
+        is_sender: false,
+        ..names(&received_token)
+    };
+    // The same thread after somebody renamed it. `Conversation Title` is written per MESSAGE, so
+    // one key really does carry two titles — which is both why the title is read off the record
+    // rather than off the thread, and why decision 44a names a directory after the stable key.
+    // Without this row every fixture here has one title per thread, and a build reading the
+    // thread's FIRST record's title passes the whole suite.
+    let renamed = schema::ChatEntry {
+        from: "friend-handle".to_owned(),
+        created: "2021-03-06 08:02:00 UTC".to_owned(),
+        conversation_title: Some("trip planning".to_owned()),
+        is_sender: false,
+        ..names(&renamed_token)
+    };
+    let history = history_from(vec![(GROUP_KEY, vec![received, renamed]), (SOLO_KEY, vec![sent])]);
+
+    let reconciliation =
+        reconcile(&history, Discovery::from_files(vec![bare("2021-03-04", 1), bare("2021-03-05", 2), bare("2021-03-06", 3)], Vec::new()));
+
+    let message = message_of(&reconciliation, &sent_token);
+    assert_eq!(message.conversation, ConversationId::new(SOLO_KEY));
+    assert_eq!(message.conversation_title, None, "a one-to-one thread carries no title, and none is invented");
+    assert_eq!(message.from, Username::new("my-handle"));
+    assert!(message.is_sender, "which side sent it is carried apart from `From`, which nothing establishes the meaning of");
+    assert_eq!(item_of(&reconciliation, &sent_token).date(), MediaDate::Message(at("2021-03-04 09:15:00 UTC")));
+
+    let message = message_of(&reconciliation, &received_token);
+    // Sorted by key, so the group thread is conversation 0 — and the position is still carried, for
+    // everything about the message this struct does not hold.
+    assert_eq!(message.at, MessageRef { conversation: 0, message: 0 });
+    assert_eq!(message.conversation, ConversationId::new(GROUP_KEY), "the key a directory is named from, not the title");
+    assert_eq!(message.conversation_title, Some("weekend plans".to_owned()));
+    assert_eq!(message.from, Username::new("friend-handle"));
+    assert!(!message.is_sender);
+    assert_eq!(item_of(&reconciliation, &received_token).date(), MediaDate::Message(at("2021-03-05 22:41:07 UTC")));
+
+    // Same thread, same key, its own title: the title is the record's, never the thread's.
+    let renamed = message_of(&reconciliation, &renamed_token);
+    assert_eq!(renamed.at, MessageRef { conversation: 0, message: 1 });
+    assert_eq!(renamed.conversation, ConversationId::new(GROUP_KEY), "one key across the rename");
+    assert_eq!(renamed.conversation_title, Some("trip planning".to_owned()));
+    assert_ne!(renamed.conversation_title, message.conversation_title, "two titles under one conversation key");
+}
+
+/// The 6877 files no message names, which is 73% of the export. Their date is the day their own
+/// filename leads with — the census proved that day equal to the message's own wherever a message
+/// exists, and it is the only date left where none does.
+#[test]
+fn a_file_no_message_names_is_dated_by_the_day_in_its_filename() {
+    let named = format!("b~{}", id(1));
+    let entry = schema::ChatEntry { created: "2021-03-04 09:15:00 UTC".to_owned(), ..names(&named) };
+    let reconciliation = reconcile(
+        &history_from(vec![(SOLO_KEY, vec![entry])]),
+        Discovery::from_files(
+            vec![
+                bare("2021-03-04", 1),
+                bare("2021-03-05", 2),
+                plain("2021-03-06", Token::Overlay, 3, "png"),
+                zip("2021-03-07", Token::Media, 4, "mp4"),
+            ],
+            Vec::new(),
+        ),
+    );
+
+    // One per join state that is not `Named`: a `b` file nobody named, and two whose family no json
+    // can reach at all.
+    for (source_id, day) in [
+        (format!("b~{}", id(2)), "2021-03-05"),
+        (format!("overlay~{}", id(3)), "2021-03-06"),
+        (zip("2021-03-07", Token::Media, 4, "mp4").id, "2021-03-07"),
+    ] {
+        let item = item_of(&reconciliation, &source_id);
+        assert!(item.message().is_none(), "{source_id} carries a message nothing named it in");
+        assert_eq!(item.date(), MediaDate::Filename(Day::parse(day).unwrap()), "{source_id}");
+    }
+    // And the file a message DID name is not dated this way, or the fallback would be the only
+    // answer this test could ever see.
+    assert_eq!(item_of(&reconciliation, &named).date(), MediaDate::Message(at("2021-03-04 09:15:00 UTC")));
+}
+
+/// A message can name a file and date nothing: the export writes `""` for a value it has none of.
+/// Unobserved on a matched message, expressible, and the join survives it — only the date falls
+/// back, while the sender and the conversation stay exactly as known as they were.
+///
+/// **It also pins what the record's OTHER date may not do**, from both sides, because `Message`
+/// deliberately does not carry `Created(microseconds)` and a later build might carry it without
+/// reading why. Both rows below set the epoch EXPLICITLY rather than inheriting `names`' zero — a
+/// fixture that leans on the default cannot tell "the zero case is handled" from "a zero happened
+/// to be lying there:
+///
+/// - a real epoch present and `Created` empty must still fall back, or the unstamped instant this
+///   module never read has become the answer
+/// - an epoch of `0`, which is what serde hands back for an ABSENT key, must not become a
+///   message-stated 1970 date that outranks the filename day — the one shape where carrying the
+///   field would be worse than dropping it
+#[test]
+fn a_message_that_names_a_file_without_dating_it_leaves_it_on_the_filename_day() {
+    let dated_epoch = format!("b~{}", id(1));
+    let absent_epoch = format!("b~{}", id(2));
+    // 2020-07-26 in milliseconds, the shape `tests/export.rs` pins off the real fixture.
+    let with_epoch = schema::ChatEntry {
+        from: "friend-handle".to_owned(),
+        created: String::new(),
+        created_epoch: 1_595_778_485_675,
+        ..names(&dated_epoch)
+    };
+    let without_epoch =
+        schema::ChatEntry { from: "friend-handle".to_owned(), created: String::new(), created_epoch: 0, ..names(&absent_epoch) };
+    let reconciliation = reconcile(
+        &history_from(vec![(SOLO_KEY, vec![with_epoch, without_epoch])]),
+        Discovery::from_files(vec![bare("2021-03-04", 1), bare("2021-03-05", 2)], Vec::new()),
+    );
+
+    // The two observables first, and the dated-epoch row before the zero row, so that a build
+    // promoting the epoch reds HERE — naming the row it broke — rather than at a field-level
+    // assertion below that would abort the body before either date was ever read.
+    assert_eq!(
+        item_of(&reconciliation, &dated_epoch).date(),
+        MediaDate::Filename(Day::parse("2021-03-04").unwrap()),
+        "a real epoch this module never carried must not become the date"
+    );
+    assert_eq!(
+        item_of(&reconciliation, &absent_epoch).date(),
+        MediaDate::Filename(Day::parse("2021-03-05").unwrap()),
+        "an absent epoch is an absence, never 1970"
+    );
+
+    let message = message_of(&reconciliation, &dated_epoch);
+    assert_eq!(message.created, None);
+    assert_eq!(message.from, Username::new("friend-handle"), "an undated message still says who sent it");
+}
+
 // ---- the census shape ----
 
-/// Builds a corpus at the observed export's shape and cardinality, plus the `Media IDs` tokens that
-/// go with it. Every file goes through `ChatMediaFile::parse` on a synthesized name; no filesystem.
-fn census_corpus() -> (Vec<ChatMediaFile>, Vec<String>) {
+/// Builds a corpus at the observed export's shape and cardinality, plus the history that names it.
+/// Every file goes through `ChatMediaFile::parse` on a synthesized name; no filesystem.
+fn census_corpus() -> (Vec<ChatMediaFile>, ChatHistory) {
     let day = "2021-03-04";
     let mut files = Vec::with_capacity(9465);
     let mut b_tokens = Vec::with_capacity(8005);
@@ -717,10 +922,32 @@ fn census_corpus() -> (Vec<ChatMediaFile>, Vec<String>) {
         }
     }
 
-    // 2611 distinct tokens: 2588 naming a `b` file that exists, 23 naming none.
-    let mut tokens: Vec<String> = b_tokens[..2588].to_vec();
-    tokens.extend((0..23).map(|index| format!("b~absent{index:06}")));
-    (files, tokens)
+    // 2611 distinct tokens: 2588 naming a `b` file that exists, 23 naming none. The census recorded
+    // two SEPARATE splits over the 2588 matched messages — 1931 one-to-one against 657 group, and
+    // 1041 sent against 1547 received — and no cross-tabulation of the two, so which of the sent
+    // messages fall in which thread below is this file's own arrangement and asserts nothing about
+    // the export.
+    let mut solo = Vec::new();
+    let mut group = Vec::new();
+    for (index, token) in b_tokens[..2588].iter().enumerate() {
+        // Dated on the corpus's own day, which is what makes the 2588-of-2588 filename-equals-
+        // message result something the test re-derives instead of assuming.
+        let entry = schema::ChatEntry {
+            created: format!("{day} 09:15:00 UTC"),
+            from: "friend-handle".to_owned(),
+            is_sender: index < 1041,
+            ..names(token)
+        };
+        if index < 1931 {
+            solo.push(entry);
+        } else {
+            group.push(schema::ChatEntry { conversation_title: Some("the group".to_owned()), ..entry });
+        }
+    }
+    // The 23 tokens no file carries. Which thread names them is not something the census measured.
+    solo.extend((0..23).map(|index| names(&format!("b~absent{index:06}"))));
+
+    (files, history_from(vec![(GROUP_KEY, group), (SOLO_KEY, solo)]))
 }
 
 /// The code reproduces the census on census-shaped data.
@@ -733,7 +960,7 @@ fn census_corpus() -> (Vec<ChatMediaFile>, Vec<String>) {
 /// number that moved.
 #[test]
 fn the_census_shape_reproduces_its_recorded_counts() {
-    let (files, tokens) = census_corpus();
+    let (files, history) = census_corpus();
     assert_eq!(files.len(), 9465, "the corpus is the census total, or nothing below means anything");
 
     let discovery = Discovery::from_files(files, Vec::new());
@@ -744,8 +971,7 @@ fn the_census_shape_reproduces_its_recorded_counts() {
     assert!(discovery.duplicates.is_empty());
     assert!(discovery.unreadable.is_empty());
 
-    let list = tokens.join(" | ");
-    let reconciliation = reconcile(&history(&[("alice", &[&list])]), discovery);
+    let reconciliation = reconcile(&history, discovery);
 
     assert_eq!(reconciliation.items.len(), 9001, "8777 units + 224 unmatched overlays");
     let count = |wanted: fn(&Join) -> bool| reconciliation.items.iter().filter(|item| wanted(&item.join)).count();
@@ -757,6 +983,41 @@ fn the_census_shape_reproduces_its_recorded_counts() {
     assert_eq!(count(|join| matches!(join, Join::NoToken)), 996);
     assert_eq!(reconciliation.missing.len(), 23, "the tokens no file on disk carries");
     assert!(reconciliation.unparsed_tokens.is_empty(), "every one of the 2611 observed tokens is well formed");
+
+    // What the joins carry, cross-checked per conversation against the census's own two splits.
+    let named: Vec<(&ChatMediaItem, &Message)> =
+        reconciliation.items.iter().filter_map(|item| item.message().map(|message| (item, message))).collect();
+    assert_eq!(named.len(), 2588, "one carried message per matched file");
+    let in_thread = |key: &str| -> Vec<&(&ChatMediaItem, &Message)> {
+        named.iter().filter(|(_, message)| message.conversation.as_str() == key).collect()
+    };
+
+    let group = in_thread(GROUP_KEY);
+    assert_eq!(group.len(), 657, "the group thread's share of the matches");
+    assert!(group.iter().all(|(_, message)| message.conversation_title.is_some()), "a group match names its thread");
+    let solo = in_thread(SOLO_KEY);
+    assert_eq!(solo.len(), 1931, "and the one-to-one thread's");
+    assert!(solo.iter().all(|(_, message)| message.conversation_title.is_none()), "a one-to-one match has no title to name");
+
+    assert_eq!(named.iter().filter(|(_, message)| message.is_sender).count(), 1041, "sent");
+    assert_eq!(named.iter().filter(|(_, message)| !message.is_sender).count(), 1547, "received");
+
+    // The 2588-of-2588 result re-derived rather than assumed: a matched file is dated by its
+    // message, and that date falls on the day its own filename leads with.
+    for (item, message) in &named {
+        let created = message.created.expect("every matched message in the corpus is dated");
+        assert_eq!(item.date(), MediaDate::Message(created));
+        assert_eq!(Day::from(created), item.media.file.day);
+    }
+
+    // 6413 ITEMS, not the 6877 FILES the fallback covers, and the gap is the same one the `NoToken`
+    // count above carries: a zip pair's overlay half is not an item, it rides on its media half.
+    // 5417 unnamed + 996 no-token here; + 464 zip overlays as files.
+    assert_eq!(
+        reconciliation.items.iter().filter(|item| matches!(item.date(), MediaDate::Filename(_))).count(),
+        6413,
+        "every file no message dated falls back to the day in its filename"
+    );
 
     let workspace = Workspace::new();
     let mut manifest = workspace.open();
