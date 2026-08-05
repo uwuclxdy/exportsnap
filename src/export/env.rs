@@ -142,6 +142,23 @@ pub struct Environment {
     pub total_space: Option<u64>,
 }
 
+/// The nearest existing ancestor of `path` — the filesystem a `statvfs` probe can actually measure.
+///
+/// An output root is created only at the first write, so a run pointed at a brand-new dir must not
+/// report "unknown" disk free. Lives here rather than beside a screen because both media screens ask
+/// it and the question is about the filesystem, not about a widget.
+#[must_use]
+pub fn probe_target(path: impl AsRef<Path>) -> PathBuf {
+    let mut candidate = path.as_ref().to_path_buf();
+    while !candidate.exists() {
+        match candidate.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => candidate = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    candidate
+}
+
 impl Environment {
     /// Probes `PATH` for every [`Tool::ALL`] and measures the filesystem holding `path`.
     #[must_use]

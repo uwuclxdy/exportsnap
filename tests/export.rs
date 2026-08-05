@@ -137,7 +137,48 @@ fn a_rejected_timestamp_names_its_field_and_its_value() {
     assert_eq!(error.field(), Field::CreationTimestamp);
     assert_eq!(error.kind(), ParseErrorKind::Timestamp);
     assert_eq!(error.value(), "not a date");
-    assert_eq!(error.to_string(), "Creation Timestamp: expected a \"YYYY-MM-DD HH:MM:SS UTC\" timestamp, got \"not a date\"");
+    // The value is deliberately absent from the rendered form: this string reaches a footer alert
+    // and `Field` admits `Location`, so what used to render here could be a coordinate. It stays
+    // reachable through `value()` for a caller with somewhere safe to put it.
+    // `"not a date"` is 10 characters — the SHAPE, not the value. A bare drop would render the
+    // same sentence for an empty string, an ISO-8601 date and 400 KB of garbage, and this arm
+    // carries no line/column to fall back on the way the serde one does.
+    assert_eq!(error.to_string(), "Creation Timestamp: expected a \"YYYY-MM-DD HH:MM:SS UTC\" timestamp, got 10 chars");
+    assert!(!error.to_string().contains("not a date"), "the offending value must not reach a footer-bound message");
+}
+
+/// **A rejected coordinate must not put the coordinate on screen.**
+///
+/// `ParseError`'s `Display` reaches a footer alert through `LoadError::Invalid`, and `Field` admits
+/// `Location` — so the value it renders can be a lat/long. The restriction on `Field` was a decision
+/// that a message body cannot reach this error; it was never a decision that a location may.
+///
+/// The reason this is not the same fix as the serde one, and must not become it: the format
+/// specification is itself quoted, so a delimiter scan over the rendered message would strip the
+/// thing the user actually needs. Both halves are asserted here — the coordinate gone, the form that
+/// tells you how to write one intact.
+#[test]
+fn a_rejected_coordinate_names_the_form_it_wanted_and_never_the_coordinate() {
+    // Past the pole, so it is REJECTED — but the longitude beside it is a real one, which is the
+    // point: a rejected pair still carries a usable location and the error still renders it.
+    let error = LocationPoint::parse(Field::Location, "Latitude, Longitude: 91.858844, 2.294351").unwrap_err();
+    let rendered = error.to_string();
+
+    // The control: the parser really did take this value, so the sweep below is not vacuous.
+    assert_eq!(error.value(), "Latitude, Longitude: 91.858844, 2.294351");
+
+    for fragment in ["91.858844", "2.294351"] {
+        assert!(!rendered.contains(fragment), "a coordinate reached a footer-bound message: {rendered}");
+    }
+    // What must survive: the field, and the quoted form spec a delimiter scan would have eaten.
+    assert!(rendered.starts_with("Location: expected"), "{rendered}");
+    assert!(rendered.contains(r#""Latitude, Longitude: <lat>, <lon>""#), "the form spec is the diagnostic: {rendered}");
+    assert!(rendered.contains("-90..=90"), "{rendered}");
+    // The shape, in place of the value. Length is what the ruling kept; the ceiling on
+    // `ParseError::fmt` records that for THIS kind it separates the likely drifts from each
+    // other not at all — a locale decimal comma, a separator swap and a well-formed pair are
+    // all 16 characters.
+    assert!(rendered.ends_with("got 40 chars"), "{rendered}");
 }
 
 #[test]
@@ -510,6 +551,135 @@ fn well_formed_json_in_the_wrong_shape_is_not_told_to_re_extract() {
     assert!(rendered.contains("line 1 column"), "{rendered}");
 }
 
+/// **A parse failure must not put the file's own content on screen.**
+///
+/// `LoadError`'s `Display` reaches a footer alert verbatim on two screens, and for
+/// `chat_history.json` the value serde quotes back is a message body. This is the loader's property,
+/// not a screen's, which is why it is pinned here.
+///
+/// **Non-vacuous by construction, and that is the whole design of the test.** Each case asserts the
+/// marker IS in the raw `serde_json::Error` and is NOT in the rendered `LoadError`. The first half
+/// proves the marker reached the parser and that serde really did quote it back — without it, a
+/// clean second half would be indistinguishable from a fixture the parser never objected to. The
+/// two together also pin *the redaction* as the thing that removed it, rather than some accident of
+/// the message shape.
+///
+/// The battery covers every delimited position a value can reach through THIS loader: a string, a
+/// float (a coordinate is a float, and `location_history.json` is full of them), an integer, and an
+/// integer past `u64` — which does not take the exotic route it looks like it should, see below.
+///
+/// **The last case is the one the others cannot catch.** Every quote-free marker passes with the
+/// escape handling deleted, because the naive scan closes on the value's own closing quote. Only a
+/// marker containing a `"` — which `{:?}` renders as `\"` — separates a correct redactor from one
+/// that stops early and leaks the tail. A json string carrying an escaped quote is routine.
+///
+/// **`Unexpected::Other` is deliberately absent from this battery, and its absence is measured.**
+/// `serde_core`'s `visit_i128`/`visit_u128` defaults do build an `Other` payload holding the real
+/// value, but `serde_json` 1.0.151 only reaches them from `do_deserialize_i128`/`do_deserialize_u128`
+/// (`de.rs:356`/`:388`, wired at `:1514-1515`), which run when the TARGET field is 128-bit — not
+/// when the input is large. This crate declares no `i128` or `u128` field, so the route is
+/// unreachable here; an over-`u64` literal against any of our types overflows to `f64` and arrives
+/// as `Unexpected::Float`, which the case below pins by asserting on the float rendering rather than
+/// on the digits written into the file. The `Other` shape is still covered directly, as a redactor
+/// unit test in `src/export/mod.rs`, so the rule stays right for whoever adds the first 128-bit
+/// field.
+#[test]
+fn a_parse_error_names_the_shape_it_wanted_and_never_the_value_it_got() {
+    // Each marker sits in a `chat_history.json` conversation value, where an array of records
+    // belongs, so serde reports the offending value against `expected a sequence`.
+    let cases: [(&str, &str, &str); 5] = [
+        ("string", "zqxstringmarkerzqx", r#"{"conv":"zqxstringmarkerzqx"}"#),
+        ("float", "48.858844", r#"{"conv":48.858844}"#),
+        ("integer", "20210304141500", r#"{"conv":20210304141500}"#),
+        // Past u64. The marker is the FLOAT serde actually reports, not the digits in the file:
+        // asserting on the literal would pin a value the parser never echoes and the control would
+        // fail — which is how the unreachable-`Other` finding above was measured rather than argued.
+        ("over u64", "1.7014118346046923", r#"{"conv":170141183460469231731687303715884105728}"#),
+        // The bypass: `{:?}` escapes the embedded quote, putting three quotes in the message.
+        ("string with a quote", "zqxquotedzqx", r#"{"conv":"he said \"zqxquotedzqx\" loudly"}"#),
+    ];
+
+    for (label, marker, body) in cases {
+        let dir = scratch(&format!("leak-{}", label.replace(' ', "-")));
+        fs::write(dir.join("chat_history.json"), body).unwrap();
+
+        let error = ExportJson::load_dir(&dir).unwrap_err();
+        let LoadError::Json { file, source } = &error else {
+            panic!("{label}: expected a Json error, got {error:?}");
+        };
+        assert_eq!(*file, "chat_history.json", "{label}");
+
+        // The control. Without this the assertion below could pass on a parser that never saw the
+        // marker at all.
+        let raw = source.to_string();
+        assert!(raw.contains(marker), "{label}: the marker never reached serde, so this case proves nothing — raw was {raw}");
+
+        let rendered = error.to_string();
+        assert!(!rendered.contains(marker), "{label}: the file's own value reached a footer-bound message — {rendered}");
+        // What the user asked to keep: the expectation and the position.
+        assert!(rendered.contains("expected"), "{label}: the expectation is the diagnosable half — {rendered}");
+        assert!(rendered.contains("line 1 column"), "{label}: the position must survive — {rendered}");
+        assert!(rendered.contains("needs a parser update"), "{label}: {rendered}");
+    }
+}
+
+/// The syntax arm carries a POSITION and none of the input, which is why it is not redacted.
+///
+/// Renamed from `…_carries_no_delimited_run`, which was **already inaccurate under the old code**
+/// rather than invalidated by this round: a syntax error carried ``expected `:`` before the
+/// redaction too, and what it never carried was input. The old name described one output of one
+/// redaction pass; this one describes the property, which is why it survives the arm changing.
+///
+/// **With the arm un-redacted this is now the GUARD, not a belt-and-braces check.** Its
+/// `!contains(marker)` is the only runtime check that serde's syntax messages never echo the input;
+/// before the ruling the redaction stood behind it and a failure here would still have been caught
+/// downstream. Nothing stands behind it now, so it should not be read as redundant with a redaction
+/// that no longer applies to this arm and pruned on that basis.
+///
+/// It is what would notice if serde ever put input into a non-`Message` code, which is the residual
+/// the `Display` impl records — and only for the shapes driven here. It cannot reach the `Io` case,
+/// which no fixture can construct while the parse is `from_slice`.
+#[test]
+fn a_syntax_error_carries_its_position_and_none_of_the_input() {
+    let dir = scratch("leak-syntax");
+    fs::write(dir.join("chat_history.json"), br#"{"conv": zqxsyntaxmarkerzqx}"#).unwrap();
+
+    let error = ExportJson::load_dir(&dir).unwrap_err();
+    let rendered = error.to_string();
+    assert!(rendered.contains("is not valid json"), "{rendered}");
+    assert!(rendered.contains("re-extract"), "{rendered}");
+    assert!(rendered.contains("line 1 column"), "the position is what makes a syntax error actionable: {rendered}");
+    assert!(!rendered.contains("zqxsyntaxmarkerzqx"), "a syntax error must never echo the input: {rendered}");
+}
+
+/// **The syntax arm must keep the punctuation it names.**
+///
+/// Flipped from a test that pinned the COST of redacting this arm. The redaction is gone, so the
+/// same four messages are now the thing to protect rather than the price of a rule: re-introducing
+/// `strip_delimited` here is what reds this.
+///
+/// Four constants wrap punctuation in backticks (`serde_json` 1.0.151 `error.rs:358-363`), and all
+/// four are ordinary malformed-json outcomes. `ExpectedDoubleQuote` is the sharpest case — its
+/// payload is a quote nested inside a backtick run, so a quote-first redactor opens a run it never
+/// closes and truncates the message rather than merely blanking a character.
+#[test]
+fn the_syntax_arm_keeps_the_punctuation_it_names() {
+    let dir = scratch("syntax-punctuation");
+
+    fs::write(dir.join("chat_history.json"), br#"{"conv" 1}"#).unwrap();
+    let missing_colon = ExportJson::load_dir(&dir).unwrap_err().to_string();
+    assert!(missing_colon.contains("expected `:`"), "the wanted character is the diagnostic: {missing_colon}");
+    assert!(!missing_colon.contains('\u{2026}'), "redaction must not reach this arm: {missing_colon}");
+    assert!(missing_colon.contains("line 1 column"), "{missing_colon}");
+
+    // Between object members, not inside an array: an array element that is not a record fails as a
+    // Data error first and never reaches the comma.
+    fs::write(dir.join("chat_history.json"), br#"{"a":[] "b":[]}"#).unwrap();
+    let missing_comma = ExportJson::load_dir(&dir).unwrap_err().to_string();
+    assert!(missing_comma.contains("expected `,` or `}`"), "{missing_comma}");
+    assert!(!missing_comma.contains('\u{2026}'), "{missing_comma}");
+}
+
 #[test]
 fn a_value_the_model_cannot_validate_fails_the_load_and_names_the_field() {
     let dir = scratch("bad-timestamp");
@@ -522,7 +692,8 @@ fn a_value_the_model_cannot_validate_fails_the_load_and_names_the_field() {
     assert_eq!(*file, "memories_history.json");
     assert_eq!(source.field(), Field::Date);
     assert_eq!(source.value(), "yesterday");
-    assert_eq!(error.to_string(), "memories_history.json: Date: expected a \"YYYY-MM-DD HH:MM:SS UTC\" timestamp, got \"yesterday\"");
+    assert_eq!(error.to_string(), "memories_history.json: Date: expected a \"YYYY-MM-DD HH:MM:SS UTC\" timestamp, got 9 chars");
+    assert!(!error.to_string().contains("yesterday"), "the offending value must not reach a footer-bound message");
 }
 
 // ---- the fixture tree ----

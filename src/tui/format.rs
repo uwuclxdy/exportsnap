@@ -55,6 +55,28 @@ pub fn head_ellipsis(text: &str, budget: usize) -> String {
     format!("{}{kept}", glyph::ELLIPSIS)
 }
 
+/// Middle-ellipsis an id to `budget` cells (Patterns → Truncation): both ends of an id carry
+/// meaning, so the cut takes the middle, and the result is right-padded so the column holds its
+/// width whatever the id's length.
+///
+/// Shared by both media screens' identity column — a memory's uuid and a chat-media file's
+/// `b~<id>` — which is why it sits here beside [`head_ellipsis`] rather than inside one screen. The
+/// ids either renders are ascii, so chars and cells agree on them; the `keep` split is on chars, so
+/// a wide character would cost a cell the budget did not reserve.
+#[must_use]
+pub fn middle_ellipsis(text: &str, budget: usize) -> String {
+    if cells(text) <= budget {
+        return right_pad(text, budget);
+    }
+    let keep = budget.saturating_sub(1);
+    if keep == 0 {
+        return right_pad(&glyph::ELLIPSIS.to_string(), budget);
+    }
+    let head: String = text.chars().take(keep / 2).collect();
+    let tail: String = text.chars().rev().take(keep - keep / 2).collect::<Vec<_>>().into_iter().rev().collect();
+    right_pad(&format!("{head}{}{tail}", glyph::ELLIPSIS), budget)
+}
+
 /// Thousands-separated, the form a detail panel uses (Patterns → Numeric formatting).
 #[must_use]
 pub fn grouped(value: usize) -> String {
@@ -148,6 +170,18 @@ mod tests {
         // u64 runs out inside the exbibytes, and adding a unit for a disk nobody has would be
         // dead code — the figure simply keeps growing in PiB.
         assert_eq!(binary_bytes(u64::MAX), "16384.0 PiB");
+    }
+
+    #[test]
+    fn a_middle_ellipsis_keeps_both_ends_of_the_id() {
+        let id = "2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8e";
+        assert_eq!(middle_ellipsis(id, 18), "2ca92da1…da6ba0f8e");
+        assert_eq!(middle_ellipsis(id, 36), id);
+        assert_eq!(middle_ellipsis(id, 2), "…e");
+        // A chat-media id is the other shape this column carries, and its tail is the discriminating
+        // half: `b~` heads every one of the 8005 plain files.
+        assert_eq!(middle_ellipsis("b~aB3xY9aB3xY9aB3xY9", 12), "b~aB3…aB3xY9");
+        assert_eq!(middle_ellipsis("b~aB3xY9aB3xY9aB3xY9", 12).chars().count(), 12);
     }
 
     #[test]

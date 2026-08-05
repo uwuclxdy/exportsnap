@@ -368,7 +368,11 @@ fn first_frame_pixel(path: &Path, x: u32, y: u32, width: u32) -> [u8; 3] {
 /// The refactor that gave the memories and chat-media legs one `PlannedItem` must not have handed
 /// this leg either of the two fields the other one brought. A memory has no sender and no thread, so
 /// nothing may reach the metadata fields decision 44c defines; and this leg has only ever written
-/// its composite, so decision 44b's `both` mode must not follow the shared type across.
+/// its composite, so none of decision 44b's three overlay modes may follow the shared type across.
+///
+/// This is the memories half of the overlay-mode seam, and it is the half with no control: the mode
+/// is a chat-leg argument, `Plan::build` takes none, and the whole of what that has to mean here is
+/// that a memory with an overlay is composited and keeps nothing.
 #[test]
 fn a_memory_carries_no_attribution_and_keeps_no_originals() {
     let dir = TempDir::new().unwrap();

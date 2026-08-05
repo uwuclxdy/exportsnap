@@ -121,8 +121,56 @@ impl ParseError {
 }
 
 impl fmt::Display for ParseError {
+    /// Names the field and what was expected, and **never the value that was not it**.
+    ///
+    /// This string reaches a footer alert through [`crate::export::LoadError::Invalid`], and
+    /// [`Field`] admits `Location` — so the value it used to render with `{:?}` could be a
+    /// coordinate. The restriction on [`Field`] is deliberate and keeps a message body out; it was
+    /// never a decision that a lat/long belongs on a terminal.
+    ///
+    /// **Not done with `crate::export::strip_delimited`, and the difference is not stylistic.** That
+    /// function scans a rendered message for delimited runs because serde's message is not ours to
+    /// change. This one IS ours, so the value simply never goes in — nothing to scan, nothing to
+    /// keep true across a dependency bump. Running the scan here would also destroy the diagnostic:
+    /// [`ParseErrorKind::expected`] returns quoted text in both variants, so a delimiter pass turns
+    /// `expected a "YYYY-MM-DD HH:MM:SS UTC" timestamp` into `expected a timestamp` and strips the
+    /// coordinate form out of the other one entirely. The redaction would eat exactly the half a
+    /// user needs.
+    ///
+    /// **The length stays, and it is not decoration.** Unlike the serde arm — which keeps
+    /// `at line N column M`, so a redacted message still says where to look — this one carries no
+    /// offset of any kind: [`crate::export::LoadError::Invalid`] renders `{file}: {source}` and
+    /// `ParseError` holds no record index. Drop the value outright and an empty string, a
+    /// valid-looking ISO-8601 date and 400 KB of garbage all produce the identical sentence, which
+    /// is the diagnosis gone rather than trimmed for a tool whose job is reporting schema drift.
+    /// A character count separates all three and cannot carry a coordinate: `-33.8688, 151.2093`
+    /// and `0.0, 0.0` are both just a number of characters. Shape-over-value is this project's own
+    /// idiom, written into `docs/handoff-state.md` after a real privacy breach.
+    ///
+    /// **Length alone, deliberately — and it diagnoses unevenly across the two kinds, which is worth
+    /// naming rather than claiming it is enough everywhere.**
+    ///
+    /// [`ParseErrorKind::Timestamp`] degrades well: the expected form is 23 characters and the
+    /// likeliest drift, ISO-8601 `2021-03-04T14:30:05Z`, is 20, so the length separates the common
+    /// case on its own. A zone-label change (`… GMT`) is also 23, but "right length, wrong content"
+    /// is itself a signal.
+    ///
+    /// [`ParseErrorKind::Coordinates`] does not. `51,5074, -0,1278` (locale decimal comma) and
+    /// `51.5074; -0.1278` (separator change) are both 16 characters — and so is the well-formed
+    /// `51.5074, -0.1278`. Those are the two likeliest coordinate drifts, they need opposite fixes,
+    /// and the length tells them apart from each other and from success not at all.
+    ///
+    /// Left as is on purpose. A charclass ("digits and punctuation") would separate them and still
+    /// leak nothing, being identical for every coordinate on earth — but it is a wider claim than
+    /// the one that was decided, and widening a redaction's output by an implementer's judgement is
+    /// how it grows back toward the value it removed. Recorded so whoever hits a coordinate drift
+    /// knows why their message is thin, and what the fix would be.
+    ///
+    /// [`ParseError::value`] still carries the value for a caller with somewhere safe to put it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: expected {}, got {:?}", self.field, self.kind.expected(), self.value)
+        let chars = self.value.chars().count();
+        let unit = if chars == 1 { "char" } else { "chars" };
+        write!(f, "{}: expected {}, got {chars} {unit}", self.field, self.kind.expected())
     }
 }
 

@@ -76,6 +76,13 @@ use crate::export::video::{LocationAtom, Mp4, NotMp4, VideoError, VideoStamp};
 /// it.
 const OUT_DIR: &str = "exportsnap-out";
 
+/// How many recorded failures an item may carry before a run stops offering it.
+///
+/// [`run`] takes the cap as an argument because it is a caller's policy and a test drives it with
+/// its own; this is the one both run compositions pass. One constant rather than one per leg: two
+/// legs agreeing on a number by coincidence is a number that drifts.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
 /// Extensions the image leg reads. A main outside this set is deferred rather than attempted.
 ///
 /// **The ceiling, and its upgrade path.** The image leg admits exactly these three today, and adding
@@ -436,12 +443,33 @@ pub struct PlannedItem {
     pub attribution: Option<Attribution>,
     /// Where the fixed copy lands.
     pub output: PathBuf,
-    /// The directory the export's own files are copied into verbatim, beside the output.
+    /// The export's own files kept verbatim beside the output, or `None` when nothing is kept.
     ///
-    /// Decision 44b's `both` overlay mode, which only the chat-media leg runs: the merged file is
-    /// what the run produces and the originals are what it refuses to lose. `None` on the memories
-    /// leg, whose composite is the only artifact it has ever written.
-    pub originals: Option<PathBuf>,
+    /// Decision 44b's overlay mode, which only the chat-media leg runs. `None` on the memories leg,
+    /// whose composite is the only artifact it has ever written.
+    pub originals: Option<Originals>,
+}
+
+/// The export's own two files, copied verbatim beside the output.
+///
+/// **The overlay is here rather than read back off [`SourceMedia::overlay`], and that split is the
+/// whole overlay-mode seam.** [`SourceMedia`] says what the item-level pass CONSUMES; this says what
+/// the run refuses to lose. Under decision 44b's `originals` mode the caption is never burned in, so
+/// the pass is handed a main with no overlay — and this is then the only thing that still knows one
+/// existed. Under `both` the two carry the same path; under `merged` this is `None` and only
+/// [`SourceMedia`] carries it.
+///
+/// A pair, not a list: what decision 46c keeps is exactly the two files a composite would have
+/// consumed, and the main is already [`SourceMedia::main`]. An item with nothing to keep is `None`
+/// on [`PlannedItem::originals`] rather than an empty collection here, so "keep originals" and
+/// "there is an overlay to keep" cannot be recorded out of step — which is the agreement two
+/// independent `Option` fields used to rest on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Originals {
+    /// The directory the copies land in.
+    pub dir: PathBuf,
+    /// The caption layer, under the name the export gave it.
+    pub overlay: PathBuf,
 }
 
 /// Why a paired memory is not in [`Plan::items`].
@@ -560,8 +588,8 @@ impl Plan {
                 attribution: None,
                 output,
                 // The memories leg has always written its composite and nothing else; decision 44b's
-                // `both` mode is the chat leg's, and widening it here would change what a memories
-                // run produces.
+                // overlay modes belong to the chat leg, and widening one here would change what a
+                // memories run produces.
                 originals: None,
             });
         }
@@ -728,8 +756,21 @@ pub struct FixReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub source_id: String,
-    /// The message that also went into the manifest's `last_error`, where it is redacted on the
-    /// way in.
+    /// The raw [`FixError`] message, verbatim.
+    ///
+    /// **The redaction is the MANIFEST's, and it applies to the manifest's copy alone.** The same
+    /// message also goes to `last_error`, where `mark_failed` reduces it to prose tokens on the way
+    /// in; this field is not that copy and is not filtered. Saying only "where it is redacted on the
+    /// way in" read as covering the field, which is the shape where conceding a limitation launders
+    /// the wider case — the concession has to state which side it covers.
+    ///
+    /// It matters on the chat-media leg specifically: [`FixError::Create`], [`FixError::Touch`] and
+    /// [`FixError::Copy`] all name a path under `<out_root>/chat/<cleaned conversation key>/`, and a
+    /// conversation key is a friend's username. So this string can hold one, and any consumer that
+    /// renders it is a disclosure surface. The screens are safe because
+    /// [`crate::tui::alert::RunAlert::completion`] reads `failed.len()` and never a reason — a
+    /// deliberate boundary, pinned by `a_failing_chat_item_keeps_its_conversation_out_of_the_alert`
+    /// in `tests/chat_media_screen.rs` rather than left to whoever edits the copy next.
     pub reason: String,
 }
 
@@ -883,7 +924,8 @@ pub fn fix(item: &PlannedItem, video: &VideoOptions) -> Result<Vec<Notice>, FixE
     Ok(notices)
 }
 
-/// Copies the export's own files beside the output, decision 44b's `both` overlay mode.
+/// Copies the export's own files beside the output, decision 44b's `both` and `originals` overlay
+/// modes.
 ///
 /// Verbatim, under the names the export gave them, which is the point of keeping them at all: the
 /// output is the repaired file and these are the bytes it was made from, so putting them under the
@@ -891,13 +933,15 @@ pub fn fix(item: &PlannedItem, video: &VideoOptions) -> Result<Vec<Notice>, FixE
 /// thing. They get the output's modification time so a browser sorts the set together, and nothing
 /// else about them is touched — no composite, no stamp.
 ///
-/// A no-op unless the item names a [`PlannedItem::originals`] directory **and** carries an overlay:
-/// with nothing composited there is no un-merged version to lose, and decision 46c's "the two
-/// originals" is exactly the pair a composite consumed. Decision 47 closed the case that used to sit
-/// here as a residual — a lone PNG is no longer re-encoded at all, so its own bytes ARE the output
-/// and there is nothing left to keep a copy of.
+/// A no-op unless the item carries an [`Originals`], which a planner mints only where a composite
+/// had two files to consume: with no overlay there is no un-merged version to lose. Decision 47
+/// closed the case that used to sit here as a residual — a lone PNG is no longer re-encoded at all,
+/// so its own bytes ARE the output and there is nothing left to keep a copy of.
+///
+/// **This reads [`Originals::overlay`] and never [`SourceMedia::overlay`]**, which is what lets the
+/// `originals` mode hand the fix pass a main alone while still keeping the pair.
 fn keep_originals(item: &PlannedItem) -> Result<(), FixError> {
-    let (Some(dir), Some(overlay)) = (&item.originals, &item.media.overlay) else {
+    let Some(Originals { dir, overlay }) = &item.originals else {
         return Ok(());
     };
     fs::create_dir_all(dir).map_err(|source| FixError::Create { path: dir.clone(), source })?;

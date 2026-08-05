@@ -10,7 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::theme::{Palette, glyph};
-use crate::tui::screens::memories::{AlertKind, RunAlert};
+use crate::tui::alert::{AlertKind, RunAlert};
 
 /// 3 spaces between hint groups, no glyph.
 const HINT_GAP: &str = "   ";
@@ -48,8 +48,8 @@ fn hints(palette: &Palette) -> Line<'static> {
     ])
 }
 
-/// The hint set while the memories table pane is descended: arrows scroll it, `←`, `esc` and `q`
-/// all ascend, and `→` is inert so it gets no hint.
+/// The hint set while the active screen's table pane is descended: arrows scroll it, `←`, `esc` and
+/// `q` all ascend, and `→` is inert so it gets no hint.
 fn descended_hints(palette: &Palette) -> Line<'static> {
     let key = Style::new().fg(palette.accent).bold();
     let label = Style::new().fg(palette.text_dim);

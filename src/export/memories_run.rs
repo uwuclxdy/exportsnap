@@ -30,15 +30,11 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
-use crate::export::local_fix::{self, FixReport, Leg, Plan, VideoOptions};
+use crate::export::local_fix::{self, DEFAULT_MAX_ATTEMPTS, FixReport, Leg, Plan, VideoOptions};
 use crate::export::manifest::{ExportId, Manifest, ManifestError};
 use crate::export::memories::{self, ScanError, reconcile};
 use crate::export::zip::{DiscoverError, discover_parts};
 use crate::export::{ExportJson, LoadError};
-
-/// How many recorded failures an item may carry before the run stops offering it (the same cap the
-/// pipeline's own tests drive with).
-const MAX_ATTEMPTS: u32 = 3;
 
 /// Everything a run needs, gathered by the caller.
 #[derive(Debug, Clone)]
@@ -185,7 +181,7 @@ pub fn run(inputs: &RunInputs, events: &Sender<RunEvent>) {
     let outcome = match prepare(inputs) {
         Ok(mut prepared) => {
             let _ = events.send(RunEvent::Planned(prepared.snapshot.clone()));
-            match local_fix::run(&prepared.plan, &mut prepared.manifest, MAX_ATTEMPTS, &inputs.video) {
+            match local_fix::run(&prepared.plan, &mut prepared.manifest, DEFAULT_MAX_ATTEMPTS, &inputs.video) {
                 Ok(report) => RunOutcome::Completed(report),
                 Err(error) => RunOutcome::Failed(RunError::Manifest(error)),
             }

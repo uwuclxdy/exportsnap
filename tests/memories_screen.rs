@@ -22,7 +22,7 @@ use exportsnap::export::env::Environment;
 use exportsnap::export::local_fix::{FixReport, Leg, VideoOptions};
 use exportsnap::export::manifest::{ExportId, ItemKind, Manifest, ResumeReport};
 use exportsnap::export::memories_run::{self, PlanRow, PlanSnapshot, RunError, RunEvent, RunOutcome};
-use exportsnap::tui::screens::memories::AlertKind;
+use exportsnap::tui::alert::AlertKind;
 use exportsnap::tui::shell;
 use exportsnap::tui::theme::{Palette, Tier};
 use image::RgbImage;
@@ -251,7 +251,7 @@ fn cell_run(buffer: &Buffer, y: u16) -> String {
 /// An app on the memories tab with a real (tempdir) export tree behind it and a disk-probe
 /// environment handed in, so the form rows are deterministic.
 fn app_on_memories(dir: &TempDir) -> App {
-    let mut app = App::new(Tier::Full).with_memories_environment(
+    let mut app = App::new(Tier::Full).with_source_environment(
         dir.path().to_path_buf(),
         Some(dir.path().join("out")),
         Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
@@ -265,7 +265,7 @@ fn app_on_memories(dir: &TempDir) -> App {
 /// source row's head-ellipsis across the truncation threshold, so any assertion on the path's
 /// middle would be run-dependent. `/export` never truncates, so the rows are byte-stable.
 fn app_on_fixed_source() -> App {
-    let mut app = App::new(Tier::Full).with_memories_environment(
+    let mut app = App::new(Tier::Full).with_source_environment(
         PathBuf::from("/export"),
         Some(PathBuf::from("/export/out")),
         Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
@@ -757,7 +757,7 @@ fn the_disk_free_row_fits_its_wide_value_at_the_form_width_floor() {
     // it must fit the 40-cell side-by-side panel without clipping the trailing percent.
     // 1024 GiB prints as "1.0 TiB", so the WIDEST value is the one just under a unit boundary:
     // 511.9 GiB free of 1024.0 GiB reads "511.9 GiB" — 50% used, one decimal, a 9-cell value.
-    let mut app = App::new(Tier::Full).with_memories_environment(
+    let mut app = App::new(Tier::Full).with_source_environment(
         dir.path().to_path_buf(),
         Some(dir.path().join("out")),
         Environment {
@@ -851,7 +851,7 @@ fn a_zero_total_bar_shows_a_dash_not_an_ellipsis() {
 fn every_tab_renders_with_the_memories_screen_at_degenerate_sizes() {
     let sizes = [(0, 0), (1, 1), (4, 4), (16, 3), (17, 2), (255, 1), (1, 255), (500, 3)];
     for (width, height) in sizes {
-        let mut app = App::new(Tier::Full).with_memories_environment(
+        let mut app = App::new(Tier::Full).with_source_environment(
             std::path::PathBuf::from("/nope"),
             Some(std::path::PathBuf::from("/nope/out")),
             Environment::default(),

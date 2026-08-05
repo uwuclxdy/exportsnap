@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::try_init()
         .inspect_err(|_| ratatui::restore())
         .context("failed to take over the terminal; run exportsnap in an interactive terminal")?;
-    let mut app = App::new(tier).with_overview(overview).with_memories(source, out);
+    let mut app = App::new(tier).with_overview(overview).with_source(source, out);
     let result = app.run(&mut terminal);
     ratatui::restore();
 
@@ -123,7 +123,7 @@ fn parse_source_arg(args: impl IntoIterator<Item = String>) -> Result<Option<Pat
 /// shape as [`parse_source_arg`] and for the same reason: a real CLI with subcommands is phase 5
 /// and brings its own argument parser then.
 ///
-/// `None` means no `--out` was passed, which the memories screen resolves to
+/// `None` means no `--out` was passed, which each media screen resolves to
 /// `default_out_root(source)`.
 fn parse_out_arg(args: impl IntoIterator<Item = String>) -> Result<Option<PathBuf>> {
     let mut out = None;

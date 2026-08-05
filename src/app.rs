@@ -9,7 +9,8 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::export::env::Environment;
-use crate::export::memories_run::RunEvent;
+use crate::tui::alert::RunAlert;
+use crate::tui::screens::chat_media::ChatMedia;
 use crate::tui::screens::memories::Memories;
 use crate::tui::screens::overview::Overview;
 use crate::tui::shell;
@@ -86,6 +87,24 @@ impl Tab {
 
 /// Top-level app state: which screen is active, whether the 2-step quit is armed, and whether
 /// the event loop should keep running.
+///
+/// # Two screens now drive runs, and every branch that used to name the memories one was decided
+/// per consumer
+///
+/// - **The footer alert belongs to the ACTIVE screen** ([`Self::alert`]). A footer row is screen
+///   chrome, and "run finished · 12 fixed" carries no clue which run it is about, so showing the
+///   chat screen's outcome while the user reads the memories tab misattributes it. An alert raised
+///   on a background tab is not lost — it waits, and `x` on that tab clears it — which is a better
+///   failure than a message the reader cannot place. The cost, stated rather than hidden: a run
+///   finishing on a tab the user is not looking at is silent until they come back. Closing that
+///   properly is the contract's tab-activity color channel, which this app does not have yet.
+/// - **`x` dismisses whatever the footer is SHOWING**, which is the same function, so the key and
+///   the row can never disagree about which of two alerts is live.
+/// - **`q`, the key routing and the `⌥` jump's implicit ascend all address the active screen**
+///   ([`Self::descended`], [`Self::ascend_active`]). Ascending a screen the user is not on would
+///   silently reset a pane they left descended.
+/// - **The tick drives BOTH screens** ([`Self::tick`]), because a run keeps running when its tab is
+///   not in view and its manifest poll has to keep up with it.
 #[derive(Debug)]
 pub struct App {
     palette: Palette,
@@ -94,6 +113,7 @@ pub struct App {
     running: bool,
     overview: Overview,
     memories: Memories,
+    chat_media: ChatMedia,
 }
 
 impl App {
@@ -106,6 +126,7 @@ impl App {
             running: true,
             overview: Overview::unloaded(),
             memories: Memories::new(PathBuf::new(), None),
+            chat_media: ChatMedia::new(PathBuf::new(), None),
         }
     }
 
@@ -117,26 +138,37 @@ impl App {
         self
     }
 
-    /// Hands the memories screen its run context: the source dir and the output root, `--out`'s
+    /// Hands both media screens their run context: the source dir and the output root, `--out`'s
     /// value or the default. `main` calls this before the first frame.
+    ///
+    /// One call rather than one per screen: the two legs read one export and write under one output
+    /// root, so a caller handing them different sources would be describing a state that cannot
+    /// arise from the command line.
     #[must_use]
-    pub fn with_memories(mut self, source: PathBuf, out_root: Option<PathBuf>) -> Self {
-        self.memories = Memories::new(source, out_root);
+    pub fn with_source(mut self, source: PathBuf, out_root: Option<PathBuf>) -> Self {
+        self.memories = Memories::new(source.clone(), out_root.clone());
+        self.chat_media = ChatMedia::new(source, out_root);
         self
     }
 
-    /// [`Self::with_memories`] with the environment handed in — the seam a render test uses to
-    /// pin the disk-free row.
+    /// [`Self::with_source`] with the environment handed in — the seam a render test uses to
+    /// pin the disk-free rows.
     #[must_use]
-    pub fn with_memories_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
-        self.memories = Memories::with_environment(source, out_root, environment);
+    pub fn with_source_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
+        self.memories = Memories::with_environment(source.clone(), out_root.clone(), environment.clone());
+        self.chat_media = ChatMedia::with_environment(source, out_root, environment);
         self
     }
 
     /// Hands the memories screen a receiver the test feeds — the seam the render and tick tests
     /// drive; the events flow through the real `tick` machinery.
-    pub fn with_memories_channel(&mut self, receiver: std::sync::mpsc::Receiver<RunEvent>) {
+    pub fn with_memories_channel(&mut self, receiver: std::sync::mpsc::Receiver<crate::export::memories_run::RunEvent>) {
         self.memories.with_channel(receiver);
+    }
+
+    /// [`Self::with_memories_channel`] for the chat media screen.
+    pub fn with_chat_media_channel(&mut self, receiver: std::sync::mpsc::Receiver<crate::export::chat_run::RunEvent>) {
+        self.chat_media.with_channel(receiver);
     }
 
     #[must_use]
@@ -161,6 +193,63 @@ impl App {
     }
 
     #[must_use]
+    pub const fn chat_media(&self) -> &ChatMedia {
+        &self.chat_media
+    }
+
+    /// The chat media screen's mutable half, for the same two reasons as [`Self::memories_mut`].
+    pub fn chat_media_mut(&mut self) -> &mut ChatMedia {
+        &mut self.chat_media
+    }
+
+    /// The alert the footer row is showing this frame: the ACTIVE screen's, or none.
+    ///
+    /// The single source for both the footer and the `x` key, so the row and the dismissal can never
+    /// disagree about which of two live alerts is the one on screen. See the type's own docs for why
+    /// the active screen wins rather than a priority order across screens.
+    #[must_use]
+    pub const fn alert(&self) -> Option<&RunAlert> {
+        match self.active {
+            Tab::Memories => self.memories.alert(),
+            Tab::ChatMedia => self.chat_media.alert(),
+            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => None,
+        }
+    }
+
+    /// Whether the active screen's read-only pane owns the caret. `false` on every screen that has
+    /// no pane to descend into, which is what makes `q` the quit key there.
+    #[must_use]
+    pub const fn descended(&self) -> bool {
+        match self.active {
+            Tab::Memories => self.memories.descended(),
+            Tab::ChatMedia => self.chat_media.descended(),
+            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => false,
+        }
+    }
+
+    /// Returns the caret to the active screen's form. A no-op on a screen with no descended pane.
+    ///
+    /// Deliberately NOT "ascend every screen": a jump away from the memories tab must not quietly
+    /// reset a chat-media pane the user left descended and will come back to.
+    fn ascend_active(&mut self) {
+        match self.active {
+            Tab::Memories => self.memories.ascend(),
+            Tab::ChatMedia => self.chat_media.ascend(),
+            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => {}
+        }
+    }
+
+    /// Dismisses the alert the footer is showing, answering whether there was one. The `x` key's
+    /// whole job; `x` with nothing showing is inert.
+    fn dismiss_alert(&mut self) -> bool {
+        match self.active {
+            Tab::Memories => self.memories.dismiss_alert(),
+            Tab::ChatMedia => self.chat_media.dismiss_alert(),
+            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => false,
+        }
+    }
+
+    #[must_use]
     pub const fn active(&self) -> Tab {
         self.active
     }
@@ -177,10 +266,12 @@ impl App {
 
     /// Draws, waits for an event, applies it, ticks, repeats.
     ///
-    /// While a memories run is live the wait is capped at one tick (80 ms), so the spinner
+    /// While EITHER screen's run is live the wait is capped at one tick (80 ms), so the spinner
     /// animates and the per-item poll refreshes without input; with no run live there is nothing
     /// to animate, and the loop blocks on input instead of redrawing an identical frame every
-    /// 80 ms forever.
+    /// 80 ms forever. The gate is a disjunction rather than "the active screen's run" because a run
+    /// keeps running when its tab is not in view, and a poll that stopped there would leave its
+    /// table frozen at whatever the user last saw.
     ///
     /// # Errors
     ///
@@ -191,7 +282,7 @@ impl App {
                 let app = &mut *self;
                 terminal.draw(|frame| shell::render(frame, app))?;
             }
-            if self.memories.run_in_flight() {
+            if self.memories.run_in_flight() || self.chat_media.run_in_flight() {
                 if event::poll(TICK)? {
                     self.handle_event(&event::read()?);
                 }
@@ -203,9 +294,11 @@ impl App {
         Ok(())
     }
 
-    /// One timer tick: pump the memories run's channel, poll its statuses, advance the spinner.
+    /// One timer tick: pump each run's channel, poll its statuses, advance its spinner. A screen
+    /// with no run in flight returns immediately, so ticking both costs nothing when one is idle.
     pub fn tick(&mut self) {
         self.memories.tick();
+        self.chat_media.tick();
     }
 
     /// Applies one terminal event. Resizes need no state change — the next draw reads the new
@@ -243,13 +336,12 @@ impl App {
             return;
         }
 
-        // `q` while the memories table pane is descended is the back key, not the quit key — it
-        // ascends, exactly like esc (cloudy-tui: q back whenever q would ascend a level). The
-        // hint bar advertises the same.
-        let descended = self.active == Tab::Memories && self.memories.descended();
+        // `q` while the ACTIVE screen's table pane is descended is the back key, not the quit key —
+        // it ascends, exactly like esc (cloudy-tui: q back whenever q would ascend a level). The
+        // hint bar advertises the same, off the same answer.
         if matches!(key.code, KeyCode::Char('q' | 'Q')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-            if descended {
-                self.memories.ascend();
+            if self.descended() {
+                self.ascend_active();
                 self.quit_armed = false;
                 return;
             }
@@ -263,21 +355,25 @@ impl App {
             return;
         }
 
-        // `x` dismisses the run-completion footer alert — the only thing it is bound to. With no
-        // alert live it is a key like any other (it still disarms an armed quit below).
-        if matches!(key.code, KeyCode::Char('x' | 'X'))
-            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
-            && self.memories.dismiss_alert()
+        // `x` dismisses the run-completion footer alert the row is actually showing — the only
+        // thing it is bound to. With no alert live it is a key like any other (it still disarms an
+        // armed quit below).
+        if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() && self.dismiss_alert()
         {
             return;
         }
 
         self.quit_armed = false;
 
-        // Screen-owned keys on the memories tab (form rows, table scroll, descend/ascend). The
-        // screen answers `false` for keys that belong to the shell, so the tab switching below
-        // still works when the form owns the caret.
-        if self.active == Tab::Memories && self.memories.handle_key(key) {
+        // Screen-owned keys on whichever screen is active (form rows, table scroll,
+        // descend/ascend). A screen answers `false` for keys that belong to the shell, so the tab
+        // switching below still works when a form owns the caret.
+        let consumed = match self.active {
+            Tab::Memories => self.memories.handle_key(key),
+            Tab::ChatMedia => self.chat_media.handle_key(key),
+            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => false,
+        };
+        if consumed {
             return;
         }
 
@@ -290,9 +386,10 @@ impl App {
             }
             KeyCode::Char(c) if key.modifiers == KeyModifiers::ALT => {
                 if let Some(tab) = c.to_digit(10).and_then(Tab::from_jump_digit) {
-                    // A jump ascends a descended pane implicitly (cloudy-tui: the jump ascends
+                    // A jump ascends the pane it is LEAVING (cloudy-tui: the jump ascends
                     // implicitly), and moving focus away disarms the quit like any other key.
-                    self.memories.ascend();
+                    // Ascending every screen instead would reset a pane the user is not on.
+                    self.ascend_active();
                     self.active = tab;
                 }
             }

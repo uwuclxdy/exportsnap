@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 
-use super::screens::{memories, overview};
+use super::screens::{chat_media, memories, overview};
 use super::theme::{Palette, glyph};
 use super::widgets::{PanelStyle, panel};
 use super::{footer, header};
@@ -54,7 +54,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         frame.render_widget(compact_banner(&palette, header_area.width), header_area);
     }
-    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.memories().alert(), app.memories().descended()), footer_area);
+    // The alert and the descended flag are the ACTIVE screen's — two screens can each hold one and
+    // there is one footer row, so `App` answers both off the same tab rather than the footer
+    // guessing. See `App`'s own docs for why the active screen wins.
+    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), app.descended()), footer_area);
 
     // Recomputed from the live frame size every draw, so it self-clears on resize rather than
     // living on as a stored notification. At most one banner per frame (skill: Banner), so a
@@ -70,7 +73,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.active() {
         Tab::Overview => overview::render(frame, &palette, app.overview(), panel_area),
         Tab::Memories => memories::render(frame, &palette, app.memories_mut(), panel_area),
-        // The other four tabs are still the empty shell: one placeholder panel named after the
+        Tab::ChatMedia => chat_media::render(frame, &palette, app.chat_media_mut(), panel_area),
+        // The other three tabs are still the empty shell: one placeholder panel named after the
         // tab. It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the
         // cursor) and, being the first panel on the body, an `ACCENT_2` title.
         tab => frame.render_widget(panel(&palette, tab.label(), PanelStyle { first: true, focused: true }), panel_area),

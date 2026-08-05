@@ -26,43 +26,36 @@
 //! is live the table follows its tail until the user scrolls up.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::symbols::{block, shade};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{ListState, Paragraph};
 
-use crate::export::env::Environment;
+use crate::export::env::{Environment, probe_target};
 use crate::export::local_fix::{VideoOptions, default_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::memories_run::{self, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
-use crate::tui::format::{binary_bytes, cells, head_ellipsis, right_pad};
+use crate::tui::alert::RunAlert;
+use crate::tui::format::{cells, head_ellipsis, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
-use crate::tui::theme::{Palette, glyph};
-use crate::tui::widgets::{self, PanelStyle, panel};
+use crate::tui::theme::Palette;
+use crate::tui::widgets::{
+    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, disk_free_value, empty_state,
+    overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
+};
 
 // ---- layout budgets ----
 
 /// Cells a path value is head-ellipsised to. The form's value column is this wide, so the source
 /// and the output dir rows hold their width whatever the machine's actual paths are.
 const PATH_CELLS: usize = 22;
-/// Cells the disk-free usage bar occupies.
-const DISK_BAR_CELLS: usize = 9;
 /// The widest form label, which sets where the ragged rows' widest value lands.
 const WIDEST_FORM_LABEL: usize = 10;
-/// The gap between a ragged row's label and its value (contract: ≥ 2 spaces).
-const LABEL_GAP: usize = 2;
-/// The caret gutter every focusable row leads with.
-const CARET_GUTTER: usize = 2;
-/// Cells the table's identity column occupies (a middle-ellipsised uuid).
-const IDENTITY_CELLS: usize = 18;
-/// Cells the table's status column occupies — the widest pill, `[ pending ]`.
-const STATUS_CELLS: usize = 11;
 /// The narrowest the output column may be before the panel gives up on the whole table.
 const OUTPUT_MIN: usize = 6;
 
@@ -98,6 +91,17 @@ impl FormRow {
             Self::Transcode => "transcode",
             Self::Start => "start run",
         }
+    }
+
+    /// Where this row sits in [`Self::ALL`], resolved by IDENTITY rather than by position.
+    ///
+    /// The disabled-chip tooltip is gated on the start chip holding focus, and writing that as
+    /// `ALL.len() - 1` says "the last row" instead — the two agree only while [`Self::Start`] is
+    /// last. A `len - 1` index's discriminating growth is APPENDING, which is how a form-row list
+    /// grows, so a sixth row after `Start` would silently take the tooltip with nothing red.
+    /// `the_tooltip_is_bound_to_the_start_chip_by_identity` pins the binding on both screens.
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|row| *row == self).unwrap_or(0)
     }
 }
 
@@ -167,22 +171,6 @@ struct RunView {
 struct TablePane {
     descended: bool,
     list: ListState,
-}
-
-/// The run-completion footer alert (cloudy-tui skill: Footer alert). Dismissed only by `x`;
-/// a new run resolves it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunAlert {
-    pub kind: AlertKind,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlertKind {
-    /// A run that finished with no failures.
-    Info,
-    /// A run that failed somewhere, or could not start.
-    Warning,
 }
 
 impl Memories {
@@ -516,7 +504,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, memories: &mut Memories, are
     // The tooltip row appears only while the disabled start chip holds focus, so the form's
     // height is known before its rows are built — the rows need the panel's interior width for
     // the focused-row tint, which only exists once the layout has run.
-    let tooltip = !memories.start_enabled() && row_focused(memories, FormRow::ALL.len() - 1);
+    let tooltip = !memories.start_enabled() && row_focused(memories, FormRow::Start.index());
     let form_height = u16::try_from(FormRow::ALL.len() + usize::from(tooltip)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
 
     let form_panel_width = FORM_INTERIOR as u16 + widgets::CHROME_COLUMNS;
@@ -564,12 +552,8 @@ fn form_panel(palette: &Palette, memories: &Memories, width: usize) -> Vec<Line<
         rows.push(form_row(palette, memories, row, index, width));
     }
     // The disabled chip's reason, only while the chip has focus (contract: Disabled row).
-    if !memories.start_enabled() && row_focused(memories, FormRow::ALL.len() - 1) {
-        rows.push(Line::from(vec![
-            Span::styled("  ", Style::new().fg(palette.line)),
-            Span::styled(format!("{} ", ratatui::symbols::line::BOTTOM_LEFT), Style::new().fg(palette.line)),
-            Span::styled("a run is already in flight", Style::new().fg(palette.text_faint)),
-        ]));
+    if !memories.start_enabled() && row_focused(memories, FormRow::Start.index()) {
+        rows.push(tooltip(palette, "a run is already in flight"));
     }
     rows
 }
@@ -577,11 +561,7 @@ fn form_panel(palette: &Palette, memories: &Memories, width: usize) -> Vec<Line<
 fn form_row(palette: &Palette, memories: &Memories, row: FormRow, index: usize, width: usize) -> Line<'static> {
     let selected = row_selected(memories, index);
     let focused = row_focused(memories, index);
-    let caret = if focused {
-        Span::styled(format!("{} ", glyph::SELECTION_CARET), Style::new().fg(palette.accent).bold())
-    } else {
-        Span::raw("  ")
-    };
+    let caret = caret(palette, focused);
 
     match row {
         FormRow::Source => {
@@ -619,87 +599,8 @@ fn form_row(palette: &Palette, memories: &Memories, row: FormRow, index: usize, 
             let line = Line::from(spans);
             if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
         }
-        FormRow::Start => {
-            let chip = chip_spans(palette, memories, focused);
-            Line::from(vec![caret, chip])
-        }
+        FormRow::Start => Line::from(vec![caret, action_chip(palette, row.label(), memories.start_enabled(), focused)]),
     }
-}
-
-/// One informational key:value row, ragged per the focusable-row grammar: the key is `TEXT_DIM +
-/// bold` at all times (the static-key anchor, not a focus cue), and the value trails it with a
-/// ≥ 2-space gap rather than padding to a shared column — these rows take the caret, and padded
-/// focusable rows read as a static table.
-fn static_row(
-    palette: &Palette, caret: Span<'static>, label: &str, value: Vec<Span<'static>>, selected: bool, width: usize,
-) -> Line<'static> {
-    let mut spans = vec![caret, Span::styled(label.to_owned(), Style::new().fg(palette.text_dim).bold()), Span::raw("  ")];
-    spans.extend(value);
-    let line = Line::from(spans);
-    if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
-}
-
-/// Pads a focused row's tint out to the panel's interior edge (contract: Tint extent — the
-/// `BG_HOVER` tint spans the full content width, to the padding boundary).
-///
-/// A `Line` style inside a `Paragraph` paints only the spans' own cells: Paragraph renders lines
-/// through `styled_graphemes`, which emits span cells alone. The tint therefore needs an explicit
-/// filler span to the panel's interior width, which is why `form_panel` takes the width.
-fn tint_to_edge(mut line: Line<'static>, width: usize, palette: &Palette) -> Line<'static> {
-    let fill = width.saturating_sub(line.width());
-    if fill > 0 {
-        line.spans.push(Span::styled(" ".repeat(fill), Style::new().bg(palette.bg_hover)));
-    }
-    line
-}
-
-/// The disk-free value plus the usage-role bar (decision 41: the banner is deferred, the bar
-/// ships). The bar shows the USED share of the disk, because usage-role colors mean higher=worse.
-///
-/// The bar is the row's elastic part: the byte figure can run to "16384.0 PiB" (u64::MAX, 10
-/// cells), and a fixed bar then pushes the trailing percent past the panel edge. The bar takes
-/// whatever `budget` — the row's cells after caret, label and gap — leaves, capped at
-/// [`DISK_BAR_CELLS`], so the percent never clips.
-fn disk_free_value(palette: &Palette, environment: &Environment, budget: usize) -> Vec<Span<'static>> {
-    let (Some(free), Some(total)) = (environment.available_space, environment.total_space) else {
-        return vec![Span::styled("unknown", Style::new().fg(palette.warning))];
-    };
-    if total == 0 {
-        return vec![Span::styled("unknown", Style::new().fg(palette.warning))];
-    }
-    let used = 100 - (free as f64 / total as f64 * 100.0).round() as u8;
-    let free_text = binary_bytes(free);
-    let percent = format!("{used}%");
-    // One space either side of the bar; the bar shrinks first.
-    let bar_cells = budget.saturating_sub(cells(&free_text) + cells(&percent) + 3).min(DISK_BAR_CELLS);
-    let fill = usize::from(used) * bar_cells / 100;
-    let mut spans = vec![Span::styled(free_text, Style::new().fg(palette.text)), Span::raw(" ")];
-    spans.extend(bar_run(palette, fill, bar_cells, Style::new().fg(palette.usage_color(used))));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(percent, Style::new().fg(palette.text_dim)));
-    spans
-}
-
-/// The bare glyph run of a determinate bar: `█` fill in `fill_style`, `░` track in `LINE`.
-fn bar_run(palette: &Palette, fill: usize, total: usize, fill_style: Style) -> Vec<Span<'static>> {
-    let fill = fill.min(total);
-    vec![Span::styled(block::FULL.repeat(fill), fill_style), Span::styled(shade::LIGHT.repeat(total - fill), palette.bar_track())]
-}
-
-/// The start chip (contract: Action-only chip). The CTA variant — accent at rest on the raised
-/// fill, inverse block on focus — because starting the run is the screen's one primary action.
-/// While a run is live the chip is focusable-but-inert and reads faint.
-fn chip_spans(palette: &Palette, memories: &Memories, focused: bool) -> Span<'static> {
-    let enabled = memories.start_enabled();
-    let (fg, bg, bold) = if !enabled {
-        (palette.text_faint, palette.bg_raised, false)
-    } else if focused {
-        (palette.bg, palette.accent, true)
-    } else {
-        (palette.accent, palette.bg_raised, true)
-    };
-    let style = if bold { Style::new().fg(fg).bg(bg).add_modifier(ratatui::style::Modifier::BOLD) } else { Style::new().fg(fg).bg(bg) };
-    Span::styled(" start run ", style)
 }
 
 fn render_progress(frame: &mut Frame, palette: &Palette, memories: &mut Memories, area: Rect) {
@@ -712,21 +613,12 @@ fn render_progress(frame: &mut Frame, palette: &Palette, memories: &mut Memories
     }
 
     match &memories.run {
-        Run::Idle => render_empty(frame, palette, inner, "no run yet"),
+        Run::Idle => empty_state(frame, palette, inner, "no run yet"),
         Run::Active { view: None, worker: Worker::Working } => {
-            // The indeterminate plan phase: an inline spinner where the bar will sit, so the
-            // frame does not jump when the plan lands.
-            let frame_char = glyph::SPINNER_FRAMES[memories.spinner % glyph::SPINNER_FRAMES.len()];
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(frame_char.to_string(), Style::new().fg(palette.accent)),
-                    Span::styled(" planning", Style::new().fg(palette.text_dim)),
-                ])),
-                inner,
-            );
+            frame.render_widget(Paragraph::new(planning_spinner(palette, memories.spinner)), inner);
         }
         Run::Active { view: None, worker: Worker::Finished } => {
-            render_empty(frame, palette, inner, "no run yet");
+            empty_state(frame, palette, inner, "no run yet");
         }
         Run::Active { view: Some(view), .. } => {
             render_table(frame, palette, view, &mut memories.table, inner);
@@ -734,209 +626,30 @@ fn render_progress(frame: &mut Frame, palette: &Palette, memories: &mut Memories
     }
 }
 
-/// The framed empty state (contract: Empty state): a hint line, then an action line naming the
-/// key that starts the run, its glyph in `ACCENT`.
-fn render_empty(frame: &mut Frame, palette: &Palette, inner: Rect, hint: &str) {
-    const INSET: u16 = 3;
-    const ROWS: u16 = 4;
-
-    let action = Line::from(vec![
-        Span::styled("press ", Style::new().fg(palette.text_dim)),
-        Span::styled(glyph::KEY_ENTER.to_string(), Style::new().fg(palette.accent).bold()),
-        Span::styled(" to start", Style::new().fg(palette.text_dim)),
-    ]);
-    let width = u16::try_from(cells(hint).max(16) + 2 * usize::from(INSET) + 2).unwrap_or(u16::MAX);
-    let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(ROWS));
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(palette.line))
-        .padding(Padding::new(INSET, INSET, 0, 0));
-    frame.render_widget(Paragraph::new(vec![Line::styled(hint, Style::new().fg(palette.text_dim)), action]).block(block), frame_area);
-}
-
 /// The live table: overall bar, header, and the stateful row list with its scrollbar.
 fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mut TablePane, inner: Rect) {
     let [bar_area, header_area, list_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
 
-    // The overall determinate bar (contract: Progress bar, progress role): ACCENT fill, bare
-    // glyph run, percentage label. It shows the fixed share of the planned total. "Integer when
-    // whole; one decimal otherwise" — 1/3 renders 33.3%, never 33% — and `—` for no value at
-    // all (the ellipsis is the indeterminate tell and belongs to the plan phase's spinner).
-    let total = view.rows.len();
     let done = view.statuses.iter().filter(|&&status| status == ItemStatus::Done).count();
-    let percent = done as f64 * 100.0 / total as f64;
-    let label = if total == 0 {
-        "—".to_owned()
-    } else if percent.fract() == 0.0 {
-        format!("{percent:.0}%")
-    } else {
-        format!("{percent:.1}%")
-    };
-    // The label's cells are reserved before the bar run is sized: "33.3%" is 5 cells, and a
-    // clipped percent reads as a different number.
-    let bar_cells = usize::from(inner.width).saturating_sub(cells(&label) + 1);
-    let fill = if total == 0 { 0 } else { (bar_cells as f64 * percent / 100.0).round() as usize };
-    let mut bar = bar_run(palette, fill, bar_cells, palette.progress_fill());
-    bar.push(Span::raw(" "));
-    bar.push(Span::styled(label, Style::new().fg(palette.text_dim)));
-    frame.render_widget(Paragraph::new(Line::from(bar)), bar_area);
+    frame.render_widget(Paragraph::new(overall_bar(palette, done, view.rows.len(), usize::from(inner.width))), bar_area);
+    frame.render_widget(Paragraph::new(progress_header(palette)), header_area);
 
-    // The column header (contract: List / table — UPPERCASE TRACKED, the underline rule dropped
-    // as the sanctioned variant). The 2-cell lead is the caret gutter the rows carry.
-    let header = Style::new().fg(palette.text_dim);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(right_pad("IDENTITY", IDENTITY_CELLS), header),
-            Span::raw("  "),
-            Span::styled(right_pad("STATUS", STATUS_CELLS), header),
-            Span::raw("  "),
-            Span::styled("OUTPUT", header),
-        ])),
-        header_area,
-    );
-
-    // Rows: caret gutter, middle-ellipsised identity, status pill, output name. The selected
-    // row's identity promotes to `TEXT + bold` only while the pane is descended; the tint comes
-    // from the List's highlight style, which paints the background alone.
-    let output_cells = usize::from(list_area.width).saturating_sub(CARET_GUTTER + IDENTITY_CELLS + 2 + STATUS_CELLS + 2);
-    let caret = Style::new().fg(palette.accent).bold();
-    let items: Vec<ListItem> = view
+    let rows: Vec<ProgressRow<'_>> = view
         .rows
         .iter()
         .zip(&view.statuses)
-        .enumerate()
-        .map(|(index, (row, status))| {
-            let selected = table.list.selected() == Some(index);
-            let identity = if table.descended && selected {
-                Span::styled(middle_ellipsis(&row.source_id, IDENTITY_CELLS), Style::new().fg(palette.text).bold())
-            } else {
-                Span::styled(middle_ellipsis(&row.source_id, IDENTITY_CELLS), Style::new().fg(palette.text_dim))
-            };
-            let mut spans = vec![
-                if table.descended && selected { Span::styled(format!("{} ", glyph::SELECTION_CARET), caret) } else { Span::raw("  ") },
-                identity,
-                Span::raw("  "),
-            ];
-            spans.extend(pill_spans(palette, *status));
-            spans.push(Span::raw("  "));
-            // Head-ellipsis, not trailing: the output name's leaf — its extension — is the
-            // point, so the cut takes from the front and `.jpg` always survives.
-            spans.push(Span::styled(head_ellipsis(&row.output_name, output_cells), Style::new().fg(palette.text_dim)));
-            ListItem::new(Line::from(spans))
-        })
+        .map(|(row, status)| ProgressRow { identity: &row.source_id, output: &row.output_name, status: *status })
         .collect();
-    let list = List::new(items).highlight_style(Style::new().bg(palette.bg_hover)).scroll_padding(3);
-    frame.render_stateful_widget(&list, list_area, &mut table.list);
-
-    // The scrollbar lives in the panel's right padding column, so the content never reflows when
-    // it appears (contract: Scrollbar). The List has already settled the offset during render.
-    let viewport = usize::from(list_area.height);
-    if view.rows.len() > viewport && viewport > 0 {
-        let thumb = glyph::SCROLLBAR_THUMB.to_string();
-        let track = glyph::SCROLLBAR_TRACK.to_string();
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some(&track))
-            .end_symbol(Some(&track))
-            .track_symbol(Some(&track))
-            .thumb_symbol(&thumb)
-            .style(palette.bar_track())
-            .thumb_style(Style::new().fg(palette.text_dim));
-        let mut state = ScrollbarState::new(view.rows.len()).position(table.list.offset()).viewport_content_length(viewport);
-        let column = Rect::new(inner.right(), list_area.y, 1, list_area.height);
-        frame.render_stateful_widget(scrollbar, column, &mut state);
-    }
+    progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, inner.right());
 }
 
-/// The status pill (contract: Status pill): brackets `TEXT_DIM`, label semantic and bold,
-/// padded to the status column so the output column lines up.
-fn pill_spans(palette: &Palette, status: ItemStatus) -> Vec<Span<'static>> {
-    let label = match status {
-        ItemStatus::Pending => "pending",
-        ItemStatus::Done => "done",
-        ItemStatus::Failed => "failed",
-        ItemStatus::SourceMissing => "missing",
-        ItemStatus::Retired => "retired",
-        // The user-facing verb, not the stored word `excluded`, the same way `source_missing`
-        // renders as `missing`: decision 44d's own word for what happens to a thumbnail is
-        // "dropped", and at seven characters it also fits the column every other pill pads out to.
-        ItemStatus::Excluded => "dropped",
-    };
-    let bracket = Style::new().fg(palette.text_dim);
-    let width = 2 + label.len() + 2;
-    let mut spans = vec![
-        Span::styled("[ ", bracket),
-        Span::styled(label, Style::new().fg(palette.status_pill(status)).bold()),
-        Span::styled(" ]", bracket),
-    ];
-    if width < STATUS_CELLS {
-        spans.push(Span::raw(" ".repeat(STATUS_CELLS - width)));
-    }
-    spans
-}
-
-/// Middle-ellipsis an id to `budget` cells (Patterns → Truncation): both ends of a uuid carry
-/// meaning, so the cut takes the middle, and the result is padded so the column holds its width.
-/// The ids this screen renders are ascii, so chars and cells agree here.
-fn middle_ellipsis(text: &str, budget: usize) -> String {
-    if cells(text) <= budget {
-        return right_pad(text, budget);
-    }
-    let keep = budget.saturating_sub(1);
-    if keep == 0 {
-        return right_pad(&glyph::ELLIPSIS.to_string(), budget);
-    }
-    let head: String = text.chars().take(keep / 2).collect();
-    let tail: String = text.chars().rev().take(keep - keep / 2).collect::<Vec<_>>().into_iter().rev().collect();
-    right_pad(&format!("{head}{}{tail}", glyph::ELLIPSIS), budget)
-}
-
-/// The footer alert a run outcome raises: a clean completion is `INFO`, anything with a failure
-/// is `WARNING`.
+/// The footer alert a run outcome raises.
 fn summary(outcome: &RunOutcome) -> RunAlert {
     match outcome {
-        RunOutcome::Completed(report) => {
-            // Zero counts are hidden (Patterns → Counts and plurals): a clean resume reads
-            // "5 skipped", never "0 fixed". A run that fixed, failed, skipped and deferred
-            // nothing at all had an empty plan, which the copy says outright rather than
-            // leaving a bare "run finished · ".
-            let mut clauses = Vec::new();
-            if report.fixed > 0 {
-                clauses.push(format!("{} fixed", report.fixed));
-            }
-            if !report.failed.is_empty() {
-                clauses.push(format!("{} failed", report.failed.len()));
-            }
-            if report.skipped > 0 {
-                clauses.push(format!("{} skipped", report.skipped));
-            }
-            if report.deferred > 0 {
-                clauses.push(format!("{} deferred", report.deferred));
-            }
-            let message = if clauses.is_empty() {
-                format!("run finished {} nothing to fix", glyph::CLAUSE_SEPARATOR)
-            } else {
-                format!("run finished {} {}", glyph::CLAUSE_SEPARATOR, clauses.join(&format!(" {} ", glyph::CLAUSE_SEPARATOR)))
-            };
-            RunAlert { kind: if report.failed.is_empty() { AlertKind::Info } else { AlertKind::Warning }, message }
-        }
-        RunOutcome::Failed(error) => RunAlert { kind: AlertKind::Warning, message: error.to_string() },
+        RunOutcome::Completed(report) => RunAlert::completion(report),
+        RunOutcome::Failed(error) => RunAlert::failure(error),
     }
-}
-
-/// The nearest existing ancestor of `path` — the filesystem a `statvfs` probe can actually
-/// measure. The output root is created only at the first write, so a run pointed at a brand-new
-/// dir must not report "unknown" disk free.
-fn probe_target(path: &Path) -> PathBuf {
-    let mut candidate = path.to_path_buf();
-    while !candidate.exists() {
-        match candidate.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => candidate = parent.to_path_buf(),
-            _ => break,
-        }
-    }
-    candidate
 }
 
 /// The form's rows must fit the body a panel is guaranteed at the compact floor, the same
@@ -947,26 +660,19 @@ const _: () = assert!(FormRow::ALL.len() <= GUARANTEED_INTERIOR_ROWS as usize);
 mod tests {
     use super::*;
 
+    /// The disabled-chip tooltip is bound to the START chip, not to whichever row happens to be
+    /// last.
+    ///
+    /// `ALL.len() - 1` expressed the second thing while meaning the first, and the two agree only
+    /// while `Start` is last — with appending as the natural growth direction for a form-row list.
+    /// This asserts the binding by identity, so a row added after `Start` reds here instead of
+    /// silently taking the tooltip and leaving the chip with no explanation for being inert.
     #[test]
-    fn a_missing_disk_probe_renders_unknown_in_warning() {
-        let environment = Environment { ffmpeg: None, vlc: None, available_space: None, total_space: None };
-        let value = disk_free_value(&Palette::new(crate::tui::theme::Tier::Full), &environment, 23);
-        assert_eq!(value.len(), 1);
-        assert_eq!(value[0].content.as_ref(), "unknown");
-    }
-
-    #[test]
-    fn the_disk_bar_shows_the_used_share_of_the_disk() {
-        // 3 of 5 GiB free is 40% used: the usage bar fills 3 of its 9 cells.
-        let environment = Environment {
-            ffmpeg: None,
-            vlc: None,
-            available_space: Some(3 * 1024 * 1024 * 1024),
-            total_space: Some(5 * 1024 * 1024 * 1024),
-        };
-        let value = disk_free_value(&Palette::new(crate::tui::theme::Tier::Full), &environment, 23);
-        let text: String = value.iter().map(|span| span.content.as_ref()).collect();
-        assert_eq!(text, "3.0 GiB ███░░░░░░ 40%");
+    fn the_tooltip_is_bound_to_the_start_chip_by_identity() {
+        assert_eq!(FormRow::Start.index(), FormRow::ALL.len() - 1, "they agree today, which is why the wrong one reads as correct");
+        for (position, row) in FormRow::ALL.into_iter().enumerate() {
+            assert_eq!(row.index(), position, "{row:?} must resolve to its own slot");
+        }
     }
 
     #[test]
@@ -984,31 +690,11 @@ mod tests {
     }
 
     #[test]
-    fn a_middle_ellipsis_keeps_both_ends_of_the_id() {
-        let id = "2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8e";
-        assert_eq!(middle_ellipsis(id, 18), "2ca92da1…da6ba0f8e");
-        assert_eq!(middle_ellipsis(id, 36), id);
-        assert_eq!(middle_ellipsis(id, 2), "…e");
-    }
-
-    #[test]
     fn a_truncated_output_name_keeps_its_extension() {
         // The output column's cut is head-ellipsis: the leaf — the extension — is the point, so
         // it must survive whatever budget the column has.
         assert_eq!(head_ellipsis("20210115_143005.jpg", 20), "20210115_143005.jpg");
         assert_eq!(head_ellipsis("20210115_143005_2.jpg", 12), "…43005_2.jpg");
         assert!(head_ellipsis("20210115_143005_2.jpg", 12).ends_with(".jpg"));
-    }
-
-    #[test]
-    fn every_status_pill_occupies_exactly_the_status_column() {
-        // STATUS_CELLS is the widest pill, `[ pending ]`; every other pill pads out to it, so
-        // the output column never shifts between statuses.
-        use crate::export::manifest::ItemStatus;
-        let palette = Palette::new(crate::tui::theme::Tier::Full);
-        for status in ItemStatus::ALL {
-            let width: usize = pill_spans(&palette, status).iter().map(Span::width).sum();
-            assert_eq!(width, STATUS_CELLS, "{status:?}");
-        }
     }
 }

@@ -29,6 +29,15 @@
 //! [`super::chat_media::Join::NoToken`] because `chat_history.json` can name nothing but the plain
 //! `b` family, and a `NoToken` item is by definition one no message names.
 //!
+//! # The overlay mode
+//!
+//! [`OverlayMode`] is decision 44b, and it is expressed entirely in the PLAN. `local_fix::fix`
+//! neither takes a mode nor branches on one: the planner decides whether the item-level pass is
+//! handed an overlay to composite ([`super::local_fix::SourceMedia::overlay`]) and whether the
+//! export's own pair is kept ([`super::local_fix::Originals`]), and those two answers are the whole
+//! of what the three modes disagree about. A mode flag threaded into `fix` would have put a fourth
+//! branch inside the sequence both legs share, which is the one thing this module exists to avoid.
+//!
 //! Decision 44c, the sender and the timestamp go into the file's own metadata and its modification
 //! time and into **nothing else**. No filename prefix, so a file a message named and a file none did
 //! carry one filename shape — `YYYYMMDD_HHMMSS.<ext>`, the same shape the memories leg writes, with
@@ -55,15 +64,94 @@
 //! something nobody got to, and this one is a fact about the data.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::export::chat_media::{ChatMediaItem, MediaDate, Message, Reconciliation, Token};
-use crate::export::local_fix::{self, Capture, DeferralReason, Deferred, Leg, Plan, PlannedItem, SourceMedia};
+use crate::export::local_fix::{self, Capture, DeferralReason, Deferred, Leg, Originals, Plan, PlannedItem, SourceMedia};
 use crate::export::manifest::ItemKind;
 use crate::export::model::{Attribution, ConversationId};
 
+/// What decision 44b does with a chat-media pair's two files.
+///
+/// The three differ in exactly two independent answers — is the caption burned in, and are the
+/// export's own two files kept — and every mode is one of the four combinations that is worth
+/// having. The fourth ("neither") is not a mode: it would produce nothing, and `mark_done`
+/// checksums an output, so an item with no output demotes on every resume.
+///
+/// | mode | composites | keeps the originals |
+/// |---|---|---|
+/// | [`Self::Merged`] | yes | no |
+/// | [`Self::Both`] | yes | yes |
+/// | [`Self::Originals`] | no | yes |
+///
+/// **Under [`Self::Originals`] the main is still repaired**: it goes through the ordinary fix pass —
+/// stamped, dated, transcoded per [`super::local_fix::VideoOptions`] — and IS the manifest's output.
+/// The only thing that does not happen is the burn. Copying the two files and writing no output was
+/// never available: decision 46d refused to weaken the checksum guard for 44 thumbnails, so it is
+/// not being weakened for an overlay mode either.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OverlayMode {
+    /// Composite the caption in and keep nothing else. One file per message, at the cost of a lossy
+    /// generation with no original beside it.
+    Merged,
+    /// Composite the caption in AND keep the export's two files. Decision 44b's user pick and the
+    /// default: nothing is lost, at the cost of doubled output for the ~7% of files that pair.
+    #[default]
+    Both,
+    /// Keep the export's two files and never burn the caption in. The main is still repaired and is
+    /// still the output; no photo browser will show the caption.
+    Originals,
+}
+
+impl OverlayMode {
+    /// Tab-bar order for the cycle control, and the order a screen walks with `space`.
+    pub const ALL: [Self; 3] = [Self::Merged, Self::Both, Self::Originals];
+
+    /// The lowercase word a control renders and a config file would spell.
+    #[must_use]
+    pub const fn as_word(self) -> &'static str {
+        match self {
+            Self::Merged => "merged",
+            Self::Both => "both",
+            Self::Originals => "originals",
+        }
+    }
+
+    /// Whether the caption layer reaches the item-level pass at all.
+    #[must_use]
+    pub const fn composites(self) -> bool {
+        matches!(self, Self::Merged | Self::Both)
+    }
+
+    /// Whether the export's own two files are copied into the `originals/` subfolder.
+    #[must_use]
+    pub const fn keeps_originals(self) -> bool {
+        matches!(self, Self::Both | Self::Originals)
+    }
+
+    /// The next mode a `space` press lands on, wrapping (cloudy-tui: Cycle row).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Merged => Self::Both,
+            Self::Both => Self::Originals,
+            Self::Originals => Self::Merged,
+        }
+    }
+}
+
+impl fmt::Display for OverlayMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_word())
+    }
+}
+
 /// The level every chat-media output sits under, decision 46a.
-const CHAT_DIR: &str = "chat";
+///
+/// Public because the chat media screen's `output dir` row names where this leg actually writes, and
+/// a row spelling `chat` for itself would be a second copy of the tree's own shape.
+pub const CHAT_DIR: &str = "chat";
 
 /// Where a file no message names lands, decision 46b, and a name no cleaned conversation key is
 /// allowed to take.
@@ -293,8 +381,20 @@ impl Conversations {
 /// piece of I/O here and is best-effort for the reason [`Plan::build`] gives: a file that cannot be
 /// read at plan time drops to the filename day and the real failure is reported when the fix step
 /// reaches it, rather than one bad file taking down the whole plan.
+///
+/// `mode` is decision 44b, and it changes the plan rather than the pass — see [`OverlayMode`].
+///
+/// **One consequence worth stating, because it moves an output path.** Withholding the overlay is
+/// what [`OverlayMode::Originals`] does, and [`local_fix::passes_through`] reads exactly that field,
+/// so a PNG main that pairs comes out `.png` under `originals` and `.jpg` under the other two. That
+/// is decision 47's own rule one mode over — nothing is re-encoded when there is nothing to
+/// re-encode it for — and it is right rather than incidental. It is also unreachable from the
+/// observed export, where only the zip family pairs and every zip main is a video. What it costs if
+/// a future export makes it reachable is the residual [`Conversations`] already carries: an item
+/// changing its name can move a neighbour's `_2` suffix between runs. The manifest records where a
+/// finished item actually landed, so a resume still verifies the right file.
 #[must_use]
-pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>) -> Plan {
+pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode) -> Plan {
     let chat_root = out_root.as_ref().join(CHAT_DIR);
     let no_conversation = chat_root.join(NO_CONVERSATION_DIR);
     let mut conversations = Conversations::new(chat_root);
@@ -329,11 +429,15 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>) -> Plan
             defer(DeferralReason::UnknownFormat);
             continue;
         };
+        let overlay = item.media.overlay.as_ref().map(|file| file.path.clone());
         let media = SourceMedia {
             main: item.media.file.path.clone(),
             day: item.media.file.day,
             extension: item.media.file.extension.clone(),
-            overlay: item.media.overlay.as_ref().map(|file| file.path.clone()),
+            // Half of the overlay-mode seam: `originals` hands the item-level pass a main alone, so
+            // nothing composites and nothing re-encodes. The layer itself is not dropped — it
+            // travels in `originals` below.
+            overlay: if mode.composites() { overlay.clone() } else { None },
         };
         let Some(capture) = capture_of(item, &media, leg) else {
             defer(DeferralReason::NoCalendarDate);
@@ -355,8 +459,14 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>) -> Plan
 
         items.push(PlannedItem {
             source_id: item.source_id().to_owned(),
-            // Only where a composite consumed two files is there an un-merged version to keep.
-            originals: media.overlay.is_some().then(|| dir.join(ORIGINALS_DIR)),
+            // The other half of the seam. Keyed on the EXPORT's overlay rather than on the one
+            // `media` ended up with, which is the whole difference between `originals` (kept, not
+            // composited) and `merged` (composited, not kept). Only where the export shipped a
+            // layer is there an un-merged version to lose.
+            originals: match (mode.keeps_originals(), overlay) {
+                (true, Some(overlay)) => Some(Originals { dir: dir.join(ORIGINALS_DIR), overlay }),
+                _ => None,
+            },
             media,
             leg,
             capture,

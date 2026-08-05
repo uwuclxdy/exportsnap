@@ -74,16 +74,16 @@ fn on_tab(tab: Tab) -> App {
 
 #[test]
 fn renders_header_body_panel_and_hint_bar() {
-    // Driven on `chat media` rather than `overview` or `memories`: those two tabs own their own
-    // panels now, so the shell's placeholder panel — the thing this pins — only survives on the
-    // other four.
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 52, 6);
+    // Driven on `history` rather than `overview`, `memories` or `chat media`: those three tabs own
+    // their own panels now, so the shell's placeholder panel — the thing this pins — only survives
+    // on the other three.
+    let terminal = draw(&mut on_tab(Tab::History), 52, 6);
     assert_eq!(
         grid(terminal.backend().buffer()),
         [
-            " exportsnap  •  ‹   chat media   ›                  ",
+            " exportsnap  •  ‹   history   ›                     ",
             " ! terminal too small · enlarge for full layout     ",
-            "╭─ CHAT MEDIA ─────────────────────────────────────╮",
+            "╭─ HISTORY ────────────────────────────────────────╮",
             "│                                                  │",
             "╰──────────────────────────────────────────────────╯",
             " ←→ switch   q quit                                 ",
@@ -134,8 +134,8 @@ fn the_underline_moves_with_the_active_tab() {
 #[test]
 fn no_underline_row_sits_beneath_the_tab_bar() {
     // The active label carries the underline as a text attribute; row 1 is already the panel.
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 100, 20);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ CHAT MEDIA "));
+    let terminal = draw(&mut on_tab(Tab::History), 100, 20);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ HISTORY "));
 }
 
 // ---- header: right-edge suppression (skill: App shell → right-edge suppression priority) ----
@@ -213,11 +213,11 @@ fn every_active_label_renders_whole_at_the_floor() {
 fn the_banner_takes_the_header_row_one_cell_below_the_floor() {
     // A clipped active label would name the wrong tab, so the row says the terminal is too
     // small instead. The body is untouched — the panel still owns row 1.
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 29, 20);
+    let terminal = draw(&mut on_tab(Tab::History), 29, 20);
     let buffer = terminal.backend().buffer();
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
-    assert!(row(buffer, 1).starts_with("╭─ CHAT MEDIA "), "{:?}", row(buffer, 1));
+    assert!(row(buffer, 1).starts_with("╭─ HISTORY "), "{:?}", row(buffer, 1));
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn the_header_banner_tints_its_whole_row() {
 fn a_frame_under_both_floors_carries_exactly_one_banner() {
     // Width below the header floor and height below the compact floor at once. The header row
     // is the one already lost, so it says it, and the body keeps every row it has.
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 29, 13);
+    let terminal = draw(&mut on_tab(Tab::History), 29, 13);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -248,7 +248,7 @@ fn a_frame_under_both_floors_carries_exactly_one_banner() {
     assert_eq!(washed, [0], "rows carrying the banner wash");
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
-    assert!(row(buffer, 1).starts_with("╭─ CHAT MEDIA "), "{:?}", row(buffer, 1));
+    assert!(row(buffer, 1).starts_with("╭─ HISTORY "), "{:?}", row(buffer, 1));
 }
 
 #[test]
@@ -276,18 +276,13 @@ fn overflow_markers_are_text_faint() {
 
 #[test]
 fn the_panel_title_names_the_active_tab_in_uppercase() {
-    // `overview` is absent on purpose: it is the one tab with a real screen behind it, and its own
-    // two panel titles are pinned in `tests/overview.rs`. The other five are still the shell's
-    // placeholder panel, which is what names itself after the tab.
-    // `overview` and `memories` are absent on purpose: they are the two tabs with a real screen
-    // behind them, and their own panel titles are pinned in `tests/overview.rs` and
-    // `tests/memories.rs`.
-    for (tab, title) in [
-        (Tab::ChatMedia, "╭─ CHAT MEDIA ─"),
-        (Tab::History, "╭─ HISTORY ─"),
-        (Tab::Account, "╭─ ACCOUNT ─"),
-        (Tab::Settings, "╭─ SETTINGS ─"),
-    ] {
+    // `overview`, `memories` and `chat media` are absent on purpose: those three own real screens
+    // now, and their own panel titles are pinned in `tests/overview.rs`, `tests/memories_screen.rs`
+    // and `tests/chat_media_screen.rs`. The three below are still the shell's placeholder panel,
+    // which is the thing that names itself after its tab — and this list shrinks by one every time
+    // a screen lands, so it is worth checking it still matches the `match` in `shell::render`.
+    for (tab, title) in [(Tab::History, "╭─ HISTORY ─"), (Tab::Account, "╭─ ACCOUNT ─"), (Tab::Settings, "╭─ SETTINGS ─")]
+    {
         let terminal = draw(&mut on_tab(tab), 60, 20);
         assert!(row(terminal.backend().buffer(), 1).starts_with(title), "{tab:?} should render {title}");
     }
@@ -295,12 +290,12 @@ fn the_panel_title_names_the_active_tab_in_uppercase() {
 
 #[test]
 fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 60, 20);
+    let terminal = draw(&mut on_tab(Tab::History), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
     let title = buffer[(PANEL_TITLE_COLUMN + 1, 1)].style();
-    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "C");
+    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "H");
     assert_eq!(title.fg, Some(palette.accent_2));
     assert!(title.add_modifier.contains(Modifier::BOLD));
     assert!(title.add_modifier.contains(Modifier::ITALIC));
@@ -312,15 +307,16 @@ fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
 
 #[test]
 fn the_title_style_never_bleeds_into_the_border_break_dashes() {
-    // Chrome owns every `─` cell: the dash before ` CHAT MEDIA ` and the first one after it both
-    // carry the border token, with no title color, bold or italic on them. ` CHAT MEDIA ` is the
-    // same 10 cells ` OVERVIEW ` was, so the dash columns are 2 cells apart in from the corners,
-    // and the title spans ` CHAT MEDIA ` (12 cells) from column 3 to 14.
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 60, 20);
+    // Chrome owns every `─` cell: the dash before ` HISTORY ` and the first one after it both carry
+    // the border token, with no title color, bold or italic on them. The title occupies its own 9
+    // cells from [`PANEL_TITLE_COLUMN`], so the trailing dash is the cell right after them — derived
+    // from the label rather than written down, since the tab this runs on has moved once already.
+    let terminal = draw(&mut on_tab(Tab::History), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
-    for x in [PANEL_TITLE_COLUMN - 1, PANEL_TITLE_COLUMN + 12] {
+    let title_cells = u16::try_from(Tab::History.label().chars().count()).unwrap() + 2;
+    for x in [PANEL_TITLE_COLUMN - 1, PANEL_TITLE_COLUMN + title_cells] {
         let cell = &buffer[(x, 1)];
         assert_eq!(cell.symbol(), "─", "column {x}");
         assert_eq!(cell.style().fg, Some(palette.line_strong), "column {x}");
@@ -394,8 +390,8 @@ fn the_compact_banner_appears_below_fourteen_rows() {
 
 #[test]
 fn the_compact_banner_is_gone_at_fourteen_rows() {
-    let terminal = draw(&mut on_tab(Tab::ChatMedia), 60, 14);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ CHAT MEDIA "));
+    let terminal = draw(&mut on_tab(Tab::History), 60, 14);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ HISTORY "));
 }
 
 #[test]

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use exportsnap::export::chat_fix::{self, dir_name};
+use exportsnap::export::chat_fix::{self, OverlayMode, dir_name};
 use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Reconciliation, Token, discover, reconcile};
 use exportsnap::export::exif::{Jpeg, Stamp};
 use exportsnap::export::local_fix::{self, DeferralReason, FixReport, Notice, Plan, TimeSource, VideoOptions};
@@ -224,10 +224,15 @@ impl Workspace {
     }
 
     /// Discover, join, enroll, plan and run — the whole chat-media pass, in the order a caller has
-    /// to drive it.
+    /// to drive it, under decision 44b's default overlay mode.
     fn run(&self, history: &ChatHistory) -> Run {
+        self.run_in(history, OverlayMode::Both)
+    }
+
+    /// [`Self::run`] under a named overlay mode.
+    fn run_in(&self, history: &ChatHistory, mode: OverlayMode) -> Run {
         let reconciliation = reconcile(history, discover(self.source()).unwrap());
-        let plan = chat_fix::plan(&reconciliation, self.out());
+        let plan = chat_fix::plan(&reconciliation, self.out(), mode);
         let mut manifest = self.manifest();
         reconciliation.enroll(&mut manifest).unwrap();
         let report = local_fix::run(&plan, &mut manifest, 3, &copying()).unwrap();
@@ -236,7 +241,12 @@ impl Workspace {
 
     /// The plan alone, for the tests that assert on what a run WOULD write.
     fn plan(&self, history: &ChatHistory) -> Plan {
-        chat_fix::plan(&reconcile(history, discover(self.source()).unwrap()), self.out())
+        self.plan_in(history, OverlayMode::Both)
+    }
+
+    /// [`Self::plan`] under a named overlay mode.
+    fn plan_in(&self, history: &ChatHistory, mode: OverlayMode) -> Plan {
+        chat_fix::plan(&reconcile(history, discover(self.source()).unwrap()), self.out(), mode)
     }
 }
 
@@ -394,6 +404,126 @@ fn a_composited_pair_keeps_both_originals_beside_the_merged_file() {
     let merged = image::open(work.out().join("chat/_no-conversation/2021/03/20210304_000000.jpg")).unwrap().to_rgb8();
     assert!(merged.get_pixel(4, 4).0[0] > 200, "the left half is the overlay's red: {:?}", merged.get_pixel(4, 4));
     assert_shows_main_through(&merged, "the transparent half is the main showing through");
+}
+
+// ---- decision 44b: the three overlay modes ----
+
+/// The three modes differ in exactly two answers, and this asserts both from the OUTPUT rather than
+/// from the plan, because the plan is where the seam lives and a test reading it back would be
+/// reading the implementation to itself.
+///
+/// `merged` composites and keeps nothing; `both` composites and keeps the pair; `originals` keeps
+/// the pair and does not composite. The composite check is a pixel: the overlay's opaque left half
+/// is red and the main under it is not, so a run that skipped the burn cannot pass the merged arm
+/// and one that did it cannot pass the originals arm.
+#[test]
+fn each_overlay_mode_writes_exactly_what_decision_44b_says() {
+    for (mode, keeps_originals, composites) in
+        [(OverlayMode::Merged, false, true), (OverlayMode::Both, true, true), (OverlayMode::Originals, true, false)]
+    {
+        let work = Workspace::new();
+        let id = zip_pair(&work.source(), 4);
+        let run = work.run_in(&no_history(), mode);
+        assert_eq!(run.report.fixed, 1, "{mode}");
+
+        // The merged file is the output under every mode: `mark_done` checksums it and a
+        // checksum-less Done row demotes on the next resume, so "copy the pair and write nothing"
+        // was never available (decision 46d).
+        let output = work.out().join("chat/_no-conversation/2021/03/20210304_000000.jpg");
+        assert!(output.is_file(), "{mode}: the main is the output whatever happens to the caption");
+        assert_eq!(run.row(&id).status, ItemStatus::Done, "{mode}");
+
+        let kept: Vec<String> = tree(&work.out()).into_iter().filter(|path| path.contains("/originals/")).collect();
+        if keeps_originals {
+            assert_eq!(
+                kept,
+                [
+                    "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d.jpg",
+                    "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000004.zip.a1b2c3d.png",
+                ],
+                "{mode}"
+            );
+        } else {
+            assert!(kept.is_empty(), "{mode}: nothing is kept, so no originals/ folder exists at all — {kept:?}");
+        }
+
+        let written = image::open(&output).unwrap().to_rgb8();
+        if composites {
+            assert!(written.get_pixel(4, 4).0[0] > 200, "{mode}: the overlay's red left half won — {:?}", written.get_pixel(4, 4));
+            assert_shows_main_through(&written, &format!("{mode}: the transparent half is the main"));
+        } else {
+            let painted = main_colour(4, 4);
+            let pixel = written.get_pixel(4, 4).0;
+            assert!(
+                pixel.iter().zip(painted).all(|(actual, expected)| i16::from(*actual) - i16::from(expected) < 24),
+                "{mode}: the caption was NOT burned in, so the main's own pixel survives — got {pixel:?}, painted {painted:?}"
+            );
+        }
+    }
+}
+
+/// Under `originals` the caption never reaches the item-level pass, so decision 47's copy-through
+/// rule applies to a PNG main that pairs — the same rule one mode over, and the one place a mode
+/// moves an output PATH.
+///
+/// Unreachable from the observed export (only the zip family pairs and every zip main is a video),
+/// which is why it is asserted here rather than left to a reader to infer from `passes_through`.
+#[test]
+fn a_png_main_that_pairs_is_copied_through_under_originals_and_re_encoded_otherwise() {
+    let names = ["2021-03-04_media~vantsnap-0000009.zip.a1b2c3d.png", "2021-03-04_overlay~vantsnap-0000009.zip.a1b2c3d.png"];
+    let merged = chat_fix::plan(&from_names(&no_history(), &names), "/out", OverlayMode::Both);
+    let kept = chat_fix::plan(&from_names(&no_history(), &names), "/out", OverlayMode::Originals);
+
+    assert_eq!(
+        merged.items[0].output,
+        Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.jpg"),
+        "compositing a PNG ends in a JPEG encode"
+    );
+    assert_eq!(
+        kept.items[0].output,
+        Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.png"),
+        "with nothing to composite the bytes are copied through under their own extension"
+    );
+}
+
+/// The mode reaches the pass through the plan alone, which is the property that keeps `local_fix`
+/// leg-agnostic AND mode-agnostic. Asserted on the two fields that carry it, because a mode flag
+/// leaking into `fix` would show up here first as a third field nobody set.
+#[test]
+fn the_overlay_mode_moves_the_plan_and_nothing_else() {
+    let work = Workspace::new();
+    zip_pair(&work.source(), 4);
+
+    let merged = work.plan_in(&no_history(), OverlayMode::Merged);
+    let both = work.plan_in(&no_history(), OverlayMode::Both);
+    let originals = work.plan_in(&no_history(), OverlayMode::Originals);
+
+    // `merged` and `both` hand the pass the same media and differ only in what is kept.
+    assert_eq!(merged.items[0].media, both.items[0].media);
+    assert_eq!(merged.items[0].originals, None);
+    assert!(both.items[0].originals.is_some());
+
+    // `originals` withholds the caption from the pass and is the ONLY mode that does.
+    assert!(merged.items[0].media.overlay.is_some(), "merged composites, so the pass gets the layer");
+    assert_eq!(originals.items[0].media.overlay, None, "originals never composites, so the pass gets the main alone");
+
+    // …and it is still not lost: the copy knows about it.
+    let kept = originals.items[0].originals.as_ref().expect("originals keeps the pair");
+    assert_eq!(kept.overlay, work.source().join(format!("chat_media/{DAY}_overlay~{ZIP_WORD}-0000004.zip.a1b2c3d.png")));
+    assert_eq!(both.items[0].originals.as_ref().unwrap().overlay, kept.overlay, "both modes keep the same file");
+}
+
+/// A file with no overlay has nothing to keep under any mode, so `originals` does not mint an empty
+/// folder for it. The 6877 files no message names are all this shape.
+#[test]
+fn a_lone_file_keeps_nothing_under_every_overlay_mode() {
+    for mode in OverlayMode::ALL {
+        let work = Workspace::new();
+        plain(&work.source(), Token::B, 1);
+        let run = work.run_in(&no_history(), mode);
+        assert_eq!(run.plan.items[0].originals, None, "{mode}");
+        assert!(tree(&work.out()).iter().all(|path| !path.contains("originals")), "{mode}: {:?}", tree(&work.out()));
+    }
 }
 
 #[test]
@@ -652,7 +782,8 @@ fn a_key_longer_than_the_cap_is_shortened_and_two_of_them_still_get_two_folders(
         (&format!("{long}a"), vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")]),
         (&format!("{long}b"), vec![message("b", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")]),
     ]);
-    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out");
+    let plan =
+        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     let dirs: BTreeSet<&Path> = plan.items.iter().filter_map(|item| item.output.parent()).collect();
     assert_eq!(dirs.len(), 2, "two keys, two directories: {dirs:?}");
     assert!(dirs.iter().all(|dir| dir.file_name().is_some_and(|name| name.len() <= 66)), "{dirs:?}");
@@ -666,7 +797,8 @@ fn a_key_that_cleans_to_the_no_conversation_bucket_is_suffixed_away_from_it() {
         // the bucket the first key tried to take.
         ("other", vec![]),
     ]);
-    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out");
+    let plan =
+        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(
         outputs(&plan),
         [
@@ -687,8 +819,8 @@ fn the_collision_suffix_is_the_same_answer_on_a_second_run() {
     ]);
     let reconciliation = from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]);
 
-    let first = chat_fix::plan(&reconciliation, "/out");
-    let second = chat_fix::plan(&reconciliation, "/out");
+    let first = chat_fix::plan(&reconciliation, "/out", OverlayMode::Both);
+    let second = chat_fix::plan(&reconciliation, "/out", OverlayMode::Both);
     assert_eq!(outputs(&first), [Path::new("/out/chat/a_b/20210304_143005.jpg"), Path::new("/out/chat/a_b_2/20210304_143005.jpg"),]);
     assert_eq!(outputs(&first), outputs(&second));
 }
@@ -714,9 +846,9 @@ fn a_conversation_keeps_its_directory_when_a_neighbours_item_leaves_the_export()
     };
     let all = ["b~aB3xY90001", "b~aB3xY90002", "b~aB3xY90003"];
 
-    let full = chat_fix::plan(&from_names(&rows(&all), &files), "/out");
+    let full = chat_fix::plan(&from_names(&rows(&all), &files), "/out", OverlayMode::Both);
     // The first item, which belongs to `a/b`, leaves the export. `a?b` now arrives first.
-    let after = chat_fix::plan(&from_names(&rows(&all[1..]), &files[1..]), "/out");
+    let after = chat_fix::plan(&from_names(&rows(&all[1..]), &files[1..]), "/out", OverlayMode::Both);
 
     let dir_of = |plan: &Plan, source_id: &str| {
         plan.items.iter().find(|item| item.source_id == source_id).and_then(|item| item.output.parent()).map(Path::to_path_buf)
@@ -731,7 +863,8 @@ fn two_files_in_one_conversation_on_one_second_get_a_counted_suffix() {
         SOLO_KEY,
         vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001"), message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")],
     )]);
-    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out");
+    let plan =
+        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(
         outputs(&plan),
         [Path::new("/out/chat/friend-handle/20210304_143005.jpg"), Path::new("/out/chat/friend-handle/20210304_143005_2.jpg"),]
@@ -745,7 +878,8 @@ fn two_conversations_with_a_file_on_one_second_do_not_collide_with_each_other() 
         (SOLO_KEY, vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")]),
         (GROUP_KEY, vec![message("b", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")]),
     ]);
-    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out");
+    let plan =
+        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(
         outputs(&plan),
         [
@@ -765,6 +899,7 @@ fn the_messages_created_outranks_everything_else() {
             &["2021-03-04_b~aB3xY90001.jpg"],
         ),
         "/out",
+        OverlayMode::Both,
     );
     assert_eq!(plan.items[0].capture.source(), TimeSource::Message);
     assert_eq!(plan.items[0].capture.local().to_string(), "2021-03-04 14:30:05");
@@ -814,6 +949,7 @@ fn no_chat_media_item_ever_carries_a_coordinate() {
     let plan = chat_fix::plan(
         &from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg", "2021-03-04_overlay~aB3xY90003.png"]),
         "/out",
+        OverlayMode::Both,
     );
     assert_eq!(plan.items.len(), 3);
     assert!(plan.items.iter().all(|item| item.location.is_none()), "{:?}", plan.items);
@@ -852,7 +988,7 @@ fn the_sender_and_the_conversation_reach_the_outputs_metadata() {
 
 #[test]
 fn a_file_no_message_names_carries_no_sender_and_no_conversation() {
-    let plan = chat_fix::plan(&from_names(&no_history(), &["2021-03-04_b~aB3xY90001.jpg"]), "/out");
+    let plan = chat_fix::plan(&from_names(&no_history(), &["2021-03-04_b~aB3xY90001.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(plan.items[0].attribution, None);
 }
 
@@ -862,7 +998,7 @@ fn an_empty_conversation_key_is_absence_rather_than_an_empty_metadata_field() {
     // records — so this is reachable, and both ends have to answer for it: an empty string written
     // into `ImageDescription` is noise, and an empty directory name is not a name at all.
     let history = history(vec![("", vec![message("sender-handle", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")])]);
-    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg"]), "/out");
+    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg"]), "/out", OverlayMode::Both);
 
     let attribution = plan.items[0].attribution.as_ref().expect("the message still names a sender");
     assert_eq!(attribution.sender.as_ref().map(|from| from.as_str()), Some("sender-handle"));
@@ -916,7 +1052,11 @@ fn a_format_this_build_does_not_decode_is_deferred_rather_than_excluded() {
     // `.gif` and `.webp` are 20 of the observed export's plain `b` files. Deferring leaves the row
     // `Pending` so a later build picks it up, which is the side of the line decision 44d's excluded
     // thumbnails are not on.
-    let plan = chat_fix::plan(&from_names(&no_history(), &["2021-03-04_b~aB3xY90001.gif", "2021-03-04_b~aB3xY90002.webp"]), "/out");
+    let plan = chat_fix::plan(
+        &from_names(&no_history(), &["2021-03-04_b~aB3xY90001.gif", "2021-03-04_b~aB3xY90002.webp"]),
+        "/out",
+        OverlayMode::Both,
+    );
     assert!(plan.items.is_empty());
     assert!(plan.excluded.is_empty());
     assert_eq!(
