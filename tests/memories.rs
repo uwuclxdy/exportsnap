@@ -628,9 +628,9 @@ fn re_enrolling_leaves_a_finished_item_alone_even_when_its_media_is_gone() {
     vanished.enroll(&mut manifest).unwrap();
 
     // The unpaired entry now carries a synthetic id, so it enrolls a row of its own and the uuid
-    // row is never named again. That, and not a status guard, is what leaves the finished bytes
-    // alone; the same mechanism is what strands the uuid row in
-    // `a_row_whose_identity_changed_between_runs_is_left_standing`.
+    // row is never named again. What leaves the finished bytes alone is the sweep's `Done`
+    // exemption, since the uuid row is exactly the kind of unnamed row
+    // `a_row_whose_identity_changed_between_runs_is_retired` watches get retired.
     assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Done), "finished bytes stay finished");
     assert_eq!(status_of(&manifest, "unpaired-entry-0"), Some(ItemStatus::SourceMissing));
     let item = manifest.item(ItemKind::Memory, &uuid(1)).unwrap().unwrap();
@@ -656,6 +656,11 @@ fn an_entry_whose_media_turned_up_goes_back_on_the_work_list() {
     assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Pending));
     let owed: Vec<String> = manifest.pending(ItemKind::Memory, 3).unwrap().into_iter().map(|item| item.source_id).collect();
     assert_eq!(owed, [uuid(1)], "the found media is work again, and the stale synthetic row is not");
+    // The observed export's worst case in miniature: a first run before extraction gives every entry
+    // a synthetic gap row, and the second run has to retire the ones that paired or the gap count
+    // stays at the entry count for ever.
+    assert_eq!(status_of(&manifest, "unpaired-entry-0"), Some(ItemStatus::Retired));
+    assert_eq!(manifest.resume(ItemKind::Memory).unwrap().source_missing, 0, "the gap the second run really has");
 }
 
 /// The positive twin of `re_enrolling_leaves_a_finished_item_alone_even_when_its_media_is_gone`:
@@ -721,24 +726,89 @@ fn an_entry_enrolls_the_url_the_export_carried_for_it() {
     assert_eq!(url_of(&uuid(3)), None);
 }
 
+/// A memory whose media went away between two runs re-enrolls under a synthetic id, and the uuid row
+/// it leaves behind is retired: this run's enumeration cannot name it at all, so no run could ever
+/// finish it.
+///
+/// **The finished row beside it is the exemption, in the same fixture.** It is unnamed by exactly the
+/// same enumeration, so a sweep that took every unnamed row would red here rather than one file away.
 #[test]
-fn a_row_whose_identity_changed_between_runs_is_left_standing() {
-    // The ceiling `Reconciliation::enroll` documents, pinned so a manifest that grows a way to
-    // retire a row flips this test rather than silently changing the counts a screen prints.
+fn a_row_whose_identity_changed_between_runs_is_retired() {
+    let workspace = Workspace::new();
+    let mut manifest = workspace.open();
+    let rows = [(at("2020-07-28"), "Image"), (at("2020-07-29"), "Image")];
+    let rows: Vec<(&str, &str)> = rows.iter().map(|(date, word)| (date.as_str(), *word)).collect();
+
+    reconciled(&rows, vec![main_file("2020-07-28", 1, "jpg"), main_file("2020-07-29", 2, "jpg")]).enroll(&mut manifest).unwrap();
+    let output = workspace.dir.path().join("2020-07-29.jpg");
+    fs::write(&output, b"repaired bytes").unwrap();
+    manifest.mark_done(ItemKind::Memory, &uuid(2), &output).unwrap();
+
+    // Both files go away: each entry re-enrolls under a synthetic id and neither uuid is named again.
+    reconciled(&rows, Vec::new()).enroll(&mut manifest).unwrap();
+
+    assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Retired), "the row no entry answers for any more");
+    assert_eq!(status_of(&manifest, &uuid(2)), Some(ItemStatus::Done), "finished bytes are not swept away with it");
+
+    let report = manifest.resume(ItemKind::Memory).unwrap();
+    assert_eq!(report.retired, 1);
+    assert_eq!(report.source_missing, 2, "one row per entry, and the retired uuid is not one of them");
+    assert_eq!(report.verified, 1);
+    assert!(manifest.pending(ItemKind::Memory, 3).unwrap().is_empty(), "and no run is offered work it cannot finish");
+}
+
+/// The guard, in this leg: a dir the walk could not list is not evidence the media is gone, so the
+/// row this run cannot name SURVIVES rather than being retired. Without it an export sitting next to
+/// one unreadable directory would retire rows for media that is merely unseen.
+#[test]
+fn a_memory_whose_media_vanished_keeps_its_row_while_a_directory_could_not_be_listed() {
     let workspace = Workspace::new();
     let mut manifest = workspace.open();
     let row = [(at("2020-07-28"), "Image")];
     let row: Vec<(&str, &str)> = row.iter().map(|(date, word)| (date.as_str(), *word)).collect();
 
     reconciled(&row, vec![main_file("2020-07-28", 1, "jpg")]).enroll(&mut manifest).unwrap();
-    // The media goes away: the entry re-enrolls under a synthetic id and the uuid row is orphaned.
-    reconciled(&row, Vec::new()).enroll(&mut manifest).unwrap();
 
-    let report = manifest.resume(ItemKind::Memory).unwrap();
-    assert_eq!(report.source_missing, 1);
-    assert_eq!(report.pending, 1, "one memory, two rows: the orphaned uuid row is still owed work");
+    // Second run: no media paired AND part of the source could not be listed, so "the media is gone"
+    // is a claim this run never established.
+    let locked = vec![UnreadableDir { dir: PathBuf::from("/export/mydata~1/memories"), kind: io::ErrorKind::PermissionDenied }];
+    let unscanned = reconcile(&entries(&row), Discovery::from_walk(Vec::new(), Vec::new(), locked));
+    assert_eq!(unscanned.items[0].pairing, Pairing::Missing(MissingReason::Unscanned), "the fixture is the unscanned case");
+    unscanned.enroll(&mut manifest).unwrap();
+
+    assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Pending), "media merely never seen must not retire its row");
+    assert_eq!(manifest.resume(ItemKind::Memory).unwrap().retired, 0);
+
+    // The same enumeration with the scan complete retires it, so it is the guard that left the row
+    // standing rather than the sweep never reaching this fixture.
+    reconciled(&row, Vec::new()).enroll(&mut manifest).unwrap();
+    assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Retired));
+}
+
+/// Retiring is reversible, which is what makes it safe to do at all: the media comes back, the entry
+/// pairs again under the uuid the retired row already carries, and the row goes back on the work
+/// list instead of sitting parked for ever.
+#[test]
+fn a_retired_memory_whose_media_came_back_goes_back_on_the_work_list() {
+    let workspace = Workspace::new();
+    let mut manifest = workspace.open();
+    let row = [(at("2020-07-28"), "Image")];
+    let row: Vec<(&str, &str)> = row.iter().map(|(date, word)| (date.as_str(), *word)).collect();
+    let paired = reconciled(&row, vec![main_file("2020-07-28", 1, "jpg")]);
+
+    paired.enroll(&mut manifest).unwrap();
+    reconciled(&row, Vec::new()).enroll(&mut manifest).unwrap();
+    assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Retired), "the run that unmounted the part");
+
+    // Third run, with the part back.
+    paired.enroll(&mut manifest).unwrap();
+
+    assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Pending));
+    let item = manifest.item(ItemKind::Memory, &uuid(1)).unwrap().unwrap();
+    assert_eq!(item.retry_count, 0);
+    assert!(item.last_error.is_none(), "and the retirement note does not outlive the retirement");
     let owed: Vec<String> = manifest.pending(ItemKind::Memory, 3).unwrap().into_iter().map(|item| item.source_id).collect();
-    assert_eq!(owed, [uuid(1)], "and no run can finish it, because the file it names is gone");
+    assert_eq!(owed, [uuid(1)]);
 }
 
 /// **This fixture is in a state 16a's own pipeline cannot produce, and that is stated rather than

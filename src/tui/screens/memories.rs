@@ -857,6 +857,7 @@ fn pill_spans(palette: &Palette, status: ItemStatus) -> Vec<Span<'static>> {
         ItemStatus::Done => "done",
         ItemStatus::Failed => "failed",
         ItemStatus::SourceMissing => "missing",
+        ItemStatus::Retired => "retired",
     };
     let bracket = Style::new().fg(palette.text_dim);
     let width = 2 + label.len() + 2;

@@ -269,9 +269,9 @@ pub struct ChatMediaFile {
     /// **The plain form deliberately drops the day and the zip form deliberately keeps it.** The
     /// plain form is exactly the token `chat_history.json` names, so a token whose file is missing
     /// today and present tomorrow keeps one manifest row across both runs instead of enrolling a
-    /// second one. That is half of the ceiling [`super::memories::Reconciliation::enroll`]
-    /// documents; see [`Reconciliation::enroll`] for which half stays open here, because it is not
-    /// closed and this doc used to claim it was.
+    /// second one. That is one half of what [`super::memories::Reconciliation::enroll`] documents,
+    /// and it is the half a shared identity can close on its own; the other — a file no message
+    /// names at all — needs the manifest sweep [`Reconciliation::enroll`] runs.
     ///
     /// The zip form keeps the day because the day is part of the pairing key. The census measured
     /// `(day, mid)` — 464 of 464 pairs match on it — and this build keys on `(day, mid, hash)`,
@@ -788,27 +788,31 @@ impl Reconciliation {
     /// make is ordinary here: a token enrolled `SourceMissing` by a run that had not extracted the
     /// media part yet goes back on the work list through [`Manifest::reset`] the moment its file
     /// turns up, under the same row. Pinned by
-    /// `a_token_whose_file_turned_up_goes_back_on_the_work_list`.
+    /// `a_token_whose_file_turned_up_goes_back_on_the_work_list`. A row this leg
+    /// [`Manifest::retire_absent`] retired comes back the same way, which is what makes the sweep
+    /// below reversible rather than terminal.
     ///
-    /// **That closes one half of the ceiling [`super::memories::Reconciliation::enroll`] documents,
-    /// and only for a file some message names. The other half is as open here as it is there.** A
-    /// file that vanishes between two runs leaves a stale `Pending` row that no run can finish,
-    /// because nothing in a reconciliation can name it: it is absent from [`Self::items`] (no file)
-    /// and absent from [`Self::missing`] unless a message named its token. On the observed export
-    /// that is every file no message names — 5417 unnamed `b` plus 532 role-worded plus 928 zip,
-    /// 6877 of 9465 — against the 2588 where the identity does carry the row across. The 27% figure
-    /// is the reach of the fix, not of the problem. Pinned from both sides:
-    /// `a_vanished_file_a_message_names_lands_back_at_source_missing_under_the_same_row` and
-    /// `a_vanished_file_no_message_names_strands_a_pending_row`.
+    /// **A file that vanishes between two runs is what the sweep is for**, and it is the case the
+    /// shared identity above does NOT cover. A file no message names is absent from [`Self::items`]
+    /// once it is gone (no file) and absent from [`Self::missing`] too (no token), so nothing in a
+    /// reconciliation can name its row and it used to sit at `Pending` for ever, offered as work no
+    /// run could finish. On the observed export that is every file no message names — 5417 unnamed
+    /// `b` plus 532 role-worded plus 928 zip, 6877 of 9465 — against the 2588 the identity carries
+    /// across. The 27% figure was the reach of the identity fix, never of the problem. Pinned from
+    /// both sides: `a_vanished_file_a_message_names_lands_back_at_source_missing_under_the_same_row`
+    /// and `a_vanished_file_no_message_names_is_retired`.
     ///
-    /// The upgrade path is the same one memories names — an affordance in the manifest to retire a
-    /// row — and it belongs to both legs at once rather than to this one. Closing it here alone
-    /// would make two pipelines that should behave alike diverge, and the sweep it needs must not
-    /// fire while [`Self::unreadable`] is non-empty, for the reason [`MissingReason::Unscanned`]
-    /// exists: a dir that could not be listed is not evidence a file is gone.
+    /// The sweep's rule lives in the manifest rather than here, so this leg and the memories one
+    /// cannot answer it differently, and **it does not fire while [`Self::unreadable`] is
+    /// non-empty**, for the reason [`MissingReason::Unscanned`] exists: a dir that could not be
+    /// listed is not evidence a file is gone.
     ///
-    /// The status sweep is one [`Manifest::items`] read rather than a point query per unit, because
-    /// a real export makes that 9001 of them.
+    /// This makes TWO [`Manifest::items`] reads, not one: the parked-status read below, and one
+    /// inside [`Manifest::retire_absent`]. Both are whole-kind reads rather than a point query per
+    /// unit, which is what matters — a real export makes that 9001 point queries — but neither is
+    /// narrow, and each materializes an output path, a url and a checksum per row that the verdict
+    /// never looks at. A projection like [`Manifest`]'s own finished-item read is the upgrade path,
+    /// and it is left undone deliberately rather than unnoticed.
     ///
     /// # Errors
     ///
@@ -822,18 +826,44 @@ impl Reconciliation {
             .collect();
         manifest.enroll(&rows)?;
 
-        // Read before anything is marked, so what this sweep sees is where the PREVIOUS run left
-        // each row rather than what the loop below is about to write.
+        // Every id this reconciliation can answer for, which is also what the sweep at the bottom
+        // measures a row against: an enrolled row outside this set is one the export no longer
+        // names under any identity.
         //
-        // This comment used to claim the two sets could not overlap. They could: a `missing` token
-        // is only checked against the join map, and until `parse_history_token` existed any string
-        // could reach it — including one spelling a present file's `source_id`, which this read
-        // ordering then guaranteed would NOT be reset on the run that parked it. The boundary check
-        // is what makes the sets disjoint now; this ordering is not, and must not be asked to be.
+        // The `debug_assert` is the load-bearing half. A token that were both an item and a gap
+        // would be marked source-missing AND reset by the loops below, so which one won would be
+        // decided by where the `Manifest::items` read sits relative to them — an ordering nothing
+        // pins and nothing should have to. This is not hypothetical: a `missing` token is only
+        // checked against the join map, and until `parse_history_token` existed any string could
+        // reach it, including one spelling a present file's `source_id`, which that read ordering
+        // then guaranteed would NOT be reset on the run that parked it.
+        //
+        // **Two guards make the sets disjoint and they have to move together**, which is why naming
+        // only the trust boundary here was wrong. `parse_history_token` narrows a token to the
+        // `b~<alnum>` spelling, and that is a SUBSET of the item-id space rather than disjoint from
+        // it — `ChatMediaFile::parse` mints exactly that spelling for a `(Token::B, Family::Plain)`
+        // file. What closes it is the second fact: `ChatMediaFile::history_token` hands a file to the
+        // join map under exactly the condition that produces that spelling, so every item whose id a
+        // token could spell is already IN the map and routes to `Named` rather than to `missing`.
+        // Tighten either one alone and the sets overlap — add a condition to `history_token` and a
+        // `b~X` file drops out of the map while its item keeps `source_id == "b~X"`. Neither is
+        // enforced by the compiler. Pinned by `a_gap_token_and_an_item_id_are_never_the_same_string`,
+        // which covers both conjuncts because its `b~` file is on disk, and on the guard itself by
+        // `an_overlapping_gap_token_and_item_id_stop_the_run_rather_than_racing_the_read`.
+        let item_ids: BTreeSet<&str> = self.items.iter().map(ChatMediaItem::source_id).collect();
+        debug_assert!(
+            !self.missing.iter().any(|missing| item_ids.contains(missing.token.as_str())),
+            "a gap token spells an item's own source id, so this call would mark that row missing AND reset it, and the read below would \
+             decide which of the two won"
+        );
+        let named: BTreeSet<&str> = item_ids.iter().copied().chain(self.missing.iter().map(|missing| missing.token.as_str())).collect();
+
+        // Read before anything is marked, so what this sweep sees is where the PREVIOUS run left
+        // each row rather than what the loops below are about to write.
         let parked: BTreeSet<String> = manifest
             .items(ItemKind::ChatMedia)?
             .into_iter()
-            .filter(|row| row.status == ItemStatus::SourceMissing)
+            .filter(|row| matches!(row.status, ItemStatus::SourceMissing | ItemStatus::Retired))
             .map(|row| row.source_id)
             .collect();
 
@@ -843,7 +873,7 @@ impl Reconciliation {
         for item in self.items.iter().filter(|item| parked.contains(item.source_id())) {
             manifest.reset(ItemKind::ChatMedia, item.source_id())?;
         }
-        Ok(())
+        manifest.retire_absent(ItemKind::ChatMedia, &named, &self.unreadable)
     }
 }
 

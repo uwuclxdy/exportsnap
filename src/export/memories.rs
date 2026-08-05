@@ -17,7 +17,7 @@
 //! Framework-free like the rest of `export/`: nothing here writes an output file, composites an
 //! overlay, or knows a screen exists.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
@@ -664,36 +664,45 @@ impl Reconciliation {
     /// no media for are the reason: a bare "746 of 836" reads as success, while a row each is what
     /// makes the gap addressable one memory at a time.
     ///
-    /// One transition the row's existing status decides rather than this reconciliation: an item
-    /// that was [`ItemStatus::SourceMissing`] and pairs now goes back on the work list through
-    /// [`Manifest::reset`].
+    /// Two transitions the row's existing status decides rather than this reconciliation: an item
+    /// that was [`ItemStatus::SourceMissing`] or [`ItemStatus::Retired`] and pairs now goes back on
+    /// the work list through [`Manifest::reset`].
     ///
-    /// **That arm serves a producer that does not exist yet** — a downloader marking a PAIRED
-    /// item's source missing — and nothing in this module can reach it, because the only
+    /// **The `SourceMissing` half serves a producer that does not exist yet** — a downloader marking
+    /// a PAIRED item's source missing — and nothing in this module can reach it, because the only
     /// `mark_source_missing` here is on a synthetic id. In particular it is NOT what serves the
     /// export part that had not been extracted yet: an entry that was unpaired and pairs now
     /// changes `source_id` from the synthetic one to the media's uuid, so it arrives as a NEW row
     /// at [`ItemStatus::Pending`] and never touches `reset`. `an_entry_whose_media_turned_up_goes_
-    /// back_on_the_work_list` is that case and reset does not fire in it; the ceiling below is the
-    /// account of what happens to the row left behind.
+    /// back_on_the_work_list` is that case and reset does not fire in it. **The `Retired` half this
+    /// module reaches on its own**, and it is what makes the sweep below reversible: a uuid row
+    /// retired when its media went away is named again the moment the media is back, under the id it
+    /// already carries. Pinned by `a_retired_memory_whose_media_came_back_goes_back_on_the_work_list`.
     ///
     /// Nothing here guards a finished item against being un-finished, because no reconciliation can
     /// name one: a [`Pairing::Missing`] item's `source_id` is a synthetic one, a synthetic id is
     /// only ever [`ItemStatus::SourceMissing`], and [`Manifest::pending`] — the only way an item
     /// reaches [`Manifest::mark_done`] — never offers those. A guard for it would be a check no
-    /// input can reach, which is the shape a mutation cannot tell from no check at all.
+    /// input can reach, which is the shape a mutation cannot tell from no check at all. The sweep
+    /// below is the one place a finished row IS reachable and it exempts [`ItemStatus::Done`]
+    /// there, in the manifest, where both legs get the same answer.
     ///
-    /// **Deliberate ceiling: an entry that crosses between paired and unpaired between two runs
-    /// leaves its old row standing.** The two states are different `source_id`s by construction —
-    /// the media's uuid one way, a synthetic id the other — so the manifest sees two rows for one
-    /// memory and nothing here can retire the stale one, because the manifest deletes no row by
-    /// design. The cost is not one row but up to one PER ENTRY, and the worst case is ordinary
-    /// rather than exotic: a first run before the media part is extracted gives all 836 entries a
-    /// synthetic `SourceMissing` row, and the second run adds 746 uuid rows without retiring any,
-    /// so a screen reads `source_missing: 836` against a real gap of 90. It leans the unsafe way
-    /// too — a `Pending` row under a uuid whose file is gone is offered as work no run can finish.
-    /// The upgrade path is an affordance in the manifest to retire a row, not a second identity
-    /// scheme here. Pinned by `a_row_whose_identity_changed_between_runs_is_left_standing`.
+    /// **An entry that crosses between paired and unpaired between two runs changes `source_id`,
+    /// and the row it leaves behind is retired rather than left standing.** The two states are
+    /// different ids by construction — the media's uuid one way, a synthetic id the other — so the
+    /// manifest holds two rows for one memory for as long as both are named, and
+    /// [`Manifest::retire_absent`] is what closes the one this run cannot name. Without it the cost
+    /// was up to one stale row PER ENTRY, in an ordinary case rather than an exotic one: a first run
+    /// before the media part is extracted gives all 836 entries a synthetic `SourceMissing` row, and
+    /// the second run adds 746 uuid rows, so a screen read `source_missing: 836` against a real gap
+    /// of 90. It leaned the unsafe way too — a `Pending` row under a uuid whose file is gone was
+    /// offered as work no run could finish. Pinned by
+    /// `a_row_whose_identity_changed_between_runs_is_retired`.
+    ///
+    /// **The sweep does not run while [`Self::unreadable`] is non-empty**, which is the manifest's
+    /// rule rather than this leg's: a dir that could not be listed is not evidence a memory is gone,
+    /// and retiring on that evidence would park rows for media that is merely unseen. Same reasoning
+    /// as [`MissingReason::Unscanned`], and the guard is scan-wide for the same reason.
     ///
     /// # Errors
     ///
@@ -709,14 +718,22 @@ impl Reconciliation {
                     manifest.mark_source_missing(ItemKind::Memory, &item.source_id, &reason.to_string())?;
                 }
                 Pairing::Exact(_) | Pairing::Ambiguous(_) => {
+                    // `Retired` belongs here for the same reason `SourceMissing` does, and it is the
+                    // arm that makes retiring reversible: a memory whose media went away and came
+                    // back is named again, under the uuid its retired row already carries, and
+                    // neither status is ever offered as work.
                     let status = manifest.item(ItemKind::Memory, &item.source_id)?.map(|row| row.status);
-                    if status == Some(ItemStatus::SourceMissing) {
+                    if matches!(status, Some(ItemStatus::SourceMissing | ItemStatus::Retired)) {
                         manifest.reset(ItemKind::Memory, &item.source_id)?;
                     }
                 }
             }
         }
-        Ok(())
+
+        // Every entry is an item, paired or not, so this names the whole enumeration and what is
+        // left is what no `memories_history.json` entry answers for any more.
+        let named: BTreeSet<&str> = self.items.iter().map(|item| item.source_id.as_str()).collect();
+        manifest.retire_absent(ItemKind::Memory, &named, &self.unreadable)
     }
 }
 

@@ -41,9 +41,15 @@
 //!   836 memory entries against 746 media files, and a run that silently succeeds at 746 reads as
 //!   a clean run. A caller that later finds the media — an export part that was not extracted
 //!   yet — calls [`Manifest::reset`] to put the item back on the work list.
+//! - [`ItemStatus::Retired`] — untouched, never handed back as work, and counted apart from the
+//!   gap above. [`Manifest::retire_absent`] is what puts a row here: an enumeration that can no
+//!   longer name the row at all. Same way back as the gap, [`Manifest::reset`], for the run that
+//!   finds the source again.
 //!
 //! Nothing here deletes a row, so a re-enumeration ([`Manifest::enroll`]) of the same export is
-//! idempotent and never costs finished work.
+//! idempotent and never costs finished work. Retiring is what a row that outlived its source gets
+//! instead of a delete: "gone since the first run" and "never in the export" stay different facts,
+//! and a screen can count both.
 //!
 //! # Concurrency
 //!
@@ -51,6 +57,7 @@
 //! one behind its own lock; two processes on one manifest is not a supported arrangement, and the
 //! resume sweep is what makes an interrupted run's leftovers safe rather than any claim protocol.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -62,6 +69,7 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::export::model::DownloadUrl;
+use crate::export::walk::UnreadableDir;
 
 /// Reverse-domain parts handed to [`ProjectDirs`]; only the last is used on linux.
 const QUALIFIER: &str = "dev";
@@ -212,10 +220,17 @@ pub enum ItemStatus {
     /// download url. Not a failure of the run and not work it can retry, so it is reported rather
     /// than retried or hidden.
     SourceMissing,
+    /// An earlier run enrolled this row and the export no longer names it at all — not as an item
+    /// and not as a gap. Not work, and not part of the gap above: [`Self::SourceMissing`] is an
+    /// entry the export still names and holds nothing for, while this is a row whose whole record
+    /// left the export. Kept rather than deleted so the two stay tellable apart, and so a screen can
+    /// say how many items vanished since the first run. [`Manifest::retire_absent`] is the only
+    /// producer.
+    Retired,
 }
 
 impl ItemStatus {
-    pub const ALL: [Self; 4] = [Self::Pending, Self::Done, Self::Failed, Self::SourceMissing];
+    pub const ALL: [Self; 5] = [Self::Pending, Self::Done, Self::Failed, Self::SourceMissing, Self::Retired];
 
     /// The word stored in the `status` column.
     #[must_use]
@@ -225,6 +240,7 @@ impl ItemStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::SourceMissing => "source_missing",
+            Self::Retired => "retired",
         }
     }
 
@@ -366,6 +382,10 @@ pub struct ResumeReport {
     /// Items the export names but holds no media for. Report this; a run that quietly finishes
     /// without it looks complete.
     pub source_missing: u64,
+    /// Items a later enumeration could no longer name at all, so their source left the export
+    /// between two runs. Counted apart from [`Self::source_missing`] because the two are different
+    /// facts and only the first is a gap in the export as it stands.
+    pub retired: u64,
 }
 
 // ---- errors ----
@@ -471,10 +491,15 @@ impl fmt::Display for ManifestError {
                  export's downloads from scratch",
                 path.display()
             ),
+            // Two causes reach this and the message must not pick one: a NEWER build wrote a word
+            // this one does not know (every status added since is exactly that), or the file was
+            // edited outside exportsnap. Only the second is repaired by deleting, and prescribing a
+            // delete for the first destroys resumable state that upgrading would have read fine.
             Self::CorruptRow { column, value } => write!(
                 f,
-                "the manifest's {column} column holds {value:?}, which this build cannot read; \
-                 the file was edited outside exportsnap, so delete it to redo this export's downloads from scratch"
+                "the manifest's {column} column holds {value:?}, which this build cannot read; a newer exportsnap may have \
+                 written it, or the file was edited outside exportsnap — upgrade first, and delete that file to redo this \
+                 export's downloads from scratch only if upgrading does not help"
             ),
             Self::Output { path, source } => write!(f, "could not read {} to check it in: {source}", path.display()),
             Self::OutputPath { path, problem } => match problem {
@@ -693,8 +718,10 @@ impl Manifest {
 
     /// Puts an item back on the work list as if no run had ever touched it, retry count included.
     ///
-    /// This is the way out of [`ItemStatus::SourceMissing`]: a caller that finds the media a
-    /// previous run could not — in an export part that was not extracted yet — calls this.
+    /// This is the way out of [`ItemStatus::SourceMissing`] and of [`ItemStatus::Retired`]: a caller
+    /// that finds the media a previous run could not — in an export part that was not extracted
+    /// yet — calls this. Neither status is ever offered as work, so a source that comes back needs
+    /// this call or its row stays parked for ever.
     ///
     /// # Errors
     ///
@@ -710,6 +737,82 @@ impl Manifest {
             )
             .map_err(|source| sqlite_error("reset an item", &self.path, source))?;
         self.require_hit(changed, kind, source_id)
+    }
+
+    /// Retires every row of `kind` this run's enumeration cannot name, leaving the finished ones
+    /// alone.
+    ///
+    /// `named` is every `source_id` the caller's reconciliation can produce — the items it found
+    /// AND the gaps it recorded — so a row outside it is one nothing can ever finish or report on
+    /// again: whatever it was enrolled for is not in the export any more, under any identity. That
+    /// is the only way out of an enrolled row that outlived its source, and both media legs reach
+    /// it through this one rule rather than each writing their own, which is what keeps them from
+    /// drifting apart.
+    ///
+    /// Two statuses are left alone. [`ItemStatus::Done`], because its output is on disk and was
+    /// checksum-verified when it was checked in, so the run genuinely did that work and the source
+    /// disappearing afterwards does not un-do it; [`Self::resume`] is what still re-checks those
+    /// bytes. And [`ItemStatus::Retired`], because it is already the answer this sweep would write —
+    /// see the comment on the filter for what re-writing it would cost.
+    ///
+    /// **`unreadable` is the guard, and it is why this takes the walk's own list rather than a
+    /// caller's verdict about it.** A directory that could not be listed is not evidence a file is
+    /// gone, so one entry here stops the whole sweep — the same reasoning that gives
+    /// [`crate::export::memories::MissingReason::Unscanned`] precedence over asserting absence.
+    /// Scan-wide rather than per-row, because nothing can say whether THIS row's file was in the dir
+    /// that could not be read without reading it. A partial scan therefore sweeps nothing and says
+    /// nothing new: what says why is the caller's own unreadable list, which every reconciliation
+    /// carries and reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Sqlite`] when a read or write fails and
+    /// [`ManifestError::CorruptRow`] when a stored value no longer parses.
+    pub fn retire_absent(&mut self, kind: ItemKind, named: &BTreeSet<&str>, unreadable: &[UnreadableDir]) -> Result<(), ManifestError> {
+        /// What a retired row's `last_error` says. A constant this module owns rather than caller
+        /// text, so it skips the note redactor every caller-supplied note goes through: there is no
+        /// secret in a fixed string, and no per-row url read to pay for on a sweep that can touch
+        /// every row of a kind.
+        const RETIRED_NOTE: &str = "the export no longer holds a source for this item";
+
+        if !unreadable.is_empty() {
+            return Ok(());
+        }
+        // Exempting `Retired` is what makes this sweep idempotent, and the cost of leaving it out is
+        // not the wasted writes. A retired row is unnamed BY DEFINITION — being unnamed is why it was
+        // retired — so it re-enters this list on every later run, and the statement below would reset
+        // `updated_at`, which [`Item::updated_at`] documents as the last status TRANSITION. Rewriting
+        // it on a row whose status did not transition turns that field into the last RUN, and "when
+        // did this vanish from the export" is the half of a retired row only that field can answer.
+        // Pinned by `retiring_leaves_an_already_retired_row_untouched`.
+        let stale: Vec<String> = self
+            .items(kind)?
+            .into_iter()
+            .filter(|item| !matches!(item.status, ItemStatus::Done | ItemStatus::Retired) && !named.contains(item.source_id.as_str()))
+            .map(|item| item.source_id)
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| sqlite_error("retire items the export no longer names", &path, source))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE items SET status = ?1, output_path = NULL, checksum = NULL, bytes = NULL, last_error = ?2, \
+                     updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4",
+                )
+                .map_err(|source| sqlite_error("retire items the export no longer names", &path, source))?;
+            for source_id in &stale {
+                stmt.execute(params![ItemStatus::Retired.as_stored(), RETIRED_NOTE, kind.as_stored(), source_id])
+                    .map_err(|source| sqlite_error("retire items the export no longer names", &path, source))?;
+            }
+        }
+        tx.commit().map_err(|source| sqlite_error("retire items the export no longer names", &path, source))
     }
 
     /// One item, or `None` when nothing enrolled it.
@@ -732,7 +835,8 @@ impl Manifest {
     ///
     /// [`ItemStatus::Pending`] and [`ItemStatus::Failed`] items whose recorded failure count is
     /// below `max_attempts`. [`ItemStatus::Done`] is skipped, which is what a resume buys, and
-    /// [`ItemStatus::SourceMissing`] is skipped because there is nothing to fetch.
+    /// [`ItemStatus::SourceMissing`] and [`ItemStatus::Retired`] are skipped because there is
+    /// nothing to fetch under either.
     ///
     /// The cap is compared against never-attempted items too, whose count is zero, so a
     /// `max_attempts` of 0 offers no work at all rather than offering the untried ones: it reads as
@@ -819,13 +923,14 @@ impl Manifest {
             tx.commit().map_err(|source| sqlite_error("demote unverified items", &path, source))?;
         }
 
-        let mut report = ResumeReport { demoted, verified: 0, pending: 0, failed: 0, source_missing: 0 };
+        let mut report = ResumeReport { demoted, verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0 };
         for (status, count) in self.counts(kind)? {
             match status {
                 ItemStatus::Done => report.verified = count,
                 ItemStatus::Pending => report.pending = count,
                 ItemStatus::Failed => report.failed = count,
                 ItemStatus::SourceMissing => report.source_missing = count,
+                ItemStatus::Retired => report.retired = count,
             }
         }
         Ok(report)

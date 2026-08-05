@@ -6,12 +6,15 @@
 //! against a tempdir.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use exportsnap::export::manifest::{
     Checksum, Demotion, DemotionReason, ExportId, ItemKind, ItemStatus, Manifest, ManifestError, NewItem, PathProblem, manifest_dir,
 };
+use exportsnap::export::memories::UnreadableDir;
 use exportsnap::export::model::DownloadUrl;
 use exportsnap::export::zip::discover_parts;
 use rusqlite::OptionalExtension;
@@ -75,6 +78,10 @@ fn enrollment<'a>(source_ids: &'a [&'a str]) -> Vec<NewItem<'a>> {
 
 fn owed(manifest: &Manifest, max_attempts: u32) -> Vec<String> {
     manifest.pending(ItemKind::Memory, max_attempts).unwrap().into_iter().map(|item| item.source_id).collect()
+}
+
+fn status_of(manifest: &Manifest, source_id: &str) -> ItemStatus {
+    manifest.item(ItemKind::Memory, source_id).unwrap().expect("the row is enrolled").status
 }
 
 // ---- the resume contract ----
@@ -234,6 +241,126 @@ fn reset_puts_a_source_missing_item_back_on_the_work_list() {
     let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
     assert_eq!(item.status, ItemStatus::Pending);
     assert_eq!(item.last_error, None);
+}
+
+/// The sweep's whole rule in one fixture, one row per verdict: every status an unnamed row can be
+/// at is retired, and `Done` is the exemption — its bytes are on disk and checksum-verified, so the
+/// source leaving the export does not un-do the work.
+#[test]
+fn retiring_takes_every_unnamed_row_except_the_finished_ones() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01", "m-02", "m-03", "m-04", "m-05"])).unwrap();
+
+    let output = work.write_output("m-02", "bytes a run finished");
+    manifest.mark_done(ItemKind::Memory, "m-02", &output).unwrap();
+    manifest.mark_failed(ItemKind::Memory, "m-03", "connection reset").unwrap();
+    manifest.mark_source_missing(ItemKind::Memory, "m-04", "no media for it in the parts extracted so far").unwrap();
+
+    // The next run's enumeration names one row of the five; the export no longer names the rest
+    // under any identity.
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::from(["m-05"]), &[]).unwrap();
+
+    assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Retired, "a pending row nothing names");
+    assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Done, "finished bytes are not swept");
+    assert_eq!(status_of(&manifest, "m-03"), ItemStatus::Retired, "a failed row nothing names");
+    assert_eq!(status_of(&manifest, "m-04"), ItemStatus::Retired, "and a gap row nothing names either");
+    assert_eq!(status_of(&manifest, "m-05"), ItemStatus::Pending, "the one the enumeration still names");
+
+    let retired = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert!(retired.last_error.unwrap().contains("no longer holds a source"), "a retired row says what happened to it");
+    assert_eq!(retired.retry_count, 0, "retiring a row is not a failed attempt");
+    let finished = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+    assert_eq!(finished.output_path.as_deref(), Some(output.as_path()), "and the finished row keeps what a resume re-checks");
+    assert!(finished.checksum.is_some());
+}
+
+/// The guard, which is the part of the sweep that can lose data. A directory the walk could not list
+/// is not evidence a row's source is gone, so one of them stops the sweep for EVERY row: nothing can
+/// say whether this row's file was in the dir that could not be read without reading it.
+#[test]
+fn retiring_sweeps_nothing_while_a_directory_could_not_be_listed() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+    let locked = [UnreadableDir { dir: PathBuf::from("/export/lost+found"), kind: io::ErrorKind::PermissionDenied }];
+
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &locked).unwrap();
+
+    assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Pending, "nothing named it, and nothing established it is gone either");
+    assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending);
+    assert_eq!(owed(&manifest, 3), ["m-01", "m-02"], "so both are still work");
+
+    // The same call with the scan complete retires them, which is what proves the guard is what left
+    // the rows standing rather than the fixture never reaching the sweep at all.
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
+    assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Retired);
+    assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Retired);
+}
+
+/// The sweep has to be idempotent, and `updated_at` is the field that proves it. A retired row is
+/// unnamed by definition — being unnamed is why it was retired — so it re-enters the sweep on every
+/// later run unless it is exempt, and the `UPDATE` would reset a timestamp `Item` documents as the
+/// last status TRANSITION. That destroys the "when did this vanish" half of what a retired row is
+/// kept for.
+///
+/// The sentinel is load-bearing, not decoration: `unixepoch()` has one-second resolution, so a second
+/// sweep landing in the same second as the first rewrites the row with the value it already had and
+/// no assertion could tell a rewrite from a skip.
+///
+/// **The still-`Pending` row is the positive control, and it shares the one call.** Without it a
+/// `retire_absent` that did nothing whatever would pass, because a dead sweep leaves a sentinel alone
+/// just as well as a correct one does.
+#[test]
+fn retiring_leaves_an_already_retired_row_untouched() {
+    /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
+    const SENTINEL: i64 = 1_000_000_000;
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+        manifest.retire_absent(ItemKind::Memory, &BTreeSet::from(["m-02"]), &[]).unwrap();
+        assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Retired, "the row the next sweep must leave alone");
+        assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending, "and the one it must still be able to retire");
+    }
+
+    // Only reachable by editing the database, which is the point: it backdates the row so a rewrite
+    // is distinguishable from a skip.
+    let db = work.state.join(format!("{ID}.sqlite"));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE items SET updated_at = ?1 WHERE source_id = 'm-01'", [SENTINEL]).unwrap();
+    drop(conn);
+
+    let mut manifest = work.open();
+    // Neither row is named now: `m-01` is already retired, `m-02` has just left the export.
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
+
+    let untouched = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(untouched.updated_at, SENTINEL, "a second sweep rewrote a row whose status never transitioned");
+    assert_eq!(untouched.status, ItemStatus::Retired, "and it is still retired, so the timestamp did not survive by the row going away");
+    assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Retired, "positive control: that same call did run, and did retire a new row");
+}
+
+#[test]
+fn a_retired_item_is_reported_apart_from_the_gap_and_never_handed_back_as_work() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01", "m-02", "m-03"])).unwrap();
+    manifest.mark_source_missing(ItemKind::Memory, "m-02", "no media for it in the parts extracted so far").unwrap();
+
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::from(["m-02", "m-03"]), &[]).unwrap();
+
+    let report = manifest.resume(ItemKind::Memory).unwrap();
+    assert_eq!(report.retired, 1, "the row whose whole record left the export");
+    assert_eq!(report.source_missing, 1, "counted apart from the gap the export still names");
+    assert_eq!(report.pending, 1);
+    assert_eq!(owed(&manifest, 3), ["m-03"], "and neither of them is work");
+
+    // A source that comes back takes the same way out of a retired row as out of a gap.
+    manifest.reset(ItemKind::Memory, "m-01").unwrap();
+    assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Pending);
+    assert_eq!(owed(&manifest, 3), ["m-01", "m-03"]);
 }
 
 #[test]
@@ -563,6 +690,39 @@ fn a_manifest_carrying_no_export_pin_says_so_rather_than_blaming_a_rename() {
     assert!(!message.contains("renamed or copied"), "nothing was renamed: {message}");
 }
 
+/// A status word this build does not know has two causes and the message must not pick one. A NEWER
+/// exportsnap writing a status this one has not learned is exactly how `retired` looked to the build
+/// before it, and that case is repaired by upgrading — while deleting, the remedy for a hand-edit,
+/// throws away resumable state the newer build would have read fine.
+#[test]
+fn an_unreadable_status_word_offers_the_upgrade_before_the_delete() {
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    }
+
+    // Only reachable by another build or a hand-edit, which is the whole point: this build cannot
+    // write a word it does not know.
+    let db = work.state.join(format!("{ID}.sqlite"));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE items SET status = 'a_status_from_a_later_build'", []).unwrap();
+    drop(conn);
+
+    let manifest = work.open();
+    let error = manifest.item(ItemKind::Memory, "m-01").unwrap_err();
+
+    assert!(matches!(&error, ManifestError::CorruptRow { column, .. } if column.to_string() == "status"), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("a_status_from_a_later_build"), "the message names the value it could not read: {message}");
+    assert!(message.contains("newer exportsnap may have written it"), "{message}");
+    assert!(message.contains("upgrade first"), "the remedy that costs nothing comes first: {message}");
+    assert!(
+        !message.contains("the file was edited outside exportsnap, so delete"),
+        "the old message asserted a cause it cannot know and prescribed the destructive fix for it: {message}"
+    );
+}
+
 /// The pin lands in the same transaction as the schema, so a fresh manifest can never present a
 /// stamped `user_version` with no pin behind it.
 #[test]
@@ -614,7 +774,7 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
     // These words are in every user's database. Renaming one silently orphans their rows, so the
     // list is a contract rather than an implementation detail.
     assert_eq!(ItemKind::ALL.map(ItemKind::as_stored), ["memory", "chat_media", "history_export"]);
-    assert_eq!(ItemStatus::ALL.map(ItemStatus::as_stored), ["pending", "done", "failed", "source_missing"]);
+    assert_eq!(ItemStatus::ALL.map(ItemStatus::as_stored), ["pending", "done", "failed", "source_missing", "retired"]);
 
     // Second witness for each; `ItemKind::as_stored`/`ItemStatus::as_stored` above are the first,
     // and `ItemStatus` also has `resume`'s per-status match (src/export/manifest.rs) as a second.
@@ -630,7 +790,7 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
     }
     for status in ItemStatus::ALL {
         match status {
-            ItemStatus::Pending | ItemStatus::Done | ItemStatus::Failed | ItemStatus::SourceMissing => {}
+            ItemStatus::Pending | ItemStatus::Done | ItemStatus::Failed | ItemStatus::SourceMissing | ItemStatus::Retired => {}
         }
     }
 }

@@ -132,11 +132,13 @@ impl Palette {
     /// The label color of a status pill for a manifest item (cloudy-tui skill: Status pill —
     /// semantic when the state carries a charge, neutral `TEXT_DIM` otherwise). `pending` is the
     /// default state and nothing has gone wrong yet; `source_missing` is a real gap to report.
+    /// `retired` is neutral for the opposite reason to `source_missing`: the export stopped naming
+    /// that row, so there is nothing left to go looking for and nothing for a reader to act on.
     #[must_use]
     pub const fn status_pill(self, status: crate::export::manifest::ItemStatus) -> Color {
         use crate::export::manifest::ItemStatus;
         match status {
-            ItemStatus::Pending => self.text_dim,
+            ItemStatus::Pending | ItemStatus::Retired => self.text_dim,
             ItemStatus::Done => self.success,
             ItemStatus::Failed => self.danger,
             ItemStatus::SourceMissing => self.warning,

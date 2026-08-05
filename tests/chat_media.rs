@@ -1225,31 +1225,155 @@ fn a_vanished_file_a_message_names_lands_back_at_source_missing_under_the_same_r
     assert_eq!(enrolled(&manifest), [(token, ItemStatus::SourceMissing)]);
 }
 
-/// The half of the memories ceiling that is **open here too**, pinned so it is a recorded shortcut
-/// rather than an accident.
+/// The other 73%, and the case the shared identity above cannot cover: a file no message names has
+/// no token, so once it vanishes nothing in a reconciliation can name it — absent from `items`
+/// because there is no file, absent from `missing` because there is no token. That is the row the
+/// manifest sweep retires. On the observed export it is every file no message names: 5417 unnamed
+/// `b` + 532 role-worded + 928 zip, 6877 of 9465.
 ///
-/// A file no message names has no token, so when it vanishes nothing in a reconciliation can name
-/// it: absent from `items` because there is no file, absent from `missing` because there is no
-/// token. Its row stays `Pending` and `Manifest::pending` keeps offering work no run can finish —
-/// exactly what `memories::Reconciliation::enroll` documents. On the observed export this is every
-/// file no message names: 5417 unnamed `b` + 532 role-worded + 928 zip, 6877 of 9465.
-///
-/// The upgrade path is a manifest affordance to retire a row, and it belongs to both legs at once.
-/// **When that lands, this test flips** — which is the point of having it.
+/// **The finished row beside them is the exemption, in the same fixture**: it is unnamed by exactly
+/// the same enumeration, so a sweep that took every unnamed row would red here.
 #[test]
-fn a_vanished_file_no_message_names_strands_a_pending_row() {
+fn a_vanished_file_no_message_names_is_retired() {
     let workspace = Workspace::new();
     let mut manifest = workspace.open();
     let quiet: &[(&str, &[&str])] = &[("alice", &[])];
+    let finished = format!("b~{}", id(3));
 
-    reconciled(quiet, vec![bare("2021-03-04", 1), plain("2021-03-04", Token::Overlay, 2, "png")]).enroll(&mut manifest).unwrap();
-    // Second run: both files are gone and no message ever mentioned either.
+    reconciled(quiet, vec![bare("2021-03-04", 1), plain("2021-03-04", Token::Overlay, 2, "png"), bare("2021-03-05", 3)])
+        .enroll(&mut manifest)
+        .unwrap();
+    let output = workspace.dir.path().join("2021-03-05.jpg");
+    fs::write(&output, b"repaired bytes").unwrap();
+    manifest.mark_done(ItemKind::ChatMedia, &finished, &output).unwrap();
+
+    // Second run: every file is gone and no message ever mentioned any of them.
     reconciled(quiet, Vec::new()).enroll(&mut manifest).unwrap();
 
     assert_eq!(
         enrolled(&manifest),
-        [(format!("b~{}", id(1)), ItemStatus::Pending), (format!("overlay~{}", id(2)), ItemStatus::Pending)],
-        "stale rows, still offered as work no run can finish"
+        [(format!("b~{}", id(1)), ItemStatus::Retired), (finished, ItemStatus::Done), (format!("overlay~{}", id(2)), ItemStatus::Retired),],
+        "the rows no run could finish are retired; the finished one is not"
     );
-    assert_eq!(manifest.pending(ItemKind::ChatMedia, 3).unwrap().len(), 2);
+    assert!(manifest.pending(ItemKind::ChatMedia, 3).unwrap().is_empty(), "and nothing unfinishable is offered as work");
+    assert_eq!(manifest.resume(ItemKind::ChatMedia).unwrap().retired, 2);
+}
+
+/// The guard, in this leg: a dir the walk could not list is not evidence the file is gone, so the
+/// row this run cannot name SURVIVES rather than being retired.
+#[test]
+fn a_vanished_file_keeps_its_row_while_a_directory_could_not_be_listed() {
+    let workspace = Workspace::new();
+    let mut manifest = workspace.open();
+    let quiet: &[(&str, &[&str])] = &[("alice", &[])];
+    let token = format!("b~{}", id(1));
+
+    reconciled(quiet, vec![bare("2021-03-04", 1)]).enroll(&mut manifest).unwrap();
+
+    // Second run: nothing found AND part of the source could not be listed, so "the file is gone" is
+    // a claim this run never established.
+    let locked = vec![UnreadableDir { dir: PathBuf::from("/export/mydata~1/chat_media"), kind: io::ErrorKind::PermissionDenied }];
+    let unscanned = reconcile(&history(quiet), Discovery::from_walk(Vec::new(), Vec::new(), locked));
+    assert_eq!(unscanned.unreadable.len(), 1, "the fixture is the partial-scan case");
+    unscanned.enroll(&mut manifest).unwrap();
+
+    assert_eq!(enrolled(&manifest), [(token.clone(), ItemStatus::Pending)], "a file merely never seen must not retire its row");
+
+    // The same enumeration with the scan complete retires it, so it is the guard that left the row
+    // standing rather than the sweep never reaching this fixture.
+    reconciled(quiet, Vec::new()).enroll(&mut manifest).unwrap();
+    assert_eq!(enrolled(&manifest), [(token, ItemStatus::Retired)]);
+}
+
+/// Retiring is reversible: the file comes back under the id its retired row already carries, so the
+/// row goes back on the work list instead of sitting parked for ever.
+#[test]
+fn a_retired_file_that_came_back_goes_back_on_the_work_list() {
+    let workspace = Workspace::new();
+    let mut manifest = workspace.open();
+    let quiet: &[(&str, &[&str])] = &[("alice", &[])];
+    let token = format!("b~{}", id(1));
+
+    reconciled(quiet, vec![bare("2021-03-04", 1)]).enroll(&mut manifest).unwrap();
+    reconciled(quiet, Vec::new()).enroll(&mut manifest).unwrap();
+    assert_eq!(enrolled(&manifest), [(token.clone(), ItemStatus::Retired)], "the run that unmounted the part");
+
+    // Third run, with the part back.
+    reconciled(quiet, vec![bare("2021-03-04", 1)]).enroll(&mut manifest).unwrap();
+
+    assert_eq!(enrolled(&manifest), [(token.clone(), ItemStatus::Pending)]);
+    assert_eq!(row(&manifest, &token).retry_count, 0);
+    assert!(row(&manifest, &token).last_error.is_none(), "and the retirement note does not outlive the retirement");
+    let owed: Vec<String> = manifest.pending(ItemKind::ChatMedia, 3).unwrap().into_iter().map(|item| item.source_id).collect();
+    assert_eq!(owed, [token]);
+}
+
+/// The convention `Reconciliation::enroll`'s ordering rests on, pinned where it is PRODUCED rather
+/// than where it is checked: no gap token can spell an item's own `source_id`. `parse_history_token`
+/// is what buys it, over every shape a file's id can take.
+#[test]
+fn a_gap_token_and_an_item_id_are_never_the_same_string() {
+    let overlay = plain("2021-03-04", Token::Overlay, 3, "png");
+    let zip_media = zip("2021-03-04", Token::Media, 4, "mp4");
+    // Every spelling an id can take, handed back to the history as a token. The role-worded ones are
+    // driven off `Token::ALL` rather than hand-listed, so a fifth role word cannot be added without
+    // this witness considering it — a hand-rolled list is what missed a member in this crate before.
+    // `Token::B` is excluded because its two cases are spelled out below, one file on disk and one
+    // not, and those are the pair the disjointness question actually turns on.
+    let role_worded = Token::ALL.iter().filter(|token| **token != Token::B).map(|token| format!("{token}~{}", id(5)));
+    let spellings: Vec<String> =
+        role_worded.chain([overlay.id.clone(), zip_media.id.clone(), format!("b~{}", id(1)), format!("b~{}", id(9))]).collect();
+    let named: Vec<&str> = spellings.iter().map(String::as_str).collect();
+    let files = vec![bare("2021-03-04", 1), overlay, zip_media, zip("2021-03-04", Token::Overlay, 4, "png")];
+
+    let reconciliation = reconcile(&history(&[("alice", named.as_slice())]), Discovery::from_files(files, Vec::new()));
+
+    let items: BTreeSet<&str> = reconciliation.items.iter().map(ChatMediaItem::source_id).collect();
+    let gaps: BTreeSet<&str> = reconciliation.missing.iter().map(|missing| missing.token.as_str()).collect();
+    // The pin first, then the control that says it was not vacuous: a sibling assertion above it
+    // would abort the body before the named one ever ran.
+    assert!(items.is_disjoint(&gaps), "items {items:?} and gaps {gaps:?} share a source id");
+    assert_eq!(gaps.len(), 1, "the fixture has to produce a gap or it pins nothing: {gaps:?}");
+    // Everything but the two `b~` spellings, derived from the fixture so a new role word moves both
+    // sides of this at once instead of redding a literal nobody can place.
+    assert_eq!(
+        reconciliation.unparsed_tokens.len(),
+        spellings.len() - 2,
+        "the spellings that never reach the manifest at all: {:?}",
+        reconciliation.unparsed_tokens
+    );
+}
+
+/// The guard on that convention, driven from the state that would break it: a `Reconciliation` whose
+/// gap token spells one of its own items' ids. `enroll` would then mark that row source-missing AND
+/// reset it in one call, and which one won would be decided by where the `Manifest::items` read sits
+/// — an ordering nothing pins. So the overlap stops the run at the call it would race, instead of
+/// surfacing later as a row that flips status on alternate runs, which is how it was found the first
+/// time.
+///
+/// Debug-only because the guard is a `debug_assert`: the release leg compiles the check out, and this
+/// test with it.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "spells an item's own source id")]
+fn an_overlapping_gap_token_and_item_id_stop_the_run_rather_than_racing_the_read() {
+    // Named here rather than at the top of the file: the release leg compiles this test out, and an
+    // import only it needs would be an unused one there.
+    use exportsnap::export::chat_media::MissingMedia;
+
+    let workspace = Workspace::new();
+    let mut manifest = workspace.open();
+    let file = bare("2021-03-04", 1);
+    let token = file.id.clone();
+    // Exactly what loosening `parse_history_token` would let `reconcile` build.
+    let overlapping = Reconciliation {
+        items: vec![ChatMediaItem { media: ChatMedia { file, overlay: None }, join: Join::Unnamed }],
+        missing: vec![MissingMedia { token, message: MessageRef { conversation: 0, message: 0 }, reason: MissingReason::NoFile }],
+        unparsed_tokens: Vec::new(),
+        unparsed: Vec::new(),
+        duplicates: Vec::new(),
+        unreadable: Vec::new(),
+    };
+
+    let _ = overlapping.enroll(&mut manifest);
 }

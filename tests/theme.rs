@@ -297,4 +297,7 @@ fn the_status_pill_colors_follow_the_manifest_statuses() {
     assert_eq!(palette.status_pill(ItemStatus::Done), palette.success);
     assert_eq!(palette.status_pill(ItemStatus::Failed), palette.danger);
     assert_eq!(palette.status_pill(ItemStatus::SourceMissing), palette.warning);
+    // Neutral, and for the opposite reason to `pending`: a retired row is not the start of some
+    // work, it is a row the export stopped naming, so there is nothing for a reader to act on.
+    assert_eq!(palette.status_pill(ItemStatus::Retired), palette.text_dim);
 }
