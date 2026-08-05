@@ -21,12 +21,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest, ManifestError, NewItem};
 use crate::export::model::{DownloadUrl, MediaKind, Memories, Memory, Timestamp, fixed_width, in_range, split_three};
+use crate::export::walk::{Walk, walk};
+
+pub use crate::export::walk::UnreadableDir;
 
 /// The directory name media discovery walks for, at any depth under the source root.
 ///
@@ -366,27 +368,6 @@ pub struct Discovery {
     pub unreadable: Vec<UnreadableDir>,
 }
 
-/// A directory the walk skipped, and the class of reason.
-///
-/// [`io::ErrorKind`] rather than the whole [`io::Error`] so [`Discovery`] can stay `Clone` and
-/// `PartialEq`, which is what lets a test assert two walks agree. The kind is the half that decides
-/// what a reader does next: `PermissionDenied` is a dir to leave alone, anything else is worth
-/// looking at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnreadableDir {
-    pub dir: PathBuf,
-    pub kind: io::ErrorKind,
-}
-
-impl fmt::Display for UnreadableDir {
-    /// Renders the kind through [`io::Error`], because [`io::ErrorKind`] has no `Display` of its own
-    /// and its `Debug` spelling (`PermissionDenied`) is a type name rather than something to put in
-    /// front of a reader.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.dir.display(), io::Error::from(self.kind))
-    }
-}
-
 impl Discovery {
     /// The pairing pass on its own, split from the walk so it can be driven without a filesystem.
     ///
@@ -509,60 +490,8 @@ impl Error for ScanError {
 /// Returns [`ScanError`] when `root` cannot be listed.
 pub fn discover(root: impl AsRef<Path>) -> Result<Discovery, ScanError> {
     let root = root.as_ref();
-    let mut queue = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    let mut unparsed = Vec::new();
-    let mut unreadable = Vec::new();
-
-    while let Some(dir) = queue.pop() {
-        let inside_memories = dir.file_name().and_then(OsStr::to_str) == Some(MEMORIES_DIR);
-        let listing = match fs::read_dir(&dir) {
-            Ok(listing) => listing,
-            Err(source) if dir == root => return Err(ScanError { dir, source }),
-            Err(source) => {
-                unreadable.push(UnreadableDir { dir, kind: source.kind() });
-                continue;
-            }
-        };
-        for entry in listing {
-            // An entry that cannot be read mid-listing retires the rest of this dir the same way,
-            // rather than the rest of the walk.
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(source) => {
-                    unreadable.push(UnreadableDir { dir: dir.clone(), kind: source.kind() });
-                    break;
-                }
-            };
-            // `DirEntry::file_type` answers about the link rather than its target, so no symlink is
-            // ever descended. `zip::discover_parts` can afford `Path::is_dir` because it never
-            // recurses; this cannot. With `is_dir` here, a link pointing at its own ancestor is
-            // re-entered until the kernel refuses to resolve any more of them, so the walk
-            // rediscovers every memory below it around forty times over and reports them as
-            // duplicates of each other. The bound is `MAXSYMLINKS` (ELOOP at 41 components,
-            // measured), not path length — 603 characters against a 4096 `PATH_MAX` — so it
-            // terminates in under a millisecond and no timeout can see it. That is exactly why it
-            // needs a test rather than a comment. Pinned by
-            // `a_symlink_loop_does_not_make_the_walk_re_enter_itself`.
-            let kind = match entry.file_type() {
-                Ok(kind) => kind,
-                Err(source) => {
-                    unreadable.push(UnreadableDir { dir: dir.clone(), kind: source.kind() });
-                    break;
-                }
-            };
-            let path = entry.path();
-            if kind.is_dir() {
-                queue.push(path);
-            } else if inside_memories {
-                match MemoryFile::parse(&path) {
-                    Some(file) => files.push(file),
-                    None => unparsed.push(path),
-                }
-            }
-        }
-    }
-
+    let Walk { files, unparsed, unreadable } =
+        walk(root, MEMORIES_DIR, |path| MemoryFile::parse(path)).map_err(|source| ScanError { dir: root.to_path_buf(), source })?;
     Ok(Discovery::from_walk(files, unparsed, unreadable))
 }
 

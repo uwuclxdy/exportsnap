@@ -16,7 +16,13 @@
 //! that keeps `mp4ameta` off its chapter legs), [`ffmpeg`] is the only thing that touches video
 //! pixels, and [`local_fix`] is the pass that drives all of them and records the outcome in
 //! [`manifest`].
+//!
+//! Phase 3 starts at [`chat_media`], which does for a `chat_media` dir what [`memories`] does for a
+//! `memories` one and shares the directory walk both need. What it does NOT share is the join: a
+//! chat-media filename carries an id, so the pairing is a stem match and the history join is a
+//! string equality, with none of the date bucketing memories has to fall back on.
 
+pub mod chat_media;
 pub mod env;
 pub mod exif;
 pub mod ffmpeg;
@@ -29,6 +35,7 @@ pub mod overlay;
 pub mod schema;
 pub mod timezone;
 pub mod video;
+mod walk;
 pub mod zip;
 
 use std::error::Error;
