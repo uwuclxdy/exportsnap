@@ -234,10 +234,16 @@ fn press(app: &mut App, code: KeyCode) {
     app.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
 }
 
+/// Bounded for the reason `chat_media_screen.rs`'s `on_tab` spells out in full: `→` is inert while
+/// a pane is descended, so an unbounded walk from a descended screen never terminates.
 fn on_memories(app: &mut App) {
-    while app.active() != exportsnap::app::Tab::Memories {
+    for _ in 0..=exportsnap::app::Tab::ALL.len() {
+        if app.active() == exportsnap::app::Tab::Memories {
+            return;
+        }
         press(app, KeyCode::Right);
     }
+    panic!("could not reach the memories tab from {:?}: is a pane descended and trapping the arrows?", app.active());
 }
 
 fn row(buffer: &Buffer, y: u16) -> String {
@@ -550,16 +556,52 @@ fn the_form_caret_walks_all_rows_and_enter_acts_on_toggle_and_start() {
     assert!(app.memories().is_transcode_on());
 }
 
-/// Ticks until an alert lands, bounded — a worker's Finished event arrives asynchronously.
+/// Ticks until an alert lands, bounded by WALL CLOCK rather than by an iteration count.
+///
+/// The distinction is not pedantry. A 500-iteration budget at 2 ms is not really denominated in
+/// iterations: the sleep barely moves under contention, so the budget is a fixed deadline worth
+/// 1.03 s unloaded, 1.16 s at 5x CPU oversubscription and 1.6 s starved on a single shared core.
+/// The worker's completion time carries no such ceiling, and a full-suite run under load has put
+/// these tests at 0.93 s against that ~1 s bound. So the old shape ran out exactly when the box
+/// was slow enough to be worth waiting for, and it failed as "no alert arrived" — the assertion
+/// under test — rather than as the timeout it actually was. The bound below stays generous because
+/// its only job is to stop a hang, and a hang is what a bug here looks like.
 fn wait_for_alert(app: &mut App) {
-    for _ in 0..500 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         app.tick();
         if app.memories().alert().is_some() {
             return;
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-    panic!("no alert arrived within the wait");
+    panic!("no alert arrived within 60s: the worker never sent a Finished event");
+}
+
+/// A worker slower than the old iteration budget still gets waited for.
+///
+/// This is the only thing separating the wall-clock bound from the iteration count it replaced:
+/// every other test's worker finishes in tens of milliseconds, so both shapes pass them. The stall
+/// is 3 s against a budget measured at 1.03 s unloaded and 1.6 s starved on a shared core — a
+/// 1.9x margin, which keeps this green on a loaded box while still reddening if the bound goes
+/// back to counting iterations.
+#[test]
+fn a_worker_slower_than_the_old_iteration_budget_still_lands_its_alert() {
+    let dir = export_tree("slow-worker", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    let mut app = app_on_memories(&dir);
+    app.memories_mut().start_run_with(
+        |_inputs, _sender| {
+            std::thread::sleep(Duration::from_secs(3));
+            panic!("a worker that outlives the old budget");
+        },
+        None,
+    );
+    // Vacuity guard: nothing has landed yet, so the wait below is what produces the alert.
+    assert!(app.memories().alert().is_none());
+
+    wait_for_alert(&mut app);
+    let alert = app.memories().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
 }
 
 #[test]
@@ -716,8 +758,11 @@ fn enter_on_a_static_row_descends_only_when_a_table_exists() {
     assert!(!app.memories().descended());
     assert!(app.memories().run_in_flight());
 
-    // Wait for the plan so the table exists; a fresh run's enter then descends.
+    // Wait for the plan so the table exists; a fresh run's enter then descends. The alert is what
+    // the wait above is for, so check it landed rather than leaning on it silently — a helper that
+    // gave up would otherwise leave `descended()` true off the plan alone and read as a pass.
     wait_for_alert(&mut app);
+    assert!(app.memories().alert().is_some(), "the wait above must have produced the alert it waited for");
     press(&mut app, KeyCode::Enter);
     assert!(app.memories().descended(), "with a table live, enter on a static row descends");
 }

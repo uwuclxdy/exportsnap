@@ -754,11 +754,13 @@ fn a_failing_chat_item_keeps_its_conversation_out_of_the_alert() {
 /// Ticks until an alert lands, bounded by WALL CLOCK rather than by an iteration count.
 ///
 /// The distinction is not pedantry. A run here encodes real images on a worker thread while nextest
-/// runs the rest of the suite in parallel, so an iteration budget is a budget in units of "how busy
-/// the box is" — measured, a count of 500 at 2 ms reds under load while the run finishes fine a
-/// second later, and the resulting failure reads as the assertion under test rather than as a
-/// timeout. The bound stays generous because its only job is to stop a hang, and a hang is what a
-/// bug here looks like.
+/// runs the rest of the suite in parallel, so how long the worker takes moves with the box. An
+/// iteration count does not move with it: the 2 ms sleep barely stretches under contention, so
+/// counting to 500 is a fixed deadline of about a second rather than a budget that scales with the
+/// thing it bounds (the pin below carries the measurements). Those two together are the bug — the
+/// count ran out precisely when the box was slow enough to be worth waiting for, and the failure
+/// read as the assertion under test rather than as the timeout it was. The bound stays generous
+/// because its only job is to stop a hang, and a hang is what a bug here looks like.
 fn wait_for_alert(app: &mut App) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
@@ -769,6 +771,32 @@ fn wait_for_alert(app: &mut App) {
         std::thread::sleep(Duration::from_millis(2));
     }
     panic!("no alert arrived within 60s: the worker never sent a Finished event");
+}
+
+/// A worker slower than the old iteration budget still gets waited for.
+///
+/// This is the only thing separating the wall-clock bound from the iteration count it replaced:
+/// every other test's worker finishes in tens of milliseconds, so both shapes pass them. The stall
+/// is 3 s against a budget measured at 1.03 s unloaded and 1.6 s starved on a shared core — a
+/// 1.9x margin, which keeps this green on a loaded box while still reddening if the bound goes
+/// back to counting iterations.
+#[test]
+fn a_worker_slower_than_the_old_iteration_budget_still_lands_its_alert() {
+    let dir = export_tree(&[], &[]);
+    let mut app = app_on_export(&dir);
+    app.chat_media_mut().start_run_with(
+        |_inputs, _sender| {
+            std::thread::sleep(Duration::from_secs(3));
+            panic!("a worker that outlives the old budget");
+        },
+        None,
+    );
+    // Vacuity guard: nothing has landed yet, so the wait below is what produces the alert.
+    assert!(app.chat_media().alert().is_none());
+
+    wait_for_alert(&mut app);
+    let alert = app.chat_media().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
 }
 
 /// The screen-driven run honours the cycle row: switching to `originals` before pressing start means
