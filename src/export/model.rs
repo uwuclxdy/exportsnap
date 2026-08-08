@@ -185,7 +185,7 @@ impl Error for ParseError {}
 
 // ---- validated primitives ----
 
-/// A UTC instant as the export spells it, with every component inside its calendar range.
+/// A UTC instant as the export spells it, with every component inside its own range.
 ///
 /// Field order makes the derived `Ord` chronological.
 ///

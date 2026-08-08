@@ -166,9 +166,9 @@ pub enum TimeSource {
     /// one thing in either chain with no twin on the other side. Which of the two it came from is
     /// not carried, because both are the same record speaking and
     /// [`super::chat_media::ChatMediaItem::date`] has already chosen between them. Kept apart from
-    /// [`Self::Entry`]
-    /// rather than reworded to cover both, because the two are different records in different files
-    /// and a user reading "the memory's own entry" against a chat photo learns something false.
+    /// [`Self::Entry`] rather than reworded to cover both, because the two are different records in
+    /// different files and a user reading "the memory's own entry" against a chat photo learns
+    /// something false.
     Message,
     /// The `-main` file's own metadata: an image's `DateTimeOriginal`, `CreateDate` or
     /// `ModifyDate`, a video's `mvhd` creation time.
