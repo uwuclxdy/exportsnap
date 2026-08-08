@@ -618,15 +618,19 @@ impl Conversations {
 /// output was written into, so the rewrite goes back where it was instead of starting a second
 /// directory for the same thread.
 ///
-/// **One consequence worth stating, because it moves an output path.** Withholding the overlay is
-/// what [`OverlayMode::Originals`] does, and [`local_fix::passes_through`] reads exactly that field,
-/// so a PNG main that pairs comes out `.png` under `originals` and `.jpg` under the other two. That
-/// is decision 47's own rule one mode over — nothing is re-encoded when there is nothing to
-/// re-encode it for — and it is right rather than incidental. It is also unreachable from the
-/// observed export, where only the zip family pairs and every zip main is a video. What it costs if
-/// a future export makes it reachable is the residual the per-ITEM ordinal below still carries, which
-/// is the same shape [`RecordedDirs`] answers one layer up and is NOT answered by it: `taken` is a
-/// position in this plan too, and nothing reads it back off the manifest.
+/// **A mode no longer moves an output PATH, and that is a change rather than a fact that was always
+/// true.** It used to: `local_fix`'s pass-through predicate folded in `SourceMedia::overlay`, which
+/// [`OverlayMode::Originals`] withholds, so a PNG main that pairs came out `.png` under `originals`
+/// and `.jpg` under the other two. Task 45 sends a composited alpha-capable main to PNG as well, so
+/// [`local_fix::needs_its_own_format`] reads the extension alone and all three modes land at the same
+/// NAME. What a mode still decides is the file at that name — `originals` withholds the layer, so
+/// the pass copies the main byte for byte while `merged` and `both` burn the caption in — and, for
+/// two of the three, the copies kept beside it. Unreachable from the observed export either way,
+/// where only the zip family pairs and every zip main is a video.
+///
+/// What survives that is the per-ITEM ordinal below, which is the same shape [`RecordedDirs`] answers
+/// one layer up and is NOT answered by it: `taken` is a position in this plan too, and nothing reads
+/// it back off the manifest.
 ///
 /// **That one is measured rather than argued, and it loses bytes.** Two items landing in one
 /// directory on one second take `<stem>.<ext>` and `<stem>_2.<ext>`; the first leaves the export
@@ -706,7 +710,7 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
             None => no_conversation.join(local.format("%Y").to_string()).join(local.format("%m").to_string()),
         };
         let stem = local.format("%Y%m%d_%H%M%S").to_string();
-        // The RESOLVED extension, so decision 47's copied-through PNGs and the JPEGs beside them
+        // The RESOLVED extension, so the PNGs that keep their own format and the JPEGs beside them
         // key their collisions on the names they actually take.
         let extension = local_fix::output_extension(leg, &media);
         let ordinal = taken.entry(dir.join(format!("{stem}.{extension}"))).or_default();

@@ -23,7 +23,10 @@
 //!
 //! # Images and videos take different routes to the same place
 //!
-//! An image is composited and stamped entirely in pure Rust and lands as a JPEG. A video's
+//! An image is composited and stamped entirely in pure Rust and lands as a JPEG, unless its own
+//! format CAN carry an alpha channel JPEG would drop — read off the extension, never off the pixels
+//! — in which case it keeps that format and is not stamped at all ([`needs_its_own_format`],
+//! [`Notice::NotStamped`]). A video's
 //! **metadata is written in pure Rust too**, always, whatever else happened to it — one metadata
 //! code path, one set of properties. What differs is the pixels:
 //!
@@ -86,21 +89,23 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 /// Extensions the image leg reads. A main outside this set is deferred rather than attempted.
 ///
 /// **The ceiling, and its upgrade path.** The image leg admits exactly these three today, and adding
-/// a fourth is not one edit — it needs two separate answers, because they have different
-/// user-visible outcomes:
+/// a fourth needs one answer: **does JPEG lose something this format carries?** That is
+/// [`ALPHA_CAPABLE_EXTENSIONS`], and it decides whether the output keeps the source's own format or
+/// becomes a JPEG.
 ///
-/// 1. **Does it copy through?** That is [`PASS_THROUGH_EXTENSIONS`], and it decides whether the
-///    output keeps the source's own format and bytes or becomes a JPEG.
-/// 2. **Can this build stamp it?** That is whether [`crate::export::exif`] can write metadata into
-///    it at all, which today means "is it a JPEG" and nothing else.
+/// The second question this paragraph used to ask — **can this build stamp it?** — is no longer
+/// independent of the first. [`crate::export::exif`] writes metadata into a JPEG and nothing
+/// else, so a format that keeps its own format is unstampable BY THAT FACT, and the run says so per
+/// item ([`Notice::NotStamped`]). The implication runs one way only: a format that answers "no"
+/// above becomes a JPEG and is stamped like the rest, and it stops holding at all the day
+/// `crate::export::exif` learns a second container.
 ///
-/// **Today's three answer the pair as a package only by coincidence**: `jpg`/`jpeg` are stamped and
-/// not copied through, `png` is copied through and not stamped. A fourth could want both — a format
-/// this build learns to write metadata into — or neither, in which case it belongs nowhere near this
-/// list and stays deferred at [`Leg::of`]. Reading the current pairing as a rule is the mistake this
-/// paragraph exists to stop.
+/// **What used to be here read the two as independent, and it was right when it was written**:
+/// `jpg`/`jpeg` were stamped and re-encoded while `png` was copied through and unstampable, a
+/// matched pair no rule produced. Task 45 supplied the rule, so what was a coincidence is now a
+/// consequence.
 ///
-/// A format added here but NOT to [`PASS_THROUGH_EXTENSIONS`] reaches [`crate::export::exif::Jpeg`]
+/// A format added here but NOT to [`ALPHA_CAPABLE_EXTENSIONS`] reaches [`crate::export::exif::Jpeg`]
 /// and is refused by name, one item at a time. That failure is chosen: the alternative is silently
 /// re-encoding a format nobody validated into a JPEG and keeping no original, which is the defect
 /// class decision 47 exists to close, one format over.
@@ -109,22 +114,60 @@ const IMAGE_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
 /// Extensions the video leg reads.
 const VIDEO_EXTENSIONS: [&str; 1] = ["mp4"];
 
-/// The image formats this build copies through under their OWN extension instead of as a JPEG.
+/// The image formats whose output keeps the SOURCE's own format instead of becoming a JPEG, because
+/// JPEG cannot represent the alpha channel they can.
 ///
-/// The question is whether the OUTPUT is still a JPEG, not whether the bytes are re-encoded — a
-/// `.jpg` main with no overlay is copied through too, and is still stamped. A `.png` cannot be,
-/// because this build writes EXIF only into a JPEG.
+/// **Read off the EXTENSION and never off the pixels, deliberately.** Every output path is decided
+/// before a byte is read (see [`output_extension`]), so a decode is not available at plan time; a
+/// format that CAN carry alpha therefore keeps its format whether or not this file uses the channel.
+/// A fully opaque PNG comes out a PNG, **and that is not free**: it costs the whole stamp — capture
+/// date, GPS, sender, conversation — because [`crate::export::exif`] writes into a JPEG and nothing
+/// else, so the date reaches the file's own mtime and nothing else reaches it at all. Taken anyway,
+/// because the alternative is a decode at plan time, and the error it trades against is worse and
+/// silent: a transparent main flattened onto black with the manifest recording the run finished.
+/// [`Notice::NotStamped`] reports the trade per item rather than leaving it to be found.
+///
+/// The question is about the OUTPUT'S FORMAT, not about whether the bytes are re-encoded — a `.jpg`
+/// main with no overlay is copied byte for byte too, and is still stamped, and it is not in this
+/// list because its format is already the leg's default.
 ///
 /// **Read as a membership set and nowhere as a position.** It used to be indexed for the output
 /// extension, which made its LENGTH load-bearing at a call site that never mentioned the length: the
 /// two readings agreed only while it held exactly one member, and a second one added at the front
-/// would have had [`output_extension`] answer with the wrong format's name while `passes_through`
-/// admitted the right one. [`output_extension`] now takes the item's own extension instead, so this
-/// may grow at either end and nothing downstream moves.
+/// would have had [`output_extension`] answer with the wrong format's name while the predicate
+/// admitted the right one. [`output_extension`] now takes the item's own extension instead, so IT no
+/// longer moves when this does.
 ///
-/// Growing it is the FIRST of the two questions [`IMAGE_EXTENSIONS`] sets out; a format has to be in
-/// that list to reach this one at all.
-const PASS_THROUGH_EXTENSIONS: [&str; 1] = ["png"];
+/// **The length is load-bearing again one layer up, so this list may not grow until that is closed.**
+/// [`fix_image`]'s arm picks its encoder off this predicate's BOOLEAN and calls
+/// [`crate::export::overlay::compose_png`], which hardcodes PNG. A second member would therefore have
+/// [`output_extension`] name that member's format while PNG bytes were written under it and
+/// `mark_done` recorded the item finished — the same defect the paragraph above records, resurrected
+/// at a different call site rather than fixed everywhere. The upgrade path is one edit and it is not
+/// in this constant: `fix_image` has to choose its encoder off the RESOLVED extension, and refuse by
+/// name a format it has no encoder for, the way [`crate::export::exif::Jpeg`] refuses one. Until
+/// then `png` alone is what makes that arm's claims true, and it is a cap rather than a coincidence.
+///
+/// **The cap is compiler-held, and the assertion below is what holds it.** The array's own length
+/// type does not do it alone: bumping the length alongside the new member builds clean (measured
+/// 2026-08-09), which by this repo's own test leaves a prose cap a convention rather than a
+/// guarantee.
+///
+/// Growing it is the one question [`IMAGE_EXTENSIONS`] sets out; a format has to be in that list to
+/// reach this one at all.
+const ALPHA_CAPABLE_EXTENSIONS: [&str; 1] = ["png"];
+
+/// The cap above, held by the compiler rather than by whoever reads the paragraph stating it.
+///
+/// Same instrument as the TUI's row-fit invariants (`overview.rs`, `memories.rs`, `chat_media.rs`),
+/// for the reason `overview.rs` gives at its own: the constraint belongs in a compile-time assertion
+/// "rather than left as arithmetic in a comment". The message is the entire explanation anyone gets
+/// at the moment they hit it, so it names the two things that have to change together rather than
+/// pointing at a doc.
+const _: () = assert!(
+    ALPHA_CAPABLE_EXTENSIONS.len() == 1,
+    "fix_image's arm hardcodes compose_png; a second member needs the encoder picked off the resolved extension first"
+);
 
 /// What a transcode writes before the finished file replaces it.
 ///
@@ -279,11 +322,10 @@ impl Leg {
     /// The extension every one of this leg's outputs carries.
     ///
     /// **The default, not the whole answer for the image leg** — [`output_extension`] is, and it is
-    /// what every output path and every collision key goes through. An image that is composited or
-    /// re-encoded comes out as JPEG whatever went in, which is also what keeps a PNG out of
-    /// `little_exif` (see [`crate::export::exif`]); a PNG with nothing to composite is copied through
-    /// under its own extension instead, per decision 47. Videos come out as MP4 whether they were
-    /// re-encoded or copied, since both routes end in an MP4 container.
+    /// what every output path and every collision key goes through. An image whose format JPEG can
+    /// hold comes out as a JPEG whatever it went in as; one whose format CAN carry alpha keeps that
+    /// format, composited or copied alike, per [`needs_its_own_format`]. Videos come out as MP4
+    /// whether they were re-encoded or copied, since both routes end in an MP4 container.
     #[must_use]
     pub const fn extension(self) -> &'static str {
         match self {
@@ -574,7 +616,7 @@ impl Plan {
 
             // Keyed by the whole file name rather than the stem: two memories collide only when
             // they would land on one path, and a video and an image on the same second do not. The
-            // extension is the RESOLVED one, so a copied-through PNG and a stamped JPEG on the same
+            // extension is the RESOLVED one, so a PNG kept as a PNG and a stamped JPEG on the same
             // second do not claim each other's suffix.
             let stem = capture.local.format("%Y%m%d_%H%M%S").to_string();
             let extension = output_extension(leg, &source);
@@ -664,22 +706,36 @@ pub(crate) fn embedded(leg: Leg, media: &SourceMedia, location: Option<LocationP
     }
 }
 
-/// Whether this item's bytes are copied through under their own extension rather than becoming a
-/// JPEG.
+/// Whether this item's output has to be written in the SOURCE's own format rather than as this
+/// leg's default, because the default would drop something the source carries.
 ///
-/// **Decision 47**: a PNG with nothing to composite is not re-encoded, so its transparency survives
-/// — `image`'s flatten drops the alpha channel rather than compositing it, and with no main behind
-/// the layer there is nothing for it to show through to. That is the rule the video leg already
-/// follows: nothing is touched when there is nothing to touch it for.
+/// **Decision 47 and task 45.** JPEG has nowhere to put an alpha channel, and `image`'s flatten
+/// DISCARDS that channel rather than compositing it, so a main carrying transparency comes out as
+/// whatever RGB sat under `alpha = 0` — black, for everything the export ships. That is true of a
+/// main with no layer over it and of one with a layer over it alike: what an OVERLAY leaves
+/// transparent shows the main through, and what the MAIN leaves transparent has nothing behind it
+/// either way.
+///
+/// **This answers ONE of the two questions one predicate used to answer for both call sites**, and
+/// the other is deliberately not a predicate at all. This one is about the output's FORMAT: not
+/// whether the bytes are re-encoded, and not whether the item is stamped. A `.jpg` main answers
+/// `false` and still comes out `.jpg`, because the leg's default already IS its format and nothing
+/// has to be kept.
+///
+/// The other question — are the output's bytes the source's own, verbatim — belongs to [`fix_image`]
+/// and is answered there by matching [`SourceMedia::overlay`] with the layer in hand, which is a
+/// thing that cannot drift out of step with this. It used to be folded in here as
+/// `media.overlay.is_none()`, and the two answers agreed only while every alpha-capable main that
+/// paired was re-encoded to JPEG; a composited PNG keeps its format and is NOT a verbatim copy, so
+/// one predicate read two ways would now be wrong at one of its call sites.
 ///
 /// **Both the plan and [`fix_image`] ask this one function**, which is what keeps the extension a
 /// name claims and the bytes that land under it from disagreeing. The plan needs it because every
 /// output path AND every collision key is decided before a byte is written; `fix_image` needs it
-/// because it decides whether to encode. Pinned at both call sites rather than only here: a fixture
-/// with a lone PNG and one with a lone JPEG make the two answers differ.
+/// because it decides which encoder runs. Pinned at both call sites rather than only here.
 #[must_use]
-pub(crate) fn passes_through(leg: Leg, media: &SourceMedia) -> bool {
-    leg == Leg::Image && media.overlay.is_none() && matches(&media.extension, &PASS_THROUGH_EXTENSIONS)
+pub(crate) fn needs_its_own_format(leg: Leg, media: &SourceMedia) -> bool {
+    leg == Leg::Image && matches(&media.extension, &ALPHA_CAPABLE_EXTENSIONS)
 }
 
 /// The extension an item's output carries.
@@ -688,9 +744,16 @@ pub(crate) fn passes_through(leg: Leg, media: &SourceMedia) -> bool {
 /// depend on it: an extension decided later would let two items that collide stop colliding, which
 /// moves a `_2` suffix between runs.
 ///
-/// The pass-through arm answers with the item's OWN extension rather than with a member of
-/// [`PASS_THROUGH_EXTENSIONS`], so that list's length is not load-bearing here — see the constant for
-/// what indexing it cost. **Normalized to lower case**, which is the load-bearing half of that: the
+/// **It reads the extension and never the overlay, which is a change rather than a fact that was
+/// always true.** While the predicate below folded in `overlay.is_none()`, withholding an overlay
+/// moved an output path — so [`super::chat_fix::OverlayMode::Originals`] landed a paired PNG at
+/// `.png` and the other two modes at `.jpg`. All three now agree on the NAME. What a mode still
+/// decides is the FILE at that name — `originals` withholds the layer, so the pass copies the main
+/// byte for byte instead of burning the caption in — and what is kept beside it.
+///
+/// The format-keeping arm answers with the item's OWN extension rather than with a member of
+/// [`ALPHA_CAPABLE_EXTENSIONS`], so that list's length is not load-bearing here — see the constant
+/// for what indexing it cost. **Normalized to lower case**, which is the load-bearing half of that: the
 /// membership test is ascii-case-insensitive, so a `.PNG` source is admitted, and answering with its
 /// own spelling would put `.PNG` in the output path while the same file spelled `.png` produced
 /// `.png`. Both planners key their collision map on this string, so a divergence there moves output
@@ -698,7 +761,7 @@ pub(crate) fn passes_through(leg: Leg, media: &SourceMedia) -> bool {
 /// `a_shouted_extension_is_normalized_rather_than_carried_into_the_output_path`.
 #[must_use]
 pub(crate) fn output_extension(leg: Leg, media: &SourceMedia) -> Cow<'_, str> {
-    if !passes_through(leg, media) {
+    if !needs_its_own_format(leg, media) {
         return Cow::Borrowed(leg.extension());
     }
     // Borrowed on the common path — every observed name is already lower case — and owned only when
@@ -804,9 +867,16 @@ pub enum Notice {
     /// anything writable here, so the coordinate was skipped rather than written where it would be
     /// read past. Unobserved on real memory videos, whose `©eng` sentinel is not one of these.
     LocationShadowed(LocationAtom),
-    /// Its bytes were copied through under their own extension, so it carries no capture metadata at
-    /// all — decision 47's PNG pass-through. The date still reaches the file's own modification
-    /// time; the sender and the conversation reach nothing.
+    /// It came out in its own format instead of as a JPEG, so it carries no capture metadata at all
+    /// — decision 47 for a main with nothing to composite, task 45 for one composited under an
+    /// overlay. The date still reaches the file's own modification time; the sender and the
+    /// conversation reach nothing.
+    ///
+    /// **One variant for both shapes, and that was a choice.** The two differ in how the bytes were
+    /// produced and in nothing a user can act on: same missing metadata, same date on the file
+    /// itself, same reason. A notice exists to say what someone got rather than which branch made
+    /// it, so a second variant would put an extra arm in every exhaustive match to carry a
+    /// distinction that never reaches a screen.
     ///
     /// Reported for the reason every notice is: an item finished with less repair than a fuller run
     /// could have given it is a thing a user gets to be told, not to discover by opening the file.
@@ -829,8 +899,9 @@ impl fmt::Display for Notice {
                  ahead of anything this build can write, so a second one would be ignored"
             ),
             Self::NotStamped => f.write_str(
-                "copied through as a PNG so its transparency survives, which means the capture date reached only the file's \
-                 own date and the sender and conversation reached nothing: this build writes that metadata into JPEG alone",
+                "kept in its own format, which is what preserves any transparency it carries, so the capture date reached \
+                 only the file's own date and the sender and conversation reached nothing: this build writes that metadata \
+                 into JPEG alone",
             ),
         }
     }
@@ -961,8 +1032,8 @@ fn keep_originals(item: &PlannedItem) -> Result<(), FixError> {
     Ok(())
 }
 
-/// The pure-Rust leg: composite the overlay in, stamp the EXIF, write a JPEG — or, for a PNG with
-/// nothing to composite, copy the bytes through untouched.
+/// The pure-Rust leg: composite the overlay in, stamp the EXIF, write a JPEG — or, for a main whose
+/// own format CAN carry an alpha channel, write that format and stamp nothing.
 ///
 /// The output directory is made last, right before the write, so a failure earlier leaves no empty
 /// year and month behind. The video leg cannot do the same, since ffmpeg needs somewhere to mux
@@ -970,32 +1041,44 @@ fn keep_originals(item: &PlannedItem) -> Result<(), FixError> {
 ///
 /// Returns what the item was finished without. See [`Notice`].
 fn fix_image(item: &PlannedItem) -> Result<Vec<Notice>, FixError> {
-    // Decision 47. Nothing is composited, so nothing is re-encoded and the alpha survives: `image`'s
-    // flatten DROPS the alpha channel rather than compositing it, and with no main behind the layer
-    // there is nothing for a transparent region to show through to, so it would land as whatever RGB
-    // happened to sit under `alpha = 0`.
+    // Decision 47 and task 45: the main's own transparency survives, whether or not a caption is
+    // drawn over it. `image`'s flatten DISCARDS the alpha channel rather than compositing it, so
+    // either shape would otherwise land as whatever RGB sat under `alpha = 0`.
     //
-    // **No metadata call on this path, deliberately and by construction.** `Jpeg` never sees these
-    // bytes, so no `little_exif` entry point is reachable from here under any spelling — which is
-    // what keeps RUSTSEC-2026-0194 unreachable rather than merely unobserved. See `exif.rs`'s
-    // `library` module doc before adding anything to this branch.
-    if passes_through(item.leg, &item.media) {
-        let bytes = fs::read(&item.media.main).map_err(|source| FixError::Read { path: item.media.main.clone(), source })?;
+    // **The verbatim question is answered HERE, by the `Option` and not by a predicate.** A lone
+    // main is copied byte for byte, so it keeps its own format whatever that format is; a paired one
+    // is composited and re-encoded losslessly, and `compose_png` hardcodes PNG. So the bytes agree
+    // with the extension the plan committed to only while `ALPHA_CAPABLE_EXTENSIONS` holds `png`
+    // alone — that constant carries the cap and the one edit that lifts it. What the `Option` buys
+    // unconditionally is different and smaller: the verbatim answer cannot DRIFT from the
+    // format answer, because only one of the two is a predicate.
+    //
+    // **No metadata call on either shape, deliberately.** No `Jpeg` value is constructed in this
+    // block, so nothing here reaches `little_exif` at all. That is the whole of what this branch
+    // contributes, and it is a property of one function body that a reader can check. What makes
+    // RUSTSEC-2026-0194 unreachable is a separate and stronger argument with a compiler half and a
+    // convention half that must not be run together — `exif.rs`'s `library` module doc states both
+    // and is the only place either should be read from. Read it before adding anything here.
+    if needs_its_own_format(item.leg, &item.media) {
+        let bytes = match item.media.overlay.as_deref() {
+            Some(overlay) => overlay::compose_png(&item.media.main, overlay)?,
+            None => fs::read(&item.media.main).map_err(|source| FixError::Read { path: item.media.main.clone(), source })?,
+        };
         make_parent(&item.output)?;
         fs::write(&item.output, &bytes).map_err(|source| FixError::Create { path: item.output.clone(), source })?;
         return Ok(vec![Notice::NotStamped]);
     }
 
     // Matched on the overlay itself rather than on a predicate, so the composite arm can only be
-    // reached with an overlay in hand — which is what let `overlay::compose` drop its `Option`.
+    // reached with an overlay in hand — which is what let `overlay::composite` drop its `Option`.
     let bytes = match item.media.overlay.as_deref() {
-        Some(overlay) => overlay::compose(&item.media.main, overlay)?,
+        Some(overlay) => overlay::compose_jpeg(&item.media.main, overlay)?,
         // No overlay, so nothing is composited and re-encoding would spend a generation of lossy
         // compression for nothing; the copy is also what keeps whatever EXIF the source carried
         // around for `stamp` to read and preserve.
         //
         // Everything reaching this arm is already a JPEG, which is why there is no extension check:
-        // `Leg::of` admits `jpg`, `jpeg` and `png` alone, and `passes_through` answered `png`
+        // `Leg::of` admits `jpg`, `jpeg` and `png` alone, and `needs_its_own_format` took `png`
         // above. A fourth image format added to that list would arrive here and be refused by
         // `Jpeg::new` below, naming the file — a loud per-item failure rather than a silent
         // re-encode of a format nobody validated.

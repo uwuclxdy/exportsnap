@@ -5,11 +5,23 @@
 //! two files share a uuid and [`crate::export::memories`] has already paired them; this module is
 //! the pixels.
 //!
-//! Everything here produces **JPEG bytes**, whatever went in. That is not an aesthetic choice: it
-//! is what keeps a PNG out of `little_exif`, where RUSTSEC-2026-0194 lives (see
-//! [`crate::export::exif`]). The 162 overlay files in the observed export all carry `.png` names,
-//! though 9 of them hold WebP payloads under that name (measured 2026-08-04); an overlay is a
-//! layer in a composite here, never a file that gets stamped.
+//! **Two encoders, one hardcoded format each, and neither takes a format argument.**
+//! [`compose_jpeg`] flattens the composite; [`compose_png`] keeps its alpha channel, for a main
+//! whose own format can carry one that JPEG would drop. **Which of the two runs is the CALLER's
+//! choice, and it is taken from a predicate rather than from the resolved extension**, so encoder
+//! and extension coincide only while that predicate admits a single format. The cap, and the one
+//! edit that lifts it, are recorded on `local_fix`'s `ALPHA_CAPABLE_EXTENSIONS`.
+//!
+//! **This module used to produce JPEG bytes whatever went in, and used to claim that was what kept
+//! a PNG out of `little_exif`. The claim was never what held the property, and it is false now as
+//! well.** Nothing here calls into `little_exif` under either encoder, so PNG bytes existing in this
+//! process cost that property nothing. What DOES hold it is stated in one place and deliberately not
+//! restated here — [`crate::export::exif`]'s `library` module doc, which separates a compiler half
+//! from a convention half that a shorter retelling fuses back together.
+//!
+//! The 162 overlay files in the observed export all carry `.png` names, though 9 of them hold WebP
+//! payloads under that name (measured 2026-08-04); an overlay is a layer in a composite here, never
+//! a file that gets stamped.
 
 use std::error::Error;
 use std::fmt;
@@ -18,17 +30,63 @@ use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::{self, FilterType};
-use image::{ImageError, ImageReader, RgbaImage};
+use image::{ImageError, ImageFormat, ImageReader, RgbaImage};
 
 /// How much the re-encode is allowed to cost.
 ///
-/// Only the composite path pays it — a main with no overlay is copied byte for byte and never
-/// reaches this module. 95 is high enough that the re-encode is not the lossy step next to
-/// whatever compression Snapchat already applied; the cost is roughly a third more bytes than the
-/// crate's default 75, which for an archive of one's own photos is the right side of that trade.
+/// Only [`compose_jpeg`] pays it — [`compose_png`] is lossless and a main with no overlay is copied
+/// byte for byte without reaching this module at all. 95 is high enough that the re-encode is not
+/// the lossy step next to whatever compression Snapchat already applied; the cost is roughly a third
+/// more bytes than the crate's default 75, which for an archive of one's own photos is the right
+/// side of that trade.
 const JPEG_QUALITY: u8 = 95;
 
-/// `main` with `overlay` drawn over it, encoded as JPEG bytes.
+/// `main` with `overlay` drawn over it, flattened and encoded as JPEG bytes.
+///
+/// **The alpha channel is dropped here and that is only safe for a main JPEG could hold anyway.**
+/// `to_rgb8` does not composite the channel onto anything, it discards it, so whatever RGB sat under
+/// `alpha = 0` is what lands. For what the OVERLAY left transparent that is exactly right — the main
+/// is underneath it and shows through. For transparency the MAIN itself carries there is nothing
+/// underneath at all, and the caller routes those to [`compose_png`] instead.
+///
+/// **Stated ceiling: the caller routes on the main's NAME while [`decode`] reads its format from the
+/// CONTENT.** So a payload that carries alpha under a `.jpg` name still arrives here and is still
+/// flattened onto whatever sat under `alpha = 0`. Not hypothetical framing — this export is known to
+/// mislabel image payloads by extension, 9 of its 162 overlays holding WebP under `.png` names
+/// (measured 2026-08-04). Unchanged by task 45 and left open rather than closed: closing it needs a
+/// decode at plan time, which is exactly what deciding every output path up front rules out.
+///
+/// # Errors
+///
+/// Returns [`OverlayError`] when either file cannot be read or decoded, or when the composite
+/// cannot be encoded.
+pub fn compose_jpeg(main: &Path, overlay: &Path) -> Result<Vec<u8>, OverlayError> {
+    let flattened = image::DynamicImage::ImageRgba8(composite(main, overlay)?).to_rgb8();
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY).encode_image(&flattened).map_err(|source| OverlayError::Encode { source })?;
+    Ok(bytes)
+}
+
+/// `main` with `overlay` drawn over it, encoded as PNG bytes with the alpha channel intact.
+///
+/// For a main whose own format can carry transparency: the composite keeps four channels all the way
+/// to the encoder, so a region both layers left transparent comes out transparent rather than as the
+/// black that sat under it. Lossless, so unlike [`compose_jpeg`] this spends no generation of
+/// compression — what it costs instead is the capture metadata, since this build writes EXIF into a
+/// JPEG and nothing else, and the run reports that per item.
+///
+/// # Errors
+///
+/// Returns [`OverlayError`] when either file cannot be read or decoded, or when the composite
+/// cannot be encoded.
+pub fn compose_png(main: &Path, overlay: &Path) -> Result<Vec<u8>, OverlayError> {
+    let composited = composite(main, overlay)?;
+    let mut bytes = Vec::new();
+    composited.write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png).map_err(|source| OverlayError::Encode { source })?;
+    Ok(bytes)
+}
+
+/// The pixels both encoders share: `main` with `overlay` drawn over it, still RGBA.
 ///
 /// **There is always an overlay.** The parameter used to be optional, for a main that needed
 /// re-encoding with nothing to composite; decision 47 emptied that set — a lone `png` is copied
@@ -45,12 +103,7 @@ const JPEG_QUALITY: u8 = 95;
 /// there the caption is kept, never stretched or dropped (user pick 2026-08-04, agent call
 /// contain-vs-skip). Alpha is composited, so the transparent parts of the overlay leave the main
 /// showing through.
-///
-/// # Errors
-///
-/// Returns [`OverlayError`] when either file cannot be read or decoded, or when the composite
-/// cannot be encoded.
-pub fn compose(main: &Path, overlay: &Path) -> Result<Vec<u8>, OverlayError> {
+fn composite(main: &Path, overlay: &Path) -> Result<RgbaImage, OverlayError> {
     let mut base = decode(main)?;
 
     let drawn = decode(overlay)?;
@@ -72,14 +125,7 @@ pub fn compose(main: &Path, overlay: &Path) -> Result<Vec<u8>, OverlayError> {
     let x = i64::from(base.width() - drawn.width()) / 2;
     let y = i64::from(base.height() - drawn.height()) / 2;
     imageops::overlay(&mut base, &drawn, x, y);
-
-    // JPEG carries no alpha channel, so the composite is flattened before encoding. Anything the
-    // overlay left transparent already shows the main through it — which holds because there is
-    // always a main under the layer, the property decision 47's pass-through exists to keep true.
-    let flattened = image::DynamicImage::ImageRgba8(base).to_rgb8();
-    let mut bytes = Vec::new();
-    JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY).encode_image(&flattened).map_err(|source| OverlayError::Encode { source })?;
-    Ok(bytes)
+    Ok(base)
 }
 
 /// The pixel dimensions of an encoded image, read from its header rather than by decoding it.
@@ -117,7 +163,7 @@ fn decode(path: &Path) -> Result<RgbaImage, OverlayError> {
 pub enum OverlayError {
     /// A layer could not be read or is not an image this build decodes.
     Decode { path: PathBuf, source: ImageError },
-    /// The composite could not be encoded as a JPEG.
+    /// The composite could not be encoded, in whichever format the plan chose for it.
     Encode { source: ImageError },
 }
 

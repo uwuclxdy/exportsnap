@@ -74,13 +74,11 @@ fn main_colour(x: u32, y: u32) -> [u8; 3] {
 /// coefficient, which JPEG preserves closely, so the comparison is tight and the margin to the
 /// failure it must catch is about 125 on the chroma channels instead of single digits.
 fn assert_shows_main_through(composite: &RgbImage, label: &str) {
-    /// A block wholly inside the overlay's transparent half and away from its edge.
-    const BLOCK: [u32; 4] = [48, 8, 56, 16];
     /// Comfortably above the drift a preserved block mean shows and far below the ~125 that
     /// separates the main from black on green and blue.
     const TOLERANCE: f64 = 8.0;
 
-    let [left, top, right, bottom] = BLOCK;
+    let [left, top, right, bottom] = TRANSPARENT_BLOCK;
     let count = f64::from((right - left) * (bottom - top));
     let mut actual = [0.0; 3];
     let mut expected = [0.0; 3];
@@ -95,8 +93,44 @@ fn assert_shows_main_through(composite: &RgbImage, label: &str) {
     }
     for channel in 0..3 {
         let drift = actual[channel] - expected[channel];
-        assert!(drift.abs() <= TOLERANCE, "{label}: channel {channel} averaged {actual:?} over {BLOCK:?}, expected about {expected:?}");
+        assert!(
+            drift.abs() <= TOLERANCE,
+            "{label}: channel {channel} averaged {actual:?} over {TRANSPARENT_BLOCK:?}, expected about {expected:?}"
+        );
     }
+}
+
+/// The eight bytes every PNG opens with, so an output asserted to be one is checked against the
+/// container rather than against the name it was given.
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// A block wholly inside the overlay's TRANSPARENT half and away from its edge. Shared with
+/// [`assert_shows_main_through`]'s own block for the same reason it picked those coordinates.
+const TRANSPARENT_BLOCK: [u32; 4] = [48, 8, 56, 16];
+
+/// A block wholly inside the overlay's OPAQUE half and away from its edge, where a composite that
+/// ran paints the caption's red.
+const OPAQUE_BLOCK: [u32; 4] = [8, 8, 16, 16];
+
+/// The mean of one channel of an RGBA image over a block.
+///
+/// **A block mean rather than a lone subpixel, which is this repo's own recorded fix.** A single
+/// pixel threshold passed for both the correct result and the failure it existed to catch, because
+/// the fixture held the asserted channel near-constant across the two. Nothing about that trap is
+/// codec-specific, so the shape is kept even where the codec is lossless: on the PNG path the mean
+/// is exact, and the tolerance the callers pass exists to red a PARTIAL regression — a half-blended
+/// composite, or an encoder that dropped alpha over part of the block — rather than to absorb drift
+/// that cannot happen here.
+fn block_mean(image: &RgbaImage, channel: usize, block: [u32; 4]) -> f64 {
+    let [left, top, right, bottom] = block;
+    let count = f64::from((right - left) * (bottom - top));
+    let mut total = 0.0;
+    for y in top..bottom {
+        for x in left..right {
+            total += f64::from(image.get_pixel(x, y).0[channel]) / count;
+        }
+    }
+    total
 }
 
 /// Writes a JPEG main file into `dir/memories` and returns its parsed name.
@@ -613,7 +647,7 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
 fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
     // The dimensions the 2026-08-04 census found on real data: a 1440x2560 main with a
     // 1080x1920 overlay (38 of 161 real pairs, the modal image shape; see the local-fix
-    // section of docs/design.md). `compose` scales the overlay TO the main, so an unscaled
+    // section of docs/design.md). `composite` scales the overlay to fit WITHIN the main, so an unscaled
     // composite would leave the main's bottom 640 rows and right 360 columns unpainted —
     // which is what the low-row asserts below catch, since the fixture main's red channel
     // never rises past 40 while the overlay's opaque half is 255.
@@ -889,21 +923,31 @@ fn nothing_but_jpeg_bytes_can_be_handed_to_the_metadata_writer() {
     assert!(Jpeg::new(encoded).is_ok(), "the guard must not refuse what this build's own encoder writes");
 }
 
+/// Task 45. The rule reads the EXTENSION and never the pixels, so a PNG main carrying no
+/// transparency at all still keeps its own format under an overlay rather than being flattened into
+/// a stamped JPEG.
+///
+/// **This test used to assert the opposite** — `a_png_main_with_an_overlay_is_composited_so_the_
+/// metadata_writer_still_only_ever_sees_jpeg`. The old assertion was right for the old rule and the
+/// property it named was never the one holding the advisory shut: `little_exif` dispatches on the
+/// file type its caller passes, and nothing on this path passes one. What is asserted here instead
+/// is the fact that decides an output path, which is the thing a plan and a fix step can disagree
+/// about.
 #[test]
-fn a_png_main_with_an_overlay_is_composited_so_the_metadata_writer_still_only_ever_sees_jpeg() {
+fn an_opaque_png_main_under_an_overlay_keeps_its_own_format_because_the_rule_reads_the_extension() {
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
 
+    // Fully opaque, every pixel. Its red channel is 10, so the overlay's opaque red half is what
+    // tells a composite that ran from a byte-for-byte copy.
     let mut pixels = RgbaImage::new(WIDTH, HEIGHT);
     for pixel in pixels.pixels_mut() {
         *pixel = Rgba([10, 200, 30, 255]);
     }
     let path = memories_dir(dir.path()).join(format!("2021-01-15_{}-main.png", uuid(1)));
     pixels.save_with_format(&path, ImageFormat::Png).unwrap();
+    let source = fs::read(&path).unwrap();
 
-    // WITH an overlay, which is what keeps this on the composite path after decision 47 sent a LONE
-    // png through untouched. The property under test is unchanged and is the one that matters:
-    // whatever went in, `little_exif` is handed a JPEG and never a PNG.
     let files = vec![MemoryFile::parse(path).unwrap(), write_overlay(dir.path(), "2021-01-15", 1)];
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
@@ -913,9 +957,73 @@ fn a_png_main_with_an_overlay_is_composited_so_the_metadata_writer_still_only_ev
 
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
     let written = &plan.items[0].output;
-    assert_eq!(written.extension().unwrap(), "jpg");
-    assert_eq!(&fs::read(written).unwrap()[..3], &[0xff, 0xd8, 0xff], "the stamped output is a jpeg, never the png that went in");
-    assert!(report.notices.is_empty(), "a composited item is fully repaired: {:?}", report.notices);
+    assert_eq!(written.extension().unwrap(), "png");
+    assert_eq!(outputs(&plan, &out), ["2021/01/20210115_143005.png"]);
+    assert_eq!(&fs::read(written).unwrap()[..8], PNG_SIGNATURE, "the output is really a png, not a jpeg under a png name");
+
+    // Composited rather than copied: the caption reached the frame, and the bytes are not the
+    // source's own. Both are needed — the extension assertion above holds for the copy arm too.
+    let composite = image::open(written).unwrap().to_rgba8();
+    assert!((block_mean(&composite, 0, OPAQUE_BLOCK) - 255.0).abs() <= 1.0, "the overlay's opaque red half reached the frame");
+    assert_ne!(fs::read(written).unwrap(), source, "a composite is not the export's own bytes");
+
+    // Not stamped, because the output is not a JPEG — the cost task 45 accepted for this shape.
+    assert_eq!(report.notices.len(), 1, "{:?}", report.notices);
+    assert_eq!(report.notices[0].notice, Notice::NotStamped);
+}
+
+/// Task 45's own case: transparency the MAIN carries, under an overlay.
+///
+/// The old composite path ended in `to_rgb8`, which DISCARDS the alpha channel rather than
+/// compositing it — correct for what the overlay left transparent, since the main is underneath it,
+/// and wrong for what the main leaves transparent, where nothing is underneath and the stored RGB is
+/// what lands. Measured unreachable on the observed export (all 77 overlay-paired image mains are
+/// JPEG/RGB, and JPEG cannot carry alpha at all) and reachable in code, which is why it is pinned
+/// here rather than left to the census.
+#[test]
+fn a_png_main_whose_own_transparency_sits_under_an_overlay_keeps_it() {
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+
+    // Left half opaque `main_colour`, right half fully transparent with BLACK stored under
+    // `alpha = 0` — the exact colour a flatten leaves behind, so nothing asserted below can be
+    // satisfied by the defect it exists to catch. The overlay's own transparent half is the right
+    // half too, so `TRANSPARENT_BLOCK` is a region BOTH layers left transparent and the composite
+    // has to as well.
+    let mut pixels = RgbaImage::new(WIDTH, HEIGHT);
+    for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+        let [red, green, blue] = main_colour(x, y);
+        *pixel = if x < WIDTH / 2 { Rgba([red, green, blue, 255]) } else { Rgba([0, 0, 0, 0]) };
+    }
+    let path = memories_dir(dir.path()).join(format!("2021-01-15_{}-main.png", uuid(1)));
+    pixels.save_with_format(&path, ImageFormat::Png).unwrap();
+
+    let files = vec![MemoryFile::parse(path).unwrap(), write_overlay(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let out = dir.path().join("out");
+    let plan = Plan::build(&memories, &reconciliation, &out);
+    let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
+
+    assert_eq!(report.fixed, 1, "{:?}", report.failed);
+    let written = &plan.items[0].output;
+    assert_eq!(outputs(&plan, &out), ["2021/01/20210115_143005.png"]);
+    assert_eq!(&fs::read(written).unwrap()[..8], PNG_SIGNATURE);
+
+    let composite = image::open(written).unwrap().to_rgba8();
+    // The assertion the whole task is about. Alpha, not brightness: a flatten produces `alpha = 255`
+    // over black, and `255` versus `0` is the widest gap this image has. A JPEG output would answer
+    // 255 here whatever its RGB was, so the failure cannot dress itself up as the fix.
+    assert!(block_mean(&composite, 3, TRANSPARENT_BLOCK) <= 1.0, "the main's own transparent region was flattened away");
+    // …and the composite really ran, so the assertion above is not passing on a copied-through file.
+    assert!((block_mean(&composite, 0, OPAQUE_BLOCK) - 255.0).abs() <= 1.0, "the overlay's opaque red half reached the frame");
+    assert!((block_mean(&composite, 3, OPAQUE_BLOCK) - 255.0).abs() <= 1.0, "the caption itself is opaque");
+
+    assert_eq!(report.notices.len(), 1, "{:?}", report.notices);
+    assert_eq!(report.notices[0].notice, Notice::NotStamped);
+    let modified = fs::metadata(written).unwrap().modified().unwrap();
+    let expected = UNIX_EPOCH + Duration::from_secs(u64::try_from(plan.items[0].capture.instant().timestamp()).unwrap());
+    assert_eq!(modified, expected, "the capture date still reached the file's own timestamp");
 }
 
 /// Decision 47. A PNG with nothing to composite is copied through byte for byte, so its alpha

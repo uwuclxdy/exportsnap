@@ -138,9 +138,21 @@ fn paint_jpeg(path: &Path) {
 /// An overlay whose left half is opaque red and whose right half is fully transparent, so a
 /// composite that ran and one that did not are told apart by a single pixel each way.
 fn paint_overlay(path: &Path) {
+    paint_split_png(path, Rgba([255, 0, 0, 255]));
+}
+
+/// [`paint_overlay`]'s opaque/transparent split in any colour.
+///
+/// **A main and the layer drawn over it must not be painted the same colour**, and that is a
+/// measured constraint rather than a stylistic one. `image`'s PNG encoder is deterministic, so
+/// compositing a buffer over an identical buffer re-encodes to bytes identical to the input's:
+/// neither a pixel comparison nor a byte comparison can then tell a composite from a copy. A
+/// mutation deleting the compositor from the image leg's alpha arm left exactly that test green
+/// until this existed.
+fn paint_split_png(path: &Path, opaque: Rgba<u8>) {
     let mut pixels = RgbaImage::new(WIDTH, HEIGHT);
     for (x, _, pixel) in pixels.enumerate_pixels_mut() {
-        *pixel = if x < WIDTH / 2 { Rgba([255, 0, 0, 255]) } else { Rgba([0, 0, 0, 0]) };
+        *pixel = if x < WIDTH / 2 { opaque } else { Rgba([0, 0, 0, 0]) };
     }
     pixels.save_with_format(path, ImageFormat::Png).unwrap();
 }
@@ -702,28 +714,27 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg() {
     }
 }
 
-/// Under `originals` the caption never reaches the item-level pass, so decision 47's copy-through
-/// rule applies to a PNG main that pairs — the same rule one mode over, and the one place a mode
-/// moves an output PATH.
+/// A PNG main that pairs keeps its own format under EVERY overlay mode, so no mode moves an output
+/// path.
+///
+/// **This test used to assert the opposite half of a divergence that no longer exists.** Under the
+/// old rule the extension predicate folded in `SourceMedia::overlay`, which `originals` withholds,
+/// so the same file landed `.png` under one mode and `.jpg` under the other two — a mode silently
+/// deciding an output name. Task 45 sends a composited alpha-capable main to PNG too, so the
+/// extension is read alone and the three modes agree. Kept as a test rather than deleted with the
+/// divergence, because "a mode does not move a path" is the property worth holding.
 ///
 /// Unreachable from the observed export (only the zip family pairs and every zip main is a video),
-/// which is why it is asserted here rather than left to a reader to infer from `passes_through`.
+/// which is why it is asserted here rather than left to a reader to infer from the predicate.
 #[test]
-fn a_png_main_that_pairs_is_copied_through_under_originals_and_re_encoded_otherwise() {
+fn a_png_main_that_pairs_keeps_its_own_format_under_every_overlay_mode() {
     let names = ["2021-03-04_media~vantsnap-0000009.zip.a1b2c3d.png", "2021-03-04_overlay~vantsnap-0000009.zip.a1b2c3d.png"];
-    let merged = first_run(&from_names(&no_history(), &names), "/out", OverlayMode::Both);
-    let kept = first_run(&from_names(&no_history(), &names), "/out", OverlayMode::Originals);
+    let expected = Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.png");
 
-    assert_eq!(
-        merged.items[0].output,
-        Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.jpg"),
-        "compositing a PNG ends in a JPEG encode"
-    );
-    assert_eq!(
-        kept.items[0].output,
-        Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.png"),
-        "with nothing to composite the bytes are copied through under their own extension"
-    );
+    for mode in OverlayMode::ALL {
+        let plan = first_run(&from_names(&no_history(), &names), "/out", mode);
+        assert_eq!(plan.items[0].output, expected, "{mode}: an overlay mode must not move an output path");
+    }
 }
 
 /// The mode reaches the pass through the plan alone, which is the property that keeps `local_fix`
@@ -810,16 +821,18 @@ fn a_lone_overlay_png_keeps_its_alpha_its_extension_and_its_own_bytes() {
     assert_eq!(run.plan.items[0].originals, None);
 }
 
-/// The pass-through membership test is ascii-case-insensitive, so a `.PNG` source is admitted — and
+/// The format-keeping membership test is ascii-case-insensitive, so a `.PNG` source is admitted — and
 /// then its extension has to be normalized before it reaches an output path, or the same file
 /// spelled two ways lands at two names. Both planners key their collision map on that same string,
 /// so a divergence moves output paths rather than staying cosmetic, and a case-folding filesystem
 /// would have the two spellings fighting over one directory entry.
 ///
-/// This pins the normalization and **not** the length-independence of `PASS_THROUGH_EXTENSIONS`,
+/// This pins the normalization and **not** the length-independence of `ALPHA_CAPABLE_EXTENSIONS`,
 /// which no shipped test can pin: while that list holds one member, indexing it and reading the
 /// item's own extension answer identically on every input that exists. The evidence for that is a
-/// mutation, recorded in the round's table, not an assertion here.
+/// mutation, recorded in the round's table, not an assertion here — and the list is capped at one
+/// member anyway until `fix_image` picks its encoder off the resolved extension, which the constant's
+/// own doc records.
 #[test]
 fn a_shouted_extension_is_normalized_rather_than_carried_into_the_output_path() {
     let work = Workspace::new();
@@ -847,22 +860,32 @@ fn a_copied_png_and_a_stamped_jpeg_on_one_second_do_not_take_each_others_suffix(
 }
 
 #[test]
-fn a_png_that_does_have_an_overlay_still_composites_to_a_stamped_jpeg() {
-    // Constraint 6: decision 47 is about the LONE case. A zip pair whose media half is a png still
-    // goes through the compositor and still lands as a stamped JPEG, which is also what keeps
-    // `little_exif` on its JPEG path.
+fn a_png_that_does_have_an_overlay_composites_to_an_unstamped_png() {
+    // Task 45. This asserted a stamped JPEG until the ruling moved it: a zip pair whose media half
+    // is a png still goes through the compositor, and now the composite is encoded as a PNG so the
+    // main's own transparency is not flattened onto whatever sat under `alpha = 0`. The cost is the
+    // metadata, which the run reports rather than leaving to be discovered.
     let work = Workspace::new();
     let mid = format!("{ZIP_WORD}-0000006");
     let dir = chat_media_dir(&work.source());
-    paint_overlay(&dir.join(format!("{DAY}_media~{mid}.zip.a1b2c3d.png")));
+    // Blue under a red caption, deliberately: see `paint_split_png` for why the two halves of a pair
+    // must not share a colour. With both painted red a mutation deleting the compositor left this
+    // test green, byte comparison included.
+    paint_split_png(&dir.join(format!("{DAY}_media~{mid}.zip.a1b2c3d.png")), Rgba([0, 90, 200, 255]));
     paint_overlay(&dir.join(format!("{DAY}_overlay~{mid}.zip.a1b2c3d.png")));
 
     let run = work.run(&no_history());
     assert_eq!(run.report.fixed, 1);
-    let written = work.out().join("chat/_no-conversation/2021/03/20210304_000000.jpg");
+    let written = work.out().join("chat/_no-conversation/2021/03/20210304_000000.png");
     assert!(written.is_file(), "{:?}", tree(&work.out()));
-    assert_eq!(&fs::read(&written).unwrap()[..3], &[0xff, 0xd8, 0xff], "a composited png still lands as a jpeg");
-    assert!(run.report.notices.is_empty(), "a composited item is fully repaired: {:?}", run.report.notices);
+    assert_eq!(&fs::read(&written).unwrap()[..8], b"\x89PNG\r\n\x1a\n", "a composited png stays a png");
+
+    let composite = image::open(&written).unwrap().to_rgba8();
+    assert_eq!(composite.get_pixel(4, 4).0, [255, 0, 0, 255], "the caption's red beat the main's blue, so the composite ran");
+    assert_eq!(composite.get_pixel(WIDTH - 4, 4).0[3], 0, "and the region both layers left transparent still is");
+
+    assert_eq!(run.report.notices.len(), 1, "{:?}", run.report.notices);
+    assert_eq!(run.report.notices[0].notice, Notice::NotStamped);
 }
 
 // ---- decision 44d: thumbnails ----
