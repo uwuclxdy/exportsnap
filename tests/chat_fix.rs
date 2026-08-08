@@ -9,10 +9,20 @@
 //! export's SHAPE — a named `b` file, an unnamed one, a thumbnail, a zip pair — rather than its
 //! counts, which n=1 makes a hint and not a contract.
 //!
-//! The image leg carries the behavioural coverage here on purpose. Both legs go through one
-//! `local_fix::fix`, whose video half is pinned by `tests/local_fix.rs` and `tests/video.rs` against
-//! real ffmpeg output; what is chat-specific is the plan, and the plan asks nothing about a leg
-//! beyond the extension it writes.
+//! The image leg carries most of the behavioural coverage here, because both legs go through one
+//! `local_fix::fix` and what is chat-specific is the plan. **Decision 44b's three overlay modes are
+//! the exception and are asserted twice**, once on a JPEG zip pair and once on a zip pair whose media
+//! half is the MP4 every real one ships — `each_overlay_mode_writes_exactly_what_decision_44b_says`
+//! and `..._on_the_video_leg`. Under `originals` the two legs are handed different things (a main
+//! alone, on a leg where the caption burn rides on the transcode), and reading one leg's answer off
+//! the other's is what that second test exists to stop.
+//!
+//! **That one test is this crate's only external-tool dependency besides the `exiftool` read-back.**
+//! It builds its fixture with ffmpeg, drives all three modes transcoding, and reads the output's
+//! frames back through ffmpeg's own decoder; with ffmpeg absent it prints a skip notice and passes,
+//! and `EXPORTSNAP_REQUIRE_FFMPEG` turns that skip into a failure naming the runner. The `exiftool`
+//! read-back skips itself the same way under `EXPORTSNAP_REQUIRE_EXIFTOOL`; everything else here runs
+//! on a bare box.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -48,6 +58,13 @@ const HEIGHT: u32 = 48;
 
 /// Set this and a missing exiftool fails the run instead of quietly covering nothing.
 const REQUIRE_EXIFTOOL: &str = "EXPORTSNAP_REQUIRE_EXIFTOOL";
+
+/// The same for ffmpeg, which the video-leg overlay-mode test needs before it has a fixture at all.
+///
+/// A separate variable from the one above, and the same pair `tests/local_fix.rs` and `tests/video.rs`
+/// use: the two tools cover different things and a runner that has one and not the other should be
+/// told which is missing.
+const REQUIRE_FFMPEG: &str = "EXPORTSNAP_REQUIRE_FFMPEG";
 
 // ---- fixtures ----
 
@@ -150,15 +167,46 @@ fn lone_overlay_png(root: &Path, seed: u32) -> String {
 /// `<day>_<mid>.zip.<hash>` id.
 ///
 /// The media half is a JPEG rather than the MP4 the real export ships, deliberately: the pairing is
-/// a filename operation that never opens either file, so the extension is free, and keeping both
-/// halves on the image leg is what lets this crate assert on composited PIXELS with no ffmpeg on the
-/// box.
+/// a filename operation that never opens either file, so the extension is free, and keeping this
+/// pair on the image leg is what lets every test built on it assert on composited PIXELS with no
+/// external tool. [`zip_video_pair`] is the same shape on the leg the export actually uses.
 fn zip_pair(root: &Path, seed: u32) -> String {
     let mid = format!("{ZIP_WORD}-{seed:07}");
     let dir = chat_media_dir(root);
     paint_jpeg(&dir.join(format!("{DAY}_media~{mid}.zip.a1b2c3d.jpg")));
     paint_overlay(&dir.join(format!("{DAY}_overlay~{mid}.zip.a1b2c3d.png")));
     format!("{DAY}_{mid}.zip.a1b2c3d")
+}
+
+/// [`zip_pair`] with the media half the observed export actually ships: a half-second HEVC video
+/// with an audio track. `None` when ffmpeg is absent, which is the one thing the fixture cannot fake.
+///
+/// `hvc1` on purpose, the same reason `tests/local_fix.rs`'s `write_video` picks it: it is what the
+/// export ships and what the transcode exists to move away from, so a leg that quietly skipped the
+/// re-encode would pass against a fixture in anything else.
+///
+/// The frame is solid blue and the overlay's opaque half is red, so "the caption was burned in" and
+/// "the frame came through untouched" are two different channels of one pixel rather than a
+/// threshold on one.
+///
+/// **The overlay is exactly frame-sized, which the asserted pixel coordinates silently depend on.**
+/// `ffmpeg::transcode` scales the layer to fit and centres it, so at equal dimensions that chain is
+/// an identity and the opaque half really is the left half of the output. Size the two apart and
+/// every coordinate below moves.
+fn zip_video_pair(root: &Path, seed: u32) -> Option<String> {
+    let mid = format!("{ZIP_WORD}-{seed:07}");
+    let dir = chat_media_dir(root);
+    let built = Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "lavfi", "-i", &format!("color=c=blue:s={WIDTH}x{HEIGHT}:r=15:d=0.5")])
+        .args(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-shortest"])
+        .args(["-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "0.5"])
+        .arg(dir.join(format!("{DAY}_media~{mid}.zip.a1b2c3d.mp4")))
+        .output()
+        .ok()?;
+    assert!(built.status.success(), "ffmpeg could not build the fixture: {}", String::from_utf8_lossy(&built.stderr));
+    paint_overlay(&dir.join(format!("{DAY}_overlay~{mid}.zip.a1b2c3d.png")));
+    Some(format!("{DAY}_{mid}.zip.a1b2c3d"))
 }
 
 /// One message naming whatever `media_ids` spells, sent by `from` at `created`.
@@ -242,13 +290,26 @@ impl Workspace {
     /// returning file's row is reset by, and the resume sweep that drops a deleted output's record
     /// runs inside `local_fix::run`, after the plan is fixed.
     fn run_in(&self, history: &ChatHistory, mode: OverlayMode) -> Run {
+        self.run_with(history, mode, &copying())
+    }
+
+    /// [`Self::run_in`] under a named set of video options, for the one test whose subject is what
+    /// the video leg does with a mode. Every other caller takes [`copying`], which needs no tool.
+    fn run_with(&self, history: &ChatHistory, mode: OverlayMode, video: &VideoOptions) -> Run {
         let reconciliation = reconcile(history, discover(self.source()).unwrap());
         let mut manifest = self.manifest();
         reconciliation.enroll(&mut manifest).unwrap();
         let recorded = RecordedDirs::read(&reconciliation, &manifest).unwrap();
         let plan = chat_fix::plan(&reconciliation, self.out(), mode, &recorded);
-        let report = local_fix::run(&plan, &mut manifest, 3, &copying()).unwrap();
+        let report = local_fix::run(&plan, &mut manifest, 3, video).unwrap();
         Run { plan, manifest, report }
+    }
+
+    /// A path under this workspace's tempdir that is NOT under the out root, for a decoder that has
+    /// to write somewhere: dropping a scratch frame beside an output would put it in the tree
+    /// [`tree`] walks.
+    fn scratch(&self, name: &str) -> PathBuf {
+        self.temp.path().join(name)
     }
 
     /// The plan alone, for the tests that assert on what a run WOULD write.
@@ -282,10 +343,29 @@ impl Run {
     }
 }
 
-/// The run this crate drives: no re-encode and no ffmpeg, so nothing here depends on a tool being
-/// installed. The chat leg's plan is what is under test, and it is the same plan either way.
+/// The run all but one test here drives: no re-encode and no ffmpeg, so none of them depends on a
+/// tool being installed. The chat leg's plan is what is under test, and it is the same plan either
+/// way.
+///
+/// `each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg` is the exception and
+/// takes [`transcoding`], because the one thing it asks about is not the same either way.
 fn copying() -> VideoOptions {
     VideoOptions { transcode: false, ffmpeg: None }
+}
+
+/// Transcoding on with a real ffmpeg, which is what `VideoOptions::probe` resolves to on the box
+/// this repo is gated on. Built explicitly rather than probed so a test says which branch it is in.
+///
+/// The only options a caption burn is reachable under: `fix_video` draws the overlay inside
+/// `ffmpeg::transcode` and nowhere else, so a run holding [`copying`] draws none whatever the mode
+/// said.
+///
+/// **It does not always SAY so, and the exception is this test's own mode.** `OverlayNotBurned` is
+/// pushed only where the pass was handed a layer, and `originals` is the mode that withholds one, so
+/// a copying run there reports `NotTranscoded` alone. See
+/// `each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg`.
+fn transcoding() -> VideoOptions {
+    VideoOptions { transcode: true, ffmpeg: Some(PathBuf::from("ffmpeg")) }
 }
 
 /// Every file under `root`, as paths relative to it, sorted.
@@ -340,13 +420,56 @@ fn exiftool(path: &Path) -> Option<BTreeMap<String, String>> {
     )
 }
 
+/// The codec and pixel dimensions of a video's first stream, through `ffprobe`.
+///
+/// Read back with a tool that is not this crate, the same reason `tests/local_fix.rs` does: a writer
+/// agreeing with its own reader about a wrong encoding is what an independent one is for.
+fn probe_video(path: &Path) -> Option<(String, u32, u32)> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height", "-of", "default=nw=1:nk=1"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines();
+    let codec = lines.next()?.trim().to_owned();
+    Some((codec, lines.next()?.trim().parse().ok()?, lines.next()?.trim().parse().ok()?))
+}
+
+/// The colour of one pixel of a video's first frame, decoded into `raw`.
+///
+/// The decode target is the CALLER's path rather than one derived from `path`'s directory, so
+/// reading an output back never drops a file into the output tree the assertions above walk.
+fn first_frame_pixel(path: &Path, raw: &Path, x: u32, y: u32) -> [u8; 3] {
+    let decoded = Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .arg(raw)
+        .output()
+        .unwrap();
+    assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+    let bytes = fs::read(raw).unwrap();
+    let at = ((y * WIDTH + x) * 3) as usize;
+    [bytes[at], bytes[at + 1], bytes[at + 2]]
+}
+
 fn skipped(test: &str) {
+    skipped_for(test, "exiftool", REQUIRE_EXIFTOOL);
+}
+
+/// Records why a check did not run. Loud where the caller asked for loud.
+///
+/// The notice cannot be relied on by itself: nextest captures a passing test's output, so on a box
+/// without the tool the suite prints nothing at all and reads as fully green. `variable` is what
+/// makes a runner missing the tool red instead.
+fn skipped_for(test: &str, tool: &str, variable: &str) {
     assert!(
-        std::env::var_os(REQUIRE_EXIFTOOL).is_none(),
-        "{test}: {REQUIRE_EXIFTOOL} is set and exiftool is not on PATH, so the assertions that need it would have \
-         been skipped; install exiftool on this runner or unset the variable"
+        std::env::var_os(variable).is_none(),
+        "{test}: {variable} is set and {tool} is not on PATH, so the assertions that need it would have been \
+         skipped; install {tool} on this runner or unset the variable"
     );
-    println!("SKIPPED {test}: exiftool is not on PATH, so its assertions did not run");
+    println!("SKIPPED {test}: {tool} is not on PATH, so its assertions did not run");
 }
 
 // ---- decision 46a and 46b: the tree ----
@@ -483,6 +606,98 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says() {
                 pixel.iter().zip(painted).all(|(actual, expected)| i16::from(*actual) - i16::from(expected) < 24),
                 "{mode}: the caption was NOT burned in, so the main's own pixel survives — got {pixel:?}, painted {painted:?}"
             );
+        }
+    }
+}
+
+/// The same three answers as its image twin, on the leg the observed export actually ships.
+///
+/// Every one of the 464 zip pairs has an MP4 media half, and until this test no chat-media VIDEO
+/// item had been through the fix pass under any mode. `originals` is the arm that needed measuring
+/// rather than reading: it is the one that hands `fix_video` a main alone — `chat_fix::plan` clears
+/// `SourceMedia::overlay` and keeps the layer in `Originals` instead — and that combination had only
+/// ever been reached through the early return `keep_originals` takes on the image arms too.
+///
+/// **All three arms run TRANSCODING, and that is forced by the leg rather than chosen.** The caption
+/// is drawn inside `ffmpeg::transcode` and nowhere else (decision 36), so a run holding [`copying`]
+/// cannot burn one under any mode and the pixel check below would answer "not burned" three times —
+/// a fixture holding constant the exact dimension its assertion names.
+///
+/// **The `originals` arm's clean frame would otherwise be free, and ONE assertion carries that.** A
+/// run that re-encoded nothing at all reports "not burned" too, so the codec assertion — the output
+/// is `h264` where the source was `hvc1` — is the evidence that ffmpeg ran and still drew nothing.
+/// The notice assertion beside it is **not** a second guard and must not be read as one: the only
+/// notice this fixture can reach comes from the degrade path, and a degrade by construction leaves
+/// the codec alone, so it cannot fire anywhere the codec assertion would not. It is kept because it
+/// fires first and names the mechanism in the failure message, not because it adds coverage.
+///
+/// And what that degrade reports under THIS mode is `NotTranscoded` alone. `OverlayNotBurned` needs
+/// a layer the pass was handed, and `originals` is the mode that withholds one — so "the notice list
+/// is empty" is a weaker statement here than it is one mode over, which is the second reason it is
+/// not the guard.
+///
+/// The composite check is a pixel here exactly as on the image leg, read back through ffmpeg's own
+/// decoder rather than through anything in this crate. Two channels of two pixels: the overlay's
+/// opaque half is red where the frame is blue, so a drawn caption and an untouched frame differ in
+/// both directions and neither answer can be satisfied by the other's failure.
+///
+/// **A lone pixel is enough here and a block mean was needed on the image leg, and the difference is
+/// the fixture rather than a looser standard.** That fixture is high-frequency by design, so JPEG's
+/// DCT smears neighbours and a single pixel drifts up to 21 levels; this one is a flat colour field
+/// with nothing to smear. Measured on this exact `argv` at n9.0: over the whole opaque region
+/// min == max at `[253, 0, 0]` burned and `[0, 0, 254]` not, i.e. zero spatial variance, leaving the
+/// three thresholds 53, 60 and 104 clear of the values they must reject.
+#[test]
+fn each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg() {
+    for (mode, keeps_originals, composites) in
+        [(OverlayMode::Merged, false, true), (OverlayMode::Both, true, true), (OverlayMode::Originals, true, false)]
+    {
+        let work = Workspace::new();
+        let Some(id) = zip_video_pair(&work.source(), 4) else {
+            skipped_for("each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg", "ffmpeg", REQUIRE_FFMPEG);
+            return;
+        };
+        let run = work.run_with(&no_history(), mode, &transcoding());
+        assert_eq!(run.report.fixed, 1, "{mode}: {:?}", run.report.failed);
+
+        // The repaired main is the output under every mode, and it keeps the video leg's own
+        // extension: `mark_done` checksums it, so "copy the pair and write nothing" was never
+        // available (decision 46d).
+        let output = work.out().join("chat/_no-conversation/2021/03/20210304_000000.mp4");
+        assert!(output.is_file(), "{mode}: the main is the output whatever happens to the caption — {:?}", tree(&work.out()));
+        assert_eq!(run.row(&id).status, ItemStatus::Done, "{mode}");
+
+        // Kept for the failure message rather than for coverage — the assertion BELOW is what makes
+        // the missing caption attributable to the mode. An empty notice list cannot carry that on
+        // its own: the shipped degrade path does report itself (`NotTranscoded`), so what an empty
+        // list fails to exclude is a regression that copies the bytes THROUGH the transcode chain
+        // and reports nothing, and the codec is the only thing that separates those two.
+        assert!(run.report.notices.is_empty(), "{mode}: {:?}", run.report.notices);
+        assert_eq!(probe_video(&output), Some(("h264".to_owned(), WIDTH, HEIGHT)), "{mode}: the re-encode ran in this arm");
+
+        let kept: Vec<String> = tree(&work.out()).into_iter().filter(|path| path.contains("/originals/")).collect();
+        if keeps_originals {
+            assert_eq!(
+                kept,
+                [
+                    "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d.mp4",
+                    "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000004.zip.a1b2c3d.png",
+                ],
+                "{mode}"
+            );
+        } else {
+            assert!(kept.is_empty(), "{mode}: nothing is kept, so no originals/ folder exists at all — {kept:?}");
+        }
+
+        let raw = work.scratch("frame.raw");
+        let opaque = first_frame_pixel(&output, &raw, 2, 2);
+        if composites {
+            assert!(opaque[0] > 200, "{mode}: the overlay's red opaque half reached the frame — {opaque:?}");
+            let transparent = first_frame_pixel(&output, &raw, WIDTH - 2, 2);
+            assert!(transparent[2] > 150, "{mode}: the transparent half left the video showing — {transparent:?}");
+        } else {
+            assert!(opaque[0] < 60, "{mode}: the caption was NOT burned in — {opaque:?}");
+            assert!(opaque[2] > 150, "{mode}: the source's own blue frame is what is there — {opaque:?}");
         }
     }
 }
