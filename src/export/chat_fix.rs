@@ -50,8 +50,9 @@
 //!
 //! # Dates, and the coordinate there is none of
 //!
-//! The chain is the memories one with its first step swapped: the message's `Created`, then the
-//! file's own embedded timestamp, then the filename day at midnight.
+//! The chain is the memories one with its first step swapped: the message's own date — its
+//! `Created`, then its `Created(microseconds)` where `Created` is empty — then the file's own
+//! embedded timestamp, then the filename day at midnight.
 //! [`super::chat_media::ChatMediaItem::date`] hands over the first and third unresolved precisely so
 //! the second can sit between them, and this module is where that happens — through the same
 //! [`super::local_fix`] route the memories leg reads an embedded timestamp with, so a JPEG's

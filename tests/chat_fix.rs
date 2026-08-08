@@ -1150,6 +1150,37 @@ fn a_file_the_message_did_not_date_falls_to_its_own_embedded_timestamp() {
     assert_eq!(plan.items[0].output, work.out().join("chat/friend-handle/20210304_091742.jpg"));
 }
 
+/// The epoch route reaching the writer, and the thing about it that is easy to get wrong.
+///
+/// `chat_media` chooses between `Created` and `Created(microseconds)`; this is the layer that
+/// SPENDS the answer, and it spends it on two things — the instant in the filename and the
+/// directory the item lands in. Only the first may move. A named item is filed flat under its
+/// conversation key (the `YYYY/MM` bucket is the unnamed leg's, which no epoch-dated item can
+/// reach), so the epoch has to restamp the name and leave the folder exactly where a `Created`
+/// would have put it.
+///
+/// One assertion carries both halves, and the fixture separates them: the filename day is
+/// `2021-03-04` and the epoch is 2020-07-26, so a build that ignored the epoch reds on the stamp
+/// while a build that filed by date reds on the path.
+///
+/// [`TimeSource::Message`] is asserted alongside because it is design call 2 in observable form —
+/// an epoch-stated instant is the message speaking rather than a fourth kind of source, and it
+/// reaches a user as "the message that sent it".
+#[test]
+fn an_epoch_dated_message_stamps_its_instant_without_moving_the_item() {
+    let named = format!("b~{}", id(1));
+    // `Created` empty, so step 1 falls through to the epoch: 2020-07-26 15:48:05.675 UTC.
+    let entry = schema::ChatEntry { created_epoch: Some(1_595_778_485_675), ..message("sender-handle", "", &named) };
+    let history = history(vec![(SOLO_KEY, vec![entry])]);
+    let plan = first_run(&from_names(&history, &[&format!("{DAY}_{named}.jpg")]), "/out", OverlayMode::Both);
+
+    // The both-halves assertion goes FIRST, deliberately: it is the one this test is named for, and
+    // a field-level assert ahead of it would abort the body before the path was ever read.
+    assert_eq!(plan.items[0].output, Path::new("/out/chat/friend-handle/20200726_154805.jpg"));
+    assert_eq!(plan.items[0].capture.local().to_string(), "2020-07-26 15:48:05");
+    assert_eq!(plan.items[0].capture.source(), TimeSource::Message, "an epoch is the message speaking, not a fourth source");
+}
+
 #[test]
 fn a_file_nothing_dates_falls_to_the_day_in_its_own_filename_at_midnight() {
     let work = Workspace::new();

@@ -94,6 +94,56 @@ fn timestamp_parses_the_export_form_into_components() {
     assert_eq!(stamp.to_string(), "2020-08-02 12:45:39 UTC");
 }
 
+/// `Created(microseconds)`'s value read as the instant it actually names.
+///
+/// Every literal here is a boundary the conversion can be got wrong at, and each fails as a
+/// different value rather than as a shared `None`:
+///
+/// - the UNIT. The key says microseconds and the wire holds milliseconds, so the same integer read
+///   as microseconds lands in 1970 and read as seconds lands past year 52000.
+/// - the TRUNCATION. `…_675` is 675ms past the second and the second stays `05`.
+/// - the SIGN. A negative value is pre-1970 rather than an error, and it truncates toward the past,
+///   so `-1` is 1969-12-31 23:59:59 and not 1970-01-01 00:00:00.
+/// - the two `None` arms, which are different refusals: chrono has no date at all at `i64::MIN`,
+///   while the year-100000 case is a date chrono holds happily and [`Timestamp`] cannot, its year
+///   being a `u16`. A build dropping the `u16` check would truncate that year rather than refuse it.
+#[test]
+fn timestamp_reads_a_millisecond_epoch_as_the_instant_it_names() {
+    let stamp = Timestamp::from_epoch_ms(1_595_778_485_675).unwrap();
+    assert_eq!(stamp.year(), 2020);
+    assert_eq!(stamp.month(), 7);
+    assert_eq!(stamp.day(), 26);
+    assert_eq!(stamp.hour(), 15);
+    assert_eq!(stamp.minute(), 48);
+    assert_eq!(stamp.second(), 5, "675ms past the second truncates down, never up");
+
+    assert_eq!(Timestamp::from_epoch_ms(0).unwrap().to_string(), "1970-01-01 00:00:00 UTC", "the conversion itself has no sentinel");
+    assert_eq!(Timestamp::from_epoch_ms(-1).unwrap().to_string(), "1969-12-31 23:59:59 UTC");
+
+    assert_eq!(Timestamp::from_epoch_ms(i64::MIN), None, "outside every calendar");
+    // 3.09e15 ms is roughly year 99000: a date chrono represents and this type's `u16` year cannot.
+    assert_eq!(Timestamp::from_epoch_ms(3_090_000_000_000_000), None, "a year no `u16` holds is refused, not truncated");
+}
+
+/// The zero sentinel is the MODEL's rule and not the chat leg's, so it has to hold on the snap
+/// record too — the two carry the same key off the same exporter, and a divergence would only
+/// surface once something joined the two histories.
+#[test]
+fn a_snap_reads_both_spellings_of_an_absent_epoch_as_absence() {
+    let snap = |created_epoch| {
+        exportsnap::export::model::Snap::try_from(schema::SnapEntry { created_epoch, ..schema::SnapEntry::default() }).unwrap()
+    };
+    assert_eq!(snap(None).created_epoch_ms, None, "the key missing");
+    assert_eq!(snap(Some(0)).created_epoch_ms, None, "the key present, holding the export's own empty spelling");
+    assert_eq!(snap(Some(1_596_380_554_698)).created_epoch_ms, Some(1_596_380_554_698), "and a stated one survives verbatim");
+    // The rule is about the ENCODING's empty spelling, not about which instants are plausible, so a
+    // negative passes: it is a value the field states. Widening to `<= 0` would make this integer a
+    // plausibility filter while the `Created` string beside it stays none — and `Timestamp::parse`
+    // honours "1900-01-01 00:00:00 UTC" while `local_fix::system_time` deliberately writes mtimes
+    // on both sides of the epoch, so this crate has no floor for it to be consistent with.
+    assert_eq!(snap(Some(-1)).created_epoch_ms, Some(-1), "only `0` is the sentinel");
+}
+
 #[test]
 fn timestamp_ordering_is_chronological() {
     let older = Timestamp::parse(Field::Created, "2019-12-31 23:59:59 UTC").unwrap();
@@ -903,7 +953,9 @@ fn chat_history_groups_messages_by_conversation() {
     assert_eq!(opener.from, Username::new("user_11"));
     assert_eq!(opener.media_type, MediaKind::Status);
     assert_eq!(opener.created.unwrap().to_string(), "2020-07-26 15:48:05 UTC");
-    assert_eq!(opener.created_epoch_ms, 1_595_778_485_675);
+    // The same instant `created` spells above, to the second: the export states both and the
+    // redactor's constant shift preserves their difference, so this agreement is the real export's.
+    assert_eq!(opener.created_epoch_ms, Some(1_595_778_485_675));
     assert_eq!(opener.content, None);
     assert_eq!(opener.conversation_title, None);
     assert!(opener.is_sender);
@@ -923,7 +975,7 @@ fn chat_history_groups_messages_by_conversation() {
     assert_eq!(media.content, None);
     assert_eq!(media.media_ids.as_deref(), Some("redacted-nyh3ho"));
     assert_eq!(media.created.unwrap().to_string(), "2018-09-21 09:13:02 UTC");
-    assert_eq!(media.created_epoch_ms, 1_537_521_182_599);
+    assert_eq!(media.created_epoch_ms, Some(1_537_521_182_599));
 
     // A group thread is the only place a conversation title appears.
     let group = chat
@@ -962,7 +1014,7 @@ fn snap_history_shares_its_conversation_ids_with_chat_history() {
     assert_eq!(first.from, Username::new("user_32"));
     assert_eq!(first.media_type, MediaKind::Image);
     assert_eq!(first.created.unwrap().to_string(), "2020-08-02 15:02:34 UTC");
-    assert_eq!(first.created_epoch_ms, 1_596_380_554_698);
+    assert_eq!(first.created_epoch_ms, Some(1_596_380_554_698));
     assert_eq!(first.conversation_title, None);
     assert!(first.is_sender);
 

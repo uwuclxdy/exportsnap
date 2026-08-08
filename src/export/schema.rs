@@ -275,8 +275,23 @@ pub struct ChatEntry {
     #[serde(rename = "IsSender")]
     pub is_sender: bool,
     /// The key says microseconds; see [`crate::export::model::ChatMessage::created_epoch_ms`].
+    ///
+    /// `Option` where every other scalar here takes `#[serde(default)]`'s zero, because this one
+    /// cannot afford it: a bare `i64` hands an absent key back as `0`, a well-formed 1970 instant
+    /// nothing above the deserializer can tell from a stated one. What the `Option` separates is
+    /// **absent key** (`None`) from **key present, holding `0`** (`Some(0)`) — a distinction this
+    /// layer keeps and [`crate::export::model`] then collapses, since both are absence for reading
+    /// purposes.
+    ///
+    /// What keeping it here buys is narrow and worth stating exactly: it **preserves a distinction
+    /// that cannot be recovered once collapsed**, which is a precondition for the phase-4 export
+    /// ever writing this record back out correctly. It is not a working round-trip. Nothing in this
+    /// module derives `Serialize`, and when phase 4 adds one, `Option` alone still emits
+    /// `"Created(microseconds)": null` for a key the export never sent — omitting it needs
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` alongside. That half is phase 4's; this
+    /// half is only what stops the information being thrown away before phase 4 can ask for it.
     #[serde(rename = "Created(microseconds)")]
-    pub created_epoch: i64,
+    pub created_epoch: Option<i64>,
     #[serde(rename = "IsSaved")]
     pub is_saved: bool,
     #[serde(rename = "Media IDs")]
@@ -531,8 +546,13 @@ pub struct SnapEntry {
     #[serde(rename = "IsSender")]
     pub is_sender: bool,
     /// The key says microseconds; see [`crate::export::model::Snap::created_epoch_ms`].
+    ///
+    /// `Option` for the reason [`ChatEntry::created_epoch`] gives, and it is an `Option` HERE rather
+    /// than only there because the two records carry the same key off the same exporter. A snap
+    /// entry left as a bare `i64` would be the one place a missing key still reads as 1970, and the
+    /// divergence would be invisible until something joined the two histories.
     #[serde(rename = "Created(microseconds)")]
-    pub created_epoch: i64,
+    pub created_epoch: Option<i64>,
 }
 
 // ---- snap_pro.json ----

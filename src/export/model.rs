@@ -10,11 +10,18 @@
 //! one missing timestamp in a 3000-row history from failing the whole load while a corrupt one
 //! still surfaces loudly.
 //!
+//! **A numeric field spells the same absence as `0`**, and `Created(microseconds)` is the one that
+//! does: see [`ChatMessage::created_epoch_ms`]. The schema layer distinguishes an absent key from a
+//! present zero; this layer reads both as absence, so no consumer has to reinvent the rule and none
+//! of them can disagree about it.
+//!
 //! Nothing here is a `serde` type. The schema layer owns the wire; this layer owns meaning.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+
+use chrono::{DateTime, Datelike, Timelike};
 
 use crate::export::schema;
 
@@ -181,6 +188,12 @@ impl Error for ParseError {}
 /// A UTC instant as the export spells it, with every component inside its calendar range.
 ///
 /// Field order makes the derived `Ord` chronological.
+///
+/// **The two constructors do not carry the same guarantee.** [`Self::parse`] is range-checked only,
+/// so `2021-02-30` parses; [`Self::from_epoch_ms`] builds through a date crate and cannot produce a
+/// day that does not exist. Nothing depends on the asymmetry today, which is exactly why it is
+/// written here rather than left to be discovered: treat the weaker of the two as the type's, and a
+/// caller handing one to a date crate still converts fallibly whichever built it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp {
     year: u16,
@@ -215,9 +228,10 @@ impl Timestamp {
         let (year, month, day) = split_three(date, '-')?;
         let (hour, minute, second) = split_three(time, ':')?;
 
-        // Day is range-checked, not calendar-checked: 2021-02-30 parses. A real calendar lands
-        // with the date crate the phase-2 tz work brings in; nothing downstream does arithmetic
-        // on these yet.
+        // Day is range-checked, not calendar-checked: 2021-02-30 parses. The date crate arrived and
+        // downstream does do arithmetic on these — `local_fix::calendar` is where one meets a real
+        // calendar, and it converts fallibly for exactly this reason, with `output_path` and
+        // `system_time` spending the result. So the ceiling is live rather than deferred.
         let parsed = Self {
             year: fixed_width(year, 4)?,
             month: in_range(fixed_width(month, 2)?, 1, 12)?,
@@ -225,6 +239,44 @@ impl Timestamp {
             hour: in_range(fixed_width(hour, 2)?, 0, 23)?,
             minute: in_range(fixed_width(minute, 2)?, 0, 59)?,
             second: in_range(fixed_width(second, 2)?, 0, 59)?,
+        };
+        Some(parsed)
+    }
+
+    /// The UTC instant `ms` milliseconds after the unix epoch, truncated to the second, or `None`
+    /// when it names no instant this type can hold.
+    ///
+    /// The one caller is the chat-media join reading `Created(microseconds)`, whose values are
+    /// milliseconds despite the key (`docs/design.md`). Fallible for two reasons, both reachable
+    /// from untrusted json: chrono itself refuses a value outside its representable range, and
+    /// [`Self::year`] is a `u16`, so a negative or five-digit year has no [`Timestamp`] even where
+    /// chrono has a date. Sub-second precision is DROPPED rather than rounded — every consumer of
+    /// this type reduces to whole seconds anyway ([`crate::export::local_fix`]'s writer), and
+    /// rounding would put a file one second after the instant its own record states.
+    ///
+    /// The result is calendar-checked, unlike [`Self::parse`]'s — a stronger guarantee than the type
+    /// carries, so nothing may rely on it. See [`Timestamp`] itself for why that asymmetry is
+    /// written down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use exportsnap::export::model::Timestamp;
+    ///
+    /// let stamp = Timestamp::from_epoch_ms(1_595_778_485_675).unwrap();
+    /// assert_eq!(stamp.to_string(), "2020-07-26 15:48:05 UTC");
+    /// assert_eq!(Timestamp::from_epoch_ms(i64::MIN), None);
+    /// ```
+    #[must_use]
+    pub fn from_epoch_ms(ms: i64) -> Option<Self> {
+        let utc = DateTime::from_timestamp_millis(ms)?;
+        let parsed = Self {
+            year: u16::try_from(utc.year()).ok()?,
+            month: u8::try_from(utc.month()).ok()?,
+            day: u8::try_from(utc.day()).ok()?,
+            hour: u8::try_from(utc.hour()).ok()?,
+            minute: u8::try_from(utc.minute()).ok()?,
+            second: u8::try_from(utc.second()).ok()?,
         };
         Some(parsed)
     }
@@ -563,6 +615,35 @@ fn optional_timestamp(field: Field, raw: &str) -> Result<Option<Timestamp>, Pars
     Timestamp::parse(field, raw).map(Some)
 }
 
+/// `0` is how an integer field spells "no value here", the way `""` does for a string.
+///
+/// **A claim about the ENCODING, not about the calendar**, and the distinction is what keeps the
+/// rule from growing. [`optional_text`] and [`optional_timestamp`] above are the siblings: each
+/// reads its own type's empty spelling as absence, and none of them judges whether the value that
+/// survives is a plausible date. Nothing in this crate applies a plausibility floor to any date
+/// source — [`Timestamp::parse`] honours `"1900-01-01 00:00:00 UTC"`, and
+/// [`crate::export::local_fix`]'s `system_time` exists to write mtimes on both sides of the epoch —
+/// so the epoch field does not get one either. The harm being prevented is narrow and structural:
+/// reading `0` as an instant promotes a MISSING field into a stated date that then outranks every
+/// weaker source below it. The `None` arm folds the absent key into the same answer; only the
+/// schema layer keeps the two apart.
+///
+/// A negative value therefore passes, and needs no argument from what the export has been observed
+/// to hold: it is not an empty spelling, so the rule does not reach it. Widening to `<= 0` would
+/// make this integer a plausibility filter while the `Created` string beside it stays none — that
+/// is the inconsistency, not the fix.
+///
+/// **The sentinel catches the spelling, not the instant, and those are different sets.** `1..=999`
+/// are all sub-second, so [`Timestamp::from_epoch_ms`] truncates every one of them to the same
+/// `1970-01-01 00:00:00` this arm refuses, and every one of them passes. Correct under the frame
+/// above, and worth knowing before someone reads the two as one rule and "fixes" the gap.
+const fn optional_epoch_ms(raw: Option<i64>) -> Option<i64> {
+    match raw {
+        Some(0) | None => None,
+        Some(ms) => Some(ms),
+    }
+}
+
 fn optional_location(field: Field, raw: &str) -> Result<Option<LocationPoint>, ParseError> {
     if raw.is_empty() {
         return Ok(None);
@@ -869,8 +950,13 @@ pub struct ChatMessage {
     pub media_type: MediaKind,
     pub created: Option<Timestamp>,
     /// Milliseconds since the unix epoch, despite the `Created(microseconds)` key it comes from.
-    /// The observed values are 13 digits and agree with `Created` to the second.
-    pub created_epoch_ms: i64,
+    /// The observed values are 13 digits and agree with [`Self::created`] to the second.
+    ///
+    /// `None` covers both spellings of absence — the key missing and the key holding `0` — per
+    /// [`optional_epoch_ms`], so a consumer reading `Some` has a stated instant and not a default.
+    /// The raw `i64` is kept rather than a [`Timestamp`] because this is the wire fact; turning it
+    /// into an instant is [`Timestamp::from_epoch_ms`]'s job and is fallible.
+    pub created_epoch_ms: Option<i64>,
     pub content: Option<MessageText>,
     pub conversation_title: Option<String>,
     pub is_sender: bool,
@@ -891,8 +977,9 @@ pub struct Snap {
     pub from: Option<Username>,
     pub media_type: MediaKind,
     pub created: Option<Timestamp>,
-    /// Milliseconds since the unix epoch; see [`ChatMessage::created_epoch_ms`].
-    pub created_epoch_ms: i64,
+    /// Milliseconds since the unix epoch, `None` for absent or `0`; see
+    /// [`ChatMessage::created_epoch_ms`].
+    pub created_epoch_ms: Option<i64>,
     pub conversation_title: Option<String>,
     pub is_sender: bool,
 }
@@ -905,7 +992,7 @@ impl TryFrom<schema::ChatEntry> for ChatMessage {
             from: Username::new(raw.from),
             media_type: MediaKind::from_wire(&raw.media_type),
             created: optional_timestamp(Field::Created, &raw.created)?,
-            created_epoch_ms: raw.created_epoch,
+            created_epoch_ms: optional_epoch_ms(raw.created_epoch),
             content: raw.content.and_then(optional_text).map(MessageText::new),
             conversation_title: raw.conversation_title.and_then(optional_text),
             is_sender: raw.is_sender,
@@ -923,7 +1010,7 @@ impl TryFrom<schema::SnapEntry> for Snap {
             from: Username::new(raw.from),
             media_type: MediaKind::from_wire(&raw.media_type),
             created: optional_timestamp(Field::Created, &raw.created)?,
-            created_epoch_ms: raw.created_epoch,
+            created_epoch_ms: optional_epoch_ms(raw.created_epoch),
             conversation_title: raw.conversation_title.and_then(optional_text),
             is_sender: raw.is_sender,
         })

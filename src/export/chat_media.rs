@@ -63,10 +63,14 @@
 //! standing in for the unjoined files' unknown time. It reads better at one call site, at the cost
 //! of inventing a time of day inside the layer whose whole job is to report what the export says.
 //!
-//! Rejected separately, and for a different reason: carrying the record's OTHER date,
-//! `Created(microseconds)`, beside its `Created`. Serde hands an absent key back as `0`, which is a
-//! well-formed 1970 instant nothing above the deserializer can tell from a real one, so the field
-//! cannot be carried without inventing a rule about `0`. The full account is on [`Message::created`].
+//! The record's OTHER date, `Created(microseconds)`, IS carried beside its `Created`, and is the
+//! second source [`ChatMediaItem::date`] tries. What blocked it was never the date rule but the
+//! type: a bare `i64` under `#[serde(default)]` hands an absent key back as `0`, a well-formed 1970
+//! instant nothing above the deserializer can tell from a stated one, so carrying it would have
+//! promoted a missing field into a message-stated date outranking the filename day. Making the
+//! absence expressible at the schema boundary — `Option<i64>` on `ChatEntry` and `SnapEntry` alike,
+//! with `0` read as the field's own empty spelling the way `""` is for `Created` — removes the
+//! reason rather than working around it. The full account is on [`Message::created_epoch_ms`].
 //!
 //! Framework-free like the rest of `export/`: nothing here writes an output file, composites an
 //! overlay, or knows a screen exists. Where the output lands is a later task's question.
@@ -583,25 +587,26 @@ pub struct Message {
     /// against 1547 received.
     pub is_sender: bool,
     /// The message's own `Created`, a UTC instant. `None` where the export wrote `""`, which is
-    /// unobserved on a matched message and still leaves the file dated, by
-    /// [`ChatMediaItem::date`]'s fallback.
-    ///
-    /// **The record's other date, `Created(microseconds)`, is deliberately not carried beside it**,
-    /// and the reason is that it cannot express the absence this one can. `schema::ChatEntry` is
-    /// `#[serde(default)]` over a bare `i64`, so an absent key arrives as `0` — a well-formed
-    /// 1970-01-01 instant, indistinguishable from a real one. Carrying it naively would turn a
-    /// missing field into a message-STATED 1970 date that then outranks the filename day this
-    /// file's fallback would otherwise have used, which is the one shape where the extra field is
-    /// strictly worse than no field. Pinned from both sides by
-    /// `a_message_that_names_a_file_without_dating_it_leaves_it_on_the_filename_day`.
-    ///
-    /// What it would buy does not pay for a sentinel rule every consumer has to reinvent: the two
-    /// agree to the second on every row of the observed export (`docs/design.md`, 13-digit values),
-    /// so it adds only sub-second precision, which this crate's own writer discards before it
-    /// reaches a file: [`super::local_fix`]'s `system_time` reduces an instant to `timestamp()`
-    /// seconds. `Created` therefore wins whenever both are present, by being the
-    /// only one here at all, and [`Self::at`] reaches the other for a pass that ever needs it.
+    /// unobserved on a matched message and still leaves the file dated — by
+    /// [`Self::created_epoch_ms`] where the record spells one, and by
+    /// [`ChatMediaItem::date`]'s filename fallback where it does not.
     pub created: Option<Timestamp>,
+    /// The record's OTHER date, `Created(microseconds)`, in the milliseconds it actually holds.
+    /// `None` where the export omitted the key or wrote its `0` spelling of absence; see
+    /// [`super::model::ChatMessage::created_epoch_ms`] for why both read the same.
+    ///
+    /// Carried raw rather than as a [`Timestamp`], and resolved only by [`ChatMediaItem::date`]:
+    /// the conversion is fallible ([`Timestamp::from_epoch_ms`]) and this struct's job is to report
+    /// what the record said, not to decide what survives.
+    ///
+    /// **[`Self::created`] outranks it, and the ordering costs almost nothing either way.** The two
+    /// agree to the second on every row of the observed export (`docs/design.md`, 13-digit values),
+    /// so where both exist this field adds only sub-second precision — which this crate's own writer
+    /// discards before it reaches a file, [`super::local_fix`]'s `system_time` reducing an instant
+    /// to `timestamp()` seconds. What it buys is the rows where `Created` is empty and this is not,
+    /// where the alternative is the filename day at midnight. So the order is a preference for the
+    /// spelling the export states in full, not a claim that this one is worse.
+    pub created_epoch_ms: Option<i64>,
 }
 
 /// What `chat_history.json` had to say about one discovered file.
@@ -646,9 +651,12 @@ impl Join {
 /// rejects one that does not — so the fallback is always there to take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaDate {
-    /// The `Created` of the message that named the file: 2588 of the observed export's 9465 files.
+    /// An instant the message that named the file stated: its `Created`, or its
+    /// `Created(microseconds)` where `Created` is empty. 2588 of the observed export's 9465 files,
+    /// every one of them by `Created` — a matched message with only the epoch is expressible and
+    /// unobserved.
     Message(Timestamp),
-    /// The day the filename leads with, along with any matched message carrying no `Created`.
+    /// The day the filename leads with, along with any matched message stating no date at all.
     ///
     /// The other 6877 FILES, which is 6413 [`ChatMediaItem`]s: a zip pair's 464 overlay halves are
     /// answered for by the media they pair with rather than asking on their own, the same gap
@@ -684,13 +692,20 @@ impl ChatMediaItem {
 
     /// What dates this file, and what said so.
     ///
-    /// The message's `Created` where there is one, and the day in the filename otherwise — which
-    /// covers both a file no message names and a message that names one without dating it. Not a
-    /// resolved instant: see the module docs for why the embedded-timestamp step of the stamping
-    /// chain belongs between these two and so cannot be applied from here.
+    /// The message's `Created`, then its `Created(microseconds)`, then the day in the filename —
+    /// which covers a file no message names, a message that names one carrying neither date, and an
+    /// epoch naming an instant [`Timestamp`] cannot hold. The first two are both instants the
+    /// MESSAGE stated, so both answer [`MediaDate::Message`]; only the third is derived from the
+    /// file itself. See [`Message::created_epoch_ms`] for why `Created` is tried first.
+    ///
+    /// Not a resolved instant: see the module docs for why the embedded-timestamp step of the
+    /// stamping chain belongs between the message's date and the filename day, and so cannot be
+    /// applied from here.
     #[must_use]
     pub fn date(&self) -> MediaDate {
-        match self.message().and_then(|message| message.created) {
+        let stated =
+            self.message().and_then(|message| message.created.or_else(|| message.created_epoch_ms.and_then(Timestamp::from_epoch_ms)));
+        match stated {
             Some(created) => MediaDate::Message(created),
             None => MediaDate::Filename(self.media.file.day),
         }
@@ -953,6 +968,7 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
                                 from: record.from.clone(),
                                 is_sender: record.is_sender,
                                 created: record.created,
+                                created_epoch_ms: record.created_epoch_ms,
                             },
                         )),
                         None => {

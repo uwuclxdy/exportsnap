@@ -424,6 +424,7 @@ mod tests {
                 from: None,
                 is_sender: false,
                 created: None,
+                created_epoch_ms: None,
             })
         } else {
             Join::Unnamed

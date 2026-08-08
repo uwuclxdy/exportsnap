@@ -549,15 +549,19 @@ fn an_empty_media_ids_value_names_nothing() {
 #[test]
 fn a_token_two_messages_name_carries_the_first_messages_own_facts() {
     let token = format!("b~{}", id(1));
+    // Both rows carry an epoch, and they differ: the carried field is a whole date source of its
+    // own now, so "the first one wins" has to hold for it the way it holds for the sender.
     let first = schema::ChatEntry {
         from: "first-sender".to_owned(),
         created: "2021-03-04 09:15:00 UTC".to_owned(),
+        created_epoch: Some(1_614_849_300_000),
         is_sender: false,
         ..names(&token)
     };
     let second = schema::ChatEntry {
         from: "second-sender".to_owned(),
         created: "2021-03-06 22:00:00 UTC".to_owned(),
+        created_epoch: Some(1_615_068_000_000),
         conversation_title: Some("the group".to_owned()),
         is_sender: true,
         ..names(&token)
@@ -579,6 +583,7 @@ fn a_token_two_messages_name_carries_the_first_messages_own_facts() {
             from: Username::new("first-sender"),
             is_sender: false,
             created: Some(at("2021-03-04 09:15:00 UTC")),
+            created_epoch_ms: Some(1_614_849_300_000),
         }
     );
     assert_eq!(item_of(&reconciliation, &token).date(), MediaDate::Message(at("2021-03-04 09:15:00 UTC")));
@@ -841,56 +846,107 @@ fn a_file_no_message_names_is_dated_by_the_day_in_its_filename() {
     assert_eq!(item_of(&reconciliation, &named).date(), MediaDate::Message(at("2021-03-04 09:15:00 UTC")));
 }
 
-/// A message can name a file and date nothing: the export writes `""` for a value it has none of.
-/// Unobserved on a matched message, expressible, and the join survives it — only the date falls
-/// back, while the sender and the conversation stay exactly as known as they were.
+/// A message can name a file and state NO date at all: the export writes `""` for a `Created` it
+/// has none of, and spells the same absence in `Created(microseconds)` two ways. Unobserved on a
+/// matched message, expressible, and the join survives it — only the date falls back, while the
+/// sender and the conversation stay exactly as known as they were.
 ///
-/// **It also pins what the record's OTHER date may not do**, from both sides, because `Message`
-/// deliberately does not carry `Created(microseconds)` and a later build might carry it without
-/// reading why. Both rows below set the epoch EXPLICITLY rather than inheriting `names`' zero — a
-/// fixture that leans on the default cannot tell "the zero case is handled" from "a zero happened
-/// to be lying there:
+/// **The two spellings of an absent epoch are what this pins**, and both rows set it EXPLICITLY
+/// rather than inheriting the loader's default: a fixture that leans on the default cannot tell
+/// "the absent case is handled" from "an absence happened to be lying there".
 ///
-/// - a real epoch present and `Created` empty must still fall back, or the unstamped instant this
-///   module never read has become the answer
-/// - an epoch of `0`, which is what serde hands back for an ABSENT key, must not become a
-///   message-stated 1970 date that outranks the filename day — the one shape where carrying the
-///   field would be worse than dropping it
+/// - the key MISSING, which the schema's `Option` reads as `None`
+/// - the key PRESENT holding `0`, which is the field's own empty spelling and not a stated
+///   1970-01-01 instant. Reading it as one would put every undated file forty years before the day
+///   its own filename leads with, and the filename day is the weaker source it would outrank
+///
+/// The row that states an epoch and is dated BY it lives in
+/// `an_epoch_dates_a_message_that_spells_no_created`; this test is the other side of that boundary
+/// and the two have to move together.
 #[test]
 fn a_message_that_names_a_file_without_dating_it_leaves_it_on_the_filename_day() {
-    let dated_epoch = format!("b~{}", id(1));
+    let zero_epoch = format!("b~{}", id(1));
     let absent_epoch = format!("b~{}", id(2));
-    // 2020-07-26 in milliseconds, the shape `tests/export.rs` pins off the real fixture.
-    let with_epoch = schema::ChatEntry {
-        from: "friend-handle".to_owned(),
-        created: String::new(),
-        created_epoch: 1_595_778_485_675,
-        ..names(&dated_epoch)
-    };
-    let without_epoch =
-        schema::ChatEntry { from: "friend-handle".to_owned(), created: String::new(), created_epoch: 0, ..names(&absent_epoch) };
+    let with_zero =
+        schema::ChatEntry { from: "friend-handle".to_owned(), created: String::new(), created_epoch: Some(0), ..names(&zero_epoch) };
+    let without_key =
+        schema::ChatEntry { from: "friend-handle".to_owned(), created: String::new(), created_epoch: None, ..names(&absent_epoch) };
     let reconciliation = reconcile(
-        &history_from(vec![(SOLO_KEY, vec![with_epoch, without_epoch])]),
+        &history_from(vec![(SOLO_KEY, vec![with_zero, without_key])]),
         Discovery::from_files(vec![bare("2021-03-04", 1), bare("2021-03-05", 2)], Vec::new()),
     );
 
-    // The two observables first, and the dated-epoch row before the zero row, so that a build
-    // promoting the epoch reds HERE — naming the row it broke — rather than at a field-level
-    // assertion below that would abort the body before either date was ever read.
+    // The two observables first, so that a build reading `0` as an instant reds HERE — naming the
+    // row it broke — rather than at a field-level assertion below that would abort the body before
+    // either date was ever read.
     assert_eq!(
-        item_of(&reconciliation, &dated_epoch).date(),
+        item_of(&reconciliation, &zero_epoch).date(),
         MediaDate::Filename(Day::parse("2021-03-04").unwrap()),
-        "a real epoch this module never carried must not become the date"
+        "an epoch of `0` is an absence, never a stated 1970"
     );
     assert_eq!(
         item_of(&reconciliation, &absent_epoch).date(),
         MediaDate::Filename(Day::parse("2021-03-05").unwrap()),
-        "an absent epoch is an absence, never 1970"
+        "an absent key is an absence too"
     );
 
-    let message = message_of(&reconciliation, &dated_epoch);
+    // Both spellings reach the carried record as the same `None`, which is what lets the date chain
+    // above have one arm and not two.
+    for source_id in [&zero_epoch, &absent_epoch] {
+        let message = message_of(&reconciliation, source_id);
+        assert_eq!(message.created, None, "{source_id}");
+        assert_eq!(message.created_epoch_ms, None, "{source_id}");
+        assert_eq!(message.from, Username::new("friend-handle"), "an undated message still says who sent it");
+    }
+}
+
+/// The second date source: a record whose `Created` is `""` but whose `Created(microseconds)` holds
+/// a real instant is dated by that instant, ahead of the day its filename leads with.
+///
+/// Three things are pinned at once, and the fixture is built so each one fails distinguishably:
+///
+/// - **the unit.** The key says microseconds and the value is MILLISECONDS. Read as microseconds
+///   `1_595_778_485_675` lands in 1970-01-19; read as seconds it lands past year 52000 and is not a
+///   [`Timestamp`] at all, so it would fall back to the filename day. Only the millisecond reading
+///   gives the instant asserted below, which `tests/export.rs` independently pins against the real
+///   fixture's own `Created` string for the same row.
+/// - **the truncation.** `…_675` is 675ms past the second, and the asserted second is `05`, not
+///   `06`: a rounding conversion reds here.
+/// - **the precedence.** The second row carries BOTH dates, spelling different days, so a build
+///   that let the epoch outrank `Created` reds on a day rather than on a sub-second difference no
+///   assertion could see.
+///
+/// The filename days are a third set of days again, so neither row can pass by falling back.
+#[test]
+fn an_epoch_dates_a_message_that_spells_no_created() {
+    let epoch_only = format!("b~{}", id(1));
+    let both = format!("b~{}", id(2));
+    // 2020-07-26 15:48:05.675 UTC in milliseconds, the value `tests/export.rs` reads off the real
+    // fixture beside a `Created` of `"2020-07-26 15:48:05 UTC"`.
+    const EPOCH_MS: i64 = 1_595_778_485_675;
+    let undated = schema::ChatEntry { created: String::new(), created_epoch: Some(EPOCH_MS), ..names(&epoch_only) };
+    let dated = schema::ChatEntry { created: "2021-03-04 09:15:00 UTC".to_owned(), created_epoch: Some(EPOCH_MS), ..names(&both) };
+    let reconciliation = reconcile(
+        &history_from(vec![(SOLO_KEY, vec![undated, dated])]),
+        Discovery::from_files(vec![bare("2019-01-02", 1), bare("2019-01-03", 2)], Vec::new()),
+    );
+
+    assert_eq!(
+        item_of(&reconciliation, &epoch_only).date(),
+        MediaDate::Message(at("2020-07-26 15:48:05 UTC")),
+        "an epoch is a message-stated instant and outranks the filename day"
+    );
+    assert_eq!(
+        item_of(&reconciliation, &both).date(),
+        MediaDate::Message(at("2021-03-04 09:15:00 UTC")),
+        "`Created` still wins where the record spells both"
+    );
+
+    // The dating rule is one thing and the carried record another: the row dated by its epoch still
+    // reports `created: None`, so nothing downstream reads a `Created` the export never wrote.
+    let message = message_of(&reconciliation, &epoch_only);
     assert_eq!(message.created, None);
-    assert_eq!(message.from, Username::new("friend-handle"), "an undated message still says who sent it");
+    assert_eq!(message.created_epoch_ms, Some(EPOCH_MS), "carried verbatim, in the milliseconds the wire holds");
 }
 
 // ---- the census shape ----

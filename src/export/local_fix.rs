@@ -161,8 +161,12 @@ pub fn default_out_root(source: impl AsRef<Path>) -> PathBuf {
 pub enum TimeSource {
     /// The entry's own `Date`, which only an exact bucket may hand over.
     Entry,
-    /// The `Created` of the chat message that named the file: the chat-media leg's first step, and
-    /// the one thing in either chain with no twin on the other side. Kept apart from [`Self::Entry`]
+    /// An instant the chat message that named the file stated — its `Created`, or its
+    /// `Created(microseconds)` where `Created` is empty: the chat-media leg's first step, and the
+    /// one thing in either chain with no twin on the other side. Which of the two it came from is
+    /// not carried, because both are the same record speaking and
+    /// [`super::chat_media::ChatMediaItem::date`] has already chosen between them. Kept apart from
+    /// [`Self::Entry`]
     /// rather than reworded to cover both, because the two are different records in different files
     /// and a user reading "the memory's own entry" against a chat photo learns something false.
     Message,
@@ -240,7 +244,8 @@ impl Capture {
         Self::from_utc(utc, location, TimeSource::Entry)
     }
 
-    /// The `Created` of the message that named a chat-media file.
+    /// An instant the message that named a chat-media file stated: its `Created`, or the
+    /// `Created(microseconds)` its empty `Created` fell through to.
     ///
     /// No location argument, and that is the chat leg's whole GPS story rather than an omission:
     /// `chat_history.json` carries no coordinate field anywhere, so there is nothing to place the
