@@ -753,6 +753,17 @@ pub struct MissingMedia {
     pub token: String,
     /// The first message that named it.
     pub message: MessageRef,
+    /// The thread that message arrived in, carried as a key for the reason [`Message::conversation`]
+    /// is: [`Self::message`] is a position, and resolving one back into a key is a second lookup that
+    /// can name a different thread than the position does.
+    ///
+    /// **A gap row is still a row with an output record**, which is what makes this load-bearing
+    /// rather than symmetry. A file a message names vanishing between two runs drives the row it
+    /// already finished to [`ItemStatus::SourceMissing`], and since 2026-08-08 that transition KEEPS
+    /// the output path — so the row goes on naming a real directory while dropping out of
+    /// [`Reconciliation::items`]. Without a key here, nothing downstream can say whose directory that
+    /// is; [`super::chat_fix::RecordedDirs`] is the reader that needs it.
+    pub conversation: ConversationId,
     pub reason: MissingReason,
 }
 
@@ -901,7 +912,7 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
     items.sort_by(|left, right| left.source_id().cmp(right.source_id()));
 
     let mut named: Vec<(usize, Message)> = Vec::new();
-    let mut missing: BTreeMap<String, MessageRef> = BTreeMap::new();
+    let mut missing: BTreeMap<String, (MessageRef, ConversationId)> = BTreeMap::new();
     let mut unparsed_tokens: BTreeMap<String, MessageRef> = BTreeMap::new();
     {
         // Collecting into a map keeps the LAST value on a duplicate key, which would silently leave
@@ -945,7 +956,9 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
                             },
                         )),
                         None => {
-                            missing.entry(token).or_insert(at);
+                            // First namer wins, the same rule `Join::Named` applies one arm over, so
+                            // the key recorded here is the one the item itself would have carried.
+                            missing.entry(token).or_insert_with(|| (at, thread.id.clone()));
                         }
                     }
                 }
@@ -965,7 +978,8 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
     }
 
     let reason = if unreadable.is_empty() { MissingReason::NoFile } else { MissingReason::Unscanned };
-    let missing = missing.into_iter().map(|(token, message)| MissingMedia { token, message, reason }).collect();
+    let missing =
+        missing.into_iter().map(|(token, (message, conversation))| MissingMedia { token, message, conversation, reason }).collect();
     let unparsed_tokens = unparsed_tokens.into_iter().map(|(token, message)| UnparsedToken { token, message }).collect();
 
     Reconciliation { items, missing, unparsed_tokens, unparsed, duplicates, unreadable }

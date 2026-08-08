@@ -668,6 +668,16 @@ fn two_messages_naming_one_absent_token_leave_one_gap_row() {
     assert_eq!(reconciliation.missing.len(), 1);
     assert_eq!(reconciliation.missing[0].token, absent);
     assert_eq!(reconciliation.missing[0].message, MessageRef { conversation: 0, message: 0 });
+
+    // The KEY is a separate assertion from the reference above, because it is a separate field that
+    // a later edit can move on its own — measured: making the conversation last-namer-wins while
+    // leaving `MessageRef` first-wins passes every other test in this crate. It has to agree with
+    // the reference for the reason the two exist together: `chat_fix` adopts a directory per
+    // conversation, and a gap row attributing to `bob` while the file that turns up next run
+    // attributes to `alice` would hand one thread the directory holding the other's output.
+    // `alice` rather than `bob` because the parser sorts conversations by key, so this is also what
+    // a present file gets from the `Join::Unnamed` guard.
+    assert_eq!(reconciliation.missing[0].conversation, ConversationId::new("alice"));
 }
 
 /// The census found the filename's day equal to the message's `Created` date for all 2588 matches,
@@ -1368,7 +1378,12 @@ fn an_overlapping_gap_token_and_item_id_stop_the_run_rather_than_racing_the_read
     // Exactly what loosening `parse_history_token` would let `reconcile` build.
     let overlapping = Reconciliation {
         items: vec![ChatMediaItem { media: ChatMedia { file, overlay: None }, join: Join::Unnamed }],
-        missing: vec![MissingMedia { token, message: MessageRef { conversation: 0, message: 0 }, reason: MissingReason::NoFile }],
+        missing: vec![MissingMedia {
+            token,
+            message: MessageRef { conversation: 0, message: 0 },
+            conversation: ConversationId::new("friend"),
+            reason: MissingReason::NoFile,
+        }],
         unparsed_tokens: Vec::new(),
         unparsed: Vec::new(),
         duplicates: Vec::new(),

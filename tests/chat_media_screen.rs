@@ -190,6 +190,39 @@ fn a_run_over_a_synthetic_export_plans_then_finishes_every_item() {
     assert_eq!(manifest.items(ItemKind::ChatMedia).unwrap().len(), 2);
 }
 
+/// A whole conversation leaving the export does not move a survivor's output directory.
+///
+/// Two keys clean to `a_b`, so the first gets it and the second gets `a_b_2`. When the first leaves,
+/// the key set that ordinal was a position in is one shorter, and re-deriving from it alone puts the
+/// survivor's NEW media in `a_b` — a second directory for one thread, beside the one already holding
+/// its finished output. What holds it still is the manifest, read back in `prepare`.
+///
+/// **Driven through `chat_run::run` and not through `chat_fix::plan`, and that is the point of it
+/// being here.** The read is a line of the run composition; a test that re-drives the pieces in the
+/// same order proves the plan can take a seed, never that the composition still hands it one.
+#[test]
+fn a_conversation_that_outlives_its_neighbour_keeps_its_own_directory() {
+    let created = "2021-03-04 14:30:05 UTC";
+    let later = "2021-03-04 15:45:07 UTC";
+    let dir = export_tree(&[("a/b", &[(created, "b~aB3xY90001")]), ("a?b", &[(created, "b~aB3xY90002")])], &[1, 2]);
+    let (inputs, _state) = inputs(&dir, OverlayMode::Both);
+    let first = collect(&inputs);
+    assert_eq!(report(finished(&first)).fixed, 2);
+    assert!(dir.path().join("out/chat/a_b_2/20210304_143005.jpg").is_file(), "sorted key order puts `a?b` second");
+
+    // `a/b` leaves the export outright — its file off disk and its thread out of the history — while
+    // `a?b` gains one more file, which is the only item the second run owes any work for.
+    let part = dir.path().join(format!("mydata~{EXPORT_ID}"));
+    fs::remove_file(chat_media_dir(&part).join(format!("{DAY}_b~aB3xY90001.jpg"))).unwrap();
+    write_media(&part, 3);
+    write_history(&part.join("json"), &[("a?b", &[(created, "b~aB3xY90002"), (later, "b~aB3xY90003")])]);
+
+    let second = collect(&inputs);
+    assert_eq!(report(finished(&second)).fixed, 1, "{:?}", report(finished(&second)).failed);
+    assert!(dir.path().join("out/chat/a_b_2/20210304_154507.jpg").is_file(), "the thread's new media left the tree holding its old");
+    assert!(!dir.path().join("out/chat/a_b/20210304_154507.jpg").exists(), "and it started a second directory for one thread");
+}
+
 /// **The privacy gate, at the boundary the screen reads from.** A conversation key is a friend's
 /// username and it names an output DIRECTORY, so it must reach neither a table row nor the counts.
 /// Asserted against the event the screen actually consumes, so a future field that carried a path

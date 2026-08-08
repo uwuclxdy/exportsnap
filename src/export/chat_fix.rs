@@ -69,7 +69,7 @@ use std::path::{Path, PathBuf};
 
 use crate::export::chat_media::{ChatMediaItem, MediaDate, Message, Reconciliation, Token};
 use crate::export::local_fix::{self, Capture, DeferralReason, Deferred, Leg, Originals, Plan, PlannedItem, SourceMedia};
-use crate::export::manifest::ItemKind;
+use crate::export::manifest::{ItemKind, Manifest, ManifestError};
 use crate::export::model::{Attribution, ConversationId};
 
 /// What decision 44b does with a chat-media pair's two files.
@@ -227,6 +227,163 @@ pub fn dir_name(key: &str) -> String {
     trimmed.to_owned()
 }
 
+/// Where each conversation's output has actually been landing, read back out of the manifest.
+///
+/// [`Conversations`] mints a directory name per conversation KEY and breaks a collision between two
+/// of them with an ordinal that is a position in this run's plan. That is stable against an ITEM
+/// leaving the export and not against a whole CONVERSATION leaving: the key set itself changes, so a
+/// survivor's ordinal moves and a resumed run files its remaining media into the tree already
+/// holding another conversation's finished output. This is what closes that. The run reads the
+/// directory each conversation's own rows already name and keeps it, rather than re-deriving one
+/// from the key set every time.
+///
+/// **Which rows belong to a conversation is the RECONCILIATION's answer, never the path's shape.**
+/// Decision 46b files every unit no message names under `_no-conversation/YYYY/MM/`, whose parent
+/// directory is a month folder and not a conversation's, so a seed built by looking at what a path
+/// looks like would claim one of those as a conversation directory. The join is a fact this run
+/// already holds, and it is the only thing consulted here.
+///
+/// **Both halves of that answer, not only the items.** A row's `source_id` is either a joined unit
+/// or a gap TOKEN, and both can carry an output record: a file a message names vanishing between two
+/// runs drives the row it already finished to [`super::manifest::ItemStatus::SourceMissing`], which
+/// takes it out of [`Reconciliation::items`] and into [`Reconciliation::missing`] under the same
+/// identity. Reading items alone leaves that row attributable to nobody while it goes on naming a
+/// real directory — and since it is still reserved below, the conversation is then reserved out of
+/// its OWN directory and its remaining media starts a second one beside its finished output. That is
+/// task 40's own harm class, and [`super::chat_media::MissingMedia::conversation`] exists so it
+/// cannot happen.
+///
+/// **The recorded path is the item's own output** — [`super::local_fix::run`] hands
+/// [`Manifest::mark_done`] [`super::local_fix::PlannedItem::output`] and nothing else — so its
+/// parent IS the conversation's directory. Decision 46c's `originals/` copies sit one level further
+/// down under overlay mode `both` and are never checked in, which is what makes the parent
+/// unambiguous rather than a shape that depends on the mode.
+///
+/// **Every row carrying an output record seeds, whatever status it carries.** That is a wider set
+/// than `done` and deliberately so: the manifest's own output-record rule is that the three output
+/// columns survive a transition into a parked status ([`super::manifest::ItemStatus::SourceMissing`],
+/// [`super::manifest::ItemStatus::Retired`], [`super::manifest::ItemStatus::Excluded`]) and are
+/// cleared by the work ones ([`super::manifest::ItemStatus::Pending`],
+/// [`super::manifest::ItemStatus::Failed`]), so a recorded path already means "a run finished this
+/// row and nothing has driven it back to work". Asking `output_path.is_some()` asks that once;
+/// naming a status list here would be a second spelling of the same rule, free to drift from it the
+/// next time a status is added. On a parked row the record is HISTORY rather than a live claim about
+/// disk — the user may have deleted the output tree — and that costs nothing, because what is kept
+/// is the NAME a conversation's media groups under and not the existence of a file.
+///
+/// **The parked statuses are why that is not a second spelling of `done`, and the reason is dated.**
+/// Until queue task 39 (2026-08-08) `mark_source_missing` nulled the three output columns, so a
+/// vanished row named no directory and every seeding row really was `done`. That transition now KEEPS
+/// the record, and this reader consumes exactly the set task 39 widened. Both halves feel it, and
+/// each is pinned separately because narrowing them together hides the first behind the second:
+///
+/// - [`Self::named`] narrowed to `done` loses the conversation whose only finished file vanished, and
+///   its remaining media starts a second directory —
+///   `a_conversation_whose_only_finished_file_vanished_keeps_its_own_directory`.
+/// - [`Self::occupied`] narrowed to `done` loses a RETIRED row's reservation, and a new key takes the
+///   departed thread's directory — `a_retired_rows_record_still_reserves_the_directory_it_names`.
+///   Reached by an ordinary chain: the file goes while the thread still names its token (park, record
+///   kept), then the thread leaves the history (retire, record kept).
+///
+/// Narrowing BOTH at once still passes the first of those, since the row then drops out of the
+/// reservation too and the answer coincides — measured, and the reason the two are pinned apart. The
+/// one parked status that stays unreachable-with-a-record here is
+/// [`super::manifest::ItemStatus::Excluded`], whose only producer is decision 44d's thumbnails, which
+/// no message can name because [`super::chat_media`]'s history-token grammar admits the `b~` spelling
+/// alone.
+///
+/// **Two rows of one conversation can disagree**, if a run before this rule split them, so
+/// [`Self::named`] keeps every directory the conversation's rows name and [`Conversations::adopt`]
+/// takes the lowest ADOPTABLE one in `Ord` order. Lowest, because that is a function of the SET of
+/// directories those rows name: one row leaving cannot move the answer unless it was the last one
+/// naming its directory, which is the same property this type exists to buy one layer up. "The first
+/// row's" fails exactly that — the lowest source id leaving moves the answer while every other row
+/// still names its own directory — and "the most recent" would rest on `updated_at`, which ties.
+///
+/// **Adoptable, and not merely lowest, and the difference is a whole conversation's tree.** A
+/// candidate this run cannot take — one recorded under a different output root, or under the
+/// `_no-conversation` bucket's month tree by a build whose shape differed — must fall through to the
+/// next rather than stand in for the conversation. Reducing to a single minimum HERE would let one
+/// unadoptable record that sorts low drop the adoption entirely and send the conversation back to
+/// deriving from the key set, which is the outcome this whole type exists to prevent; `/a/chat/x`
+/// sorting below `/b/chat/x` makes that reachable with no forged row at all. So the filter lives at
+/// the only place that knows which root this run writes into, and this side keeps the candidates.
+/// The `BTreeMap`/`BTreeSet` pair is what keeps both walks off a hash seed.
+///
+/// **[`Self::occupied`] is the other half, and it is about the conversations this run has NO item
+/// for.** A conversation that left the export keeps its directory on disk and its rows go on naming
+/// it, and nothing in this run's key set mentions it — so a NEW key cleaning onto that name would be
+/// planned straight into a departed thread's tree, on top of files finished rows still claim. Every
+/// directory any row records is therefore reserved before a name is derived, which costs a suffix and
+/// never a merge. That set is deliberately NOT filtered by the join: attributing a row to a
+/// conversation needs the reconciliation, but reserving a name the tree already contains does not.
+///
+/// **Reserving unconditionally is only safe because [`Self::named`] sees every attributable row.**
+/// The reservation cannot tell a departed conversation's directory from a live one's; it just claims
+/// the name. What keeps a live conversation from being reserved out of its own tree is that the
+/// adopt pass runs FIRST and has already assigned it — which holds exactly as long as every row that
+/// can carry an output record is attributable. Both are: a joined item through its message, a gap
+/// token through [`super::chat_media::MissingMedia::conversation`]. Add a third producer of a
+/// recorded path that the reconciliation cannot attribute and this reservation turns on it.
+#[derive(Debug, Default)]
+pub struct RecordedDirs {
+    /// Every directory a conversation's own rows name, per conversation.
+    named: BTreeMap<ConversationId, BTreeSet<PathBuf>>,
+    /// Every directory ANY row of this kind names, the ones no conversation of this run owns
+    /// included.
+    occupied: BTreeSet<PathBuf>,
+}
+
+impl RecordedDirs {
+    /// Reads what `manifest` records for the units `reconciliation` names, and what it records at all.
+    ///
+    /// One whole-kind [`Manifest::items`] read rather than a point query per unit, for the reason
+    /// [`Reconciliation::enroll`] gives about its own two: a real export would make that 9001 point
+    /// queries. Skipped altogether when the reconciliation joins nothing, which is every export
+    /// delivered without the chat category: [`plan`] derives no conversation directory at all there,
+    /// so there is nothing to adopt and nothing a reservation could protect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] when the manifest read fails.
+    pub fn read(reconciliation: &Reconciliation, manifest: &Manifest) -> Result<Self, ManifestError> {
+        // Both halves of the reconciliation's own identity space, because both can name a row that
+        // carries an output record: an item a message joined, and a gap TOKEN whose file vanished
+        // between two runs — the two share one `source_id`, which is what makes a single map right
+        // here rather than two lookups.
+        let conversations: BTreeMap<&str, &ConversationId> = reconciliation
+            .items
+            .iter()
+            .filter_map(|item| item.message().map(|message| (item.source_id(), &message.conversation)))
+            .chain(reconciliation.missing.iter().map(|missing| (missing.token.as_str(), &missing.conversation)))
+            .collect();
+        if conversations.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let mut recorded = Self::default();
+        for row in manifest.items(ItemKind::ChatMedia)? {
+            let Some(dir) = row.output_path.as_deref().and_then(Path::parent) else { continue };
+            recorded.occupied.insert(dir.to_path_buf());
+            if let Some(conversation) = conversations.get(row.source_id.as_str()) {
+                recorded.named.entry((*conversation).clone()).or_default().insert(dir.to_path_buf());
+            }
+        }
+        Ok(recorded)
+    }
+}
+
+/// The single component `dir` names directly under `root`, or `None` when it is not a child of it.
+///
+/// The whole of what makes a name off the manifest safe to join back onto the output root, and it is
+/// the containment property rather than a cleaning pass — see [`Conversations::adopt`].
+fn child_name<'a>(root: &Path, dir: &'a Path) -> Option<&'a str> {
+    if dir.parent() != Some(root) {
+        return None;
+    }
+    dir.file_name()?.to_str()
+}
+
 mod issued {
     //! The append-only set the suffix walk's soundness rests on, held by the compiler.
     //!
@@ -323,9 +480,17 @@ fn portable(c: char) -> bool {
 /// alone, so no item can move it. Pinned by
 /// `a_conversation_keeps_its_directory_when_a_neighbours_item_leaves_the_export`.
 ///
-/// The case that remains, and it is routed to `docs/todo.md` rather than closed here: a whole
-/// conversation leaving the export still renames the neighbour it was colliding with, because the
-/// key set itself changed.
+/// A whole CONVERSATION leaving the export moves the key set itself, which sorted order cannot
+/// absorb, and that case is closed one layer above rather than here: [`RecordedDirs`] hands over the
+/// directory each conversation's own manifest rows already name and [`Self::adopt`] takes it back
+/// before a single name is derived.
+///
+/// **Its mirror is the same defect and needs the other half of that read.** A departed conversation
+/// is in nobody's key set, so nothing would claim its directory, and a NEW key cleaning onto that
+/// name would be derived straight into a departed thread's tree — on top of files its finished rows
+/// still name, which is where the per-ITEM ordinal below then overwrites them. So `adopt` reserves
+/// every directory the manifest records and not only the ones this run can attribute. What is left
+/// deriving a fresh name is a key the recorded tree has no directory for at all.
 struct Conversations {
     root: PathBuf,
     /// The next ordinal to try for a folded cleaned name, so a long collision run costs one lookup
@@ -342,14 +507,75 @@ struct Conversations {
 }
 
 impl Conversations {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: PathBuf, recorded: &RecordedDirs) -> Self {
         // Claimed before any real key can be, which is what makes a key cleaning to it suffix away
         // rather than merge into the bucket for the files no message names. `claim` folds it like
         // every other name, so a key shouting `_NO-CONVERSATION` cannot take the bucket on a
         // filesystem that folds case either.
         let mut used = issued::IssuedNames::default();
         used.claim(NO_CONVERSATION_DIR);
-        Self { root, next: BTreeMap::new(), used, assigned: BTreeMap::new() }
+        let mut conversations = Self { root, next: BTreeMap::new(), used, assigned: BTreeMap::new() };
+        conversations.adopt(recorded);
+        conversations
+    }
+
+    /// Takes back the directory each conversation's own manifest rows already name, then reserves
+    /// every other directory the manifest records.
+    ///
+    /// Its position between the two claims around it is the whole of what it has to get right.
+    /// [`NO_CONVERSATION_DIR`] is claimed BEFORE this, so a record naming the reserved bucket — a row
+    /// an earlier build's tree shape wrote, or a hand-edited one — suffixes away from it exactly as a
+    /// key spelling it does, instead of merging a real thread's media into the name that means "no
+    /// thread". And everything here is claimed BEFORE [`Self::dir`] derives anything, so a key whose
+    /// cleaned name spells an adopted or reserved one verbatim cannot land on top of it.
+    ///
+    /// Through [`issued::IssuedNames::claim`] rather than around it, for the reason that type folds
+    /// at all: a name compared case-sensitively would hand `Friend` back to one conversation while
+    /// leaving `friend` free for the next, which is one directory on APFS and NTFS.
+    ///
+    /// **The candidates are walked in `Ord` order and the first ADOPTABLE one is taken**, not the
+    /// lowest — see [`RecordedDirs`] for what reducing to a minimum before the filter costs. A
+    /// candidate is adoptable when it is a direct child of this run's chat root and its name is still
+    /// free; a conversation whose every candidate is taken derives a fresh name, which is also the
+    /// tie-break when two conversations were recorded under one directory (the first in sorted key
+    /// order keeps it).
+    ///
+    /// **A record under another output root is not adoptable.** It names a directory this run is not
+    /// writing into, so the ordinal it carries is a collision suffix for a collision the new root
+    /// does not have. That is the whole of the reason: nothing here is a claim about what the resume
+    /// sweep then does with those rows, which it measurably does not do — [`Manifest::resume`] hashes
+    /// each row at its RECORDED path, so an old output tree still on disk verifies and those rows are
+    /// never handed back as work.
+    ///
+    /// **The reservation pass claims and assigns nothing**, which is what makes it cheap enough to
+    /// run over every recorded directory: it costs a departed conversation's neighbour a suffix and
+    /// can never hand anybody a tree.
+    ///
+    /// **This is a second route to a path component under the output root, and it does not pass
+    /// [`dir_name`].** What contains it is [`child_name`]: `Path::file_name` yields one `Normal`
+    /// component, never `..` and never a root, so nothing joined here can leave the tree — and the
+    /// candidate is required to equal a child of the root this run already computed. What it does not
+    /// do is re-run the cleaner, so a name `dir_name` would have refused (a [`RESERVED_STEMS`] device
+    /// name, one past [`MAX_DIR_NAME`]) can come back out of a row another build or a hand edit
+    /// wrote. Conceded rather than closed: re-cleaning is not idempotent over an ordinal suffix, so
+    /// it would rename the very directory this exists to keep.
+    fn adopt(&mut self, recorded: &RecordedDirs) {
+        for (conversation, candidates) in &recorded.named {
+            for dir in candidates {
+                let Some(name) = child_name(&self.root, dir) else { continue };
+                if !self.used.claim(name) {
+                    continue;
+                }
+                self.assigned.insert(conversation.clone(), self.root.join(name));
+                break;
+            }
+        }
+        for dir in &recorded.occupied {
+            if let Some(name) = child_name(&self.root, dir) {
+                // Already-claimed is the ordinary answer here: every adopted name is in this set too.
+                self.used.claim(name);
+            }
+        }
     }
 
     fn dir(&mut self, conversation: &ConversationId) -> PathBuf {
@@ -384,20 +610,47 @@ impl Conversations {
 ///
 /// `mode` is decision 44b, and it changes the plan rather than the pass — see [`OverlayMode`].
 ///
+/// `recorded` is where this export's conversations have been landing so far, and a caller with no
+/// manifest to read one out of passes [`RecordedDirs::default`] to get a first run's answer. It is
+/// read BEFORE [`super::local_fix::run`]'s resume sweep rather than after, and that ordering is the
+/// point: a conversation whose only finished output the user deleted still names the directory that
+/// output was written into, so the rewrite goes back where it was instead of starting a second
+/// directory for the same thread.
+///
 /// **One consequence worth stating, because it moves an output path.** Withholding the overlay is
 /// what [`OverlayMode::Originals`] does, and [`local_fix::passes_through`] reads exactly that field,
 /// so a PNG main that pairs comes out `.png` under `originals` and `.jpg` under the other two. That
 /// is decision 47's own rule one mode over — nothing is re-encoded when there is nothing to
 /// re-encode it for — and it is right rather than incidental. It is also unreachable from the
 /// observed export, where only the zip family pairs and every zip main is a video. What it costs if
-/// a future export makes it reachable is the residual [`Conversations`] already carries: an item
-/// changing its name can move a neighbour's `_2` suffix between runs. The manifest records where a
-/// finished item actually landed, so a resume still verifies the right file.
+/// a future export makes it reachable is the residual the per-ITEM ordinal below still carries, which
+/// is the same shape [`RecordedDirs`] answers one layer up and is NOT answered by it: `taken` is a
+/// position in this plan too, and nothing reads it back off the manifest.
+///
+/// **That one is measured rather than argued, and it loses bytes.** Two items landing in one
+/// directory on one second take `<stem>.<ext>` and `<stem>_2.<ext>`; the first leaves the export
+/// while the second is still owed work; the second is then planned onto `<stem>.<ext>` and writes
+/// over the first's finished output. Measured end state, run by run: two [`super::manifest::ItemStatus::Done`] rows
+/// over one path with disagreeing digests — [`Manifest::retire_absent`] exempts `Done`, so the
+/// departed row does not park — then the next resume finds it `Changed` and demotes it, and since
+/// its source is gone it is never planned again and retires. The repaired file is destroyed and
+/// `<stem>_2.<ext>` is orphaned. It does NOT alternate for ever: where the overwritten row's source
+/// is still in the export it is re-fixed at its own shifted name on the next run and converges.
+///
+/// **The `_no-conversation` bucket is where this is ordinary rather than rare**, since a whole day's
+/// items there share one directory and every one of them whose date falls all the way through to the
+/// filename takes `YYYYMMDD_000000`. The bucket is 6877 of the observed export's 9465 FILES, which
+/// is 6413 items — a zip pair's 464 overlay halves ride on the media they pair with — and how many
+/// of those 6413 actually fall through to midnight rather than to an embedded timestamp is
+/// unmeasured, so the collision set is bounded by 6413 and not known to be it.
+///
+/// Open in `docs/todo.md` rather than closed here — it is a different layer, and widening this
+/// change to reach it was not the task.
 #[must_use]
-pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode) -> Plan {
+pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode, recorded: &RecordedDirs) -> Plan {
     let chat_root = out_root.as_ref().join(CHAT_DIR);
     let no_conversation = chat_root.join(NO_CONVERSATION_DIR);
-    let mut conversations = Conversations::new(chat_root);
+    let mut conversations = Conversations::new(chat_root, recorded);
 
     // Every conversation key the reconciliation names, in sorted order, assigned before a single
     // item is planned. A `BTreeSet` iterates in `Ord` order, which is what makes the assignment a
@@ -413,7 +666,9 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
     let mut deferred = Vec::new();
     let mut excluded = Vec::new();
     // Keyed by the whole candidate path, not by the name: two conversations may each hold a file
-    // that wants `20210304_000000.jpg`, and those two do not collide.
+    // that wants `20210304_000000.jpg`, and those two do not collide. Where the directory an item
+    // lands in is now read back off the manifest, this ordinal is still a position in the plan alone
+    // — the open residual `plan`'s docs measure.
     let mut taken: BTreeMap<PathBuf, u32> = BTreeMap::new();
 
     for item in &reconciliation.items {
@@ -519,14 +774,37 @@ fn attribution(message: &Message) -> Attribution {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conversations, NO_CONVERSATION_DIR, dir_name};
+    use super::{Conversations, NO_CONVERSATION_DIR, RecordedDirs, dir_name};
     use crate::export::model::ConversationId;
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
+    /// The one root every assertion below joins onto.
+    const CHAT_ROOT: &str = "/out/chat";
+
     fn assigned(keys: &[&str]) -> Vec<PathBuf> {
-        let mut conversations = Conversations::new(PathBuf::from("/out/chat"));
+        assigned_with(&RecordedDirs::default(), keys)
+    }
+
+    /// [`assigned`] for a run that already has somewhere to put some of these conversations.
+    fn assigned_with(recorded: &RecordedDirs, keys: &[&str]) -> Vec<PathBuf> {
+        let mut conversations = Conversations::new(PathBuf::from(CHAT_ROOT), recorded);
         keys.iter().map(|key| conversations.dir(&ConversationId::new(*key))).collect()
+    }
+
+    /// What [`RecordedDirs::read`] builds, without a manifest to build it out of.
+    ///
+    /// `named` rows are `(conversation, directory)` and reach both halves exactly as a row does;
+    /// `absent` are directories the manifest records for no conversation this run names, which is
+    /// what a departed thread leaves behind.
+    fn recorded(named: &[(&str, &str)], absent: &[&str]) -> RecordedDirs {
+        let mut dirs = RecordedDirs::default();
+        for (key, dir) in named {
+            dirs.named.entry(ConversationId::new(*key)).or_default().insert(PathBuf::from(*dir));
+            dirs.occupied.insert(PathBuf::from(*dir));
+        }
+        dirs.occupied.extend(absent.iter().map(PathBuf::from));
+        dirs
     }
 
     #[test]
@@ -565,6 +843,79 @@ mod tests {
         // so this must not quietly become a lowercasing pass.
         assert_eq!(dirs[0].file_name().and_then(|name| name.to_str()), Some("Friend"));
         assert_eq!(dirs[2].file_name().and_then(|name| name.to_str()), Some("FRIEND_3"));
+    }
+
+    /// An adopted directory is only meaningful under the root it was recorded beneath: elsewhere its
+    /// ordinal is a suffix for a collision that root does not have. The second half is the control —
+    /// without it, an `adopt` that never adopted anything would read green.
+    #[test]
+    fn a_directory_recorded_under_another_out_root_is_not_adopted() {
+        assert_eq!(assigned_with(&recorded(&[("a?b", "/elsewhere/chat/a_b_2")], &[]), &["a?b"]), [Path::new("/out/chat/a_b")]);
+        assert_eq!(assigned_with(&recorded(&[("a?b", "/out/chat/a_b_2")], &[]), &["a?b"]), [Path::new("/out/chat/a_b_2")]);
+    }
+
+    /// The lowest ADOPTABLE candidate, not the lowest candidate: one this run cannot take has to fall
+    /// through to the next rather than stand in for the conversation, which would drop the adoption
+    /// and send it back to deriving from the key set.
+    ///
+    /// Both fixtures put the unadoptable candidate FIRST in `Ord` order, which is the only place it
+    /// does harm — `_` (0x5F) sorts below `f` (0x66), and `/a` below `/out`. The second needs no
+    /// forged row at all: it is one conversation with rows under an old output root and the live one.
+    #[test]
+    fn an_unadoptable_record_falls_through_to_the_next_candidate() {
+        let bucketed =
+            recorded(&[("friend-handle", "/out/chat/_no-conversation/2021/03"), ("friend-handle", "/out/chat/friend-handle_7")], &[]);
+        assert_eq!(assigned_with(&bucketed, &["friend-handle"]), [Path::new("/out/chat/friend-handle_7")]);
+
+        let stale = recorded(&[("friend-handle", "/a/chat/friend-handle_7"), ("friend-handle", "/out/chat/friend-handle_7")], &[]);
+        assert_eq!(assigned_with(&stale, &["friend-handle"]), [Path::new("/out/chat/friend-handle_7")]);
+    }
+
+    /// A conversation that left the export is in nobody's key set, so nothing adopts its directory —
+    /// and a new key cleaning onto that name would be derived straight into its tree, on top of files
+    /// its finished rows still name. Reserving every recorded directory costs the newcomer a suffix.
+    #[test]
+    fn a_departed_conversations_directory_is_not_handed_to_a_new_key() {
+        let left_behind = recorded(&[("a?b", "/out/chat/a_b_2")], &["/out/chat/a_b"]);
+        assert_eq!(assigned_with(&left_behind, &["a?b", "a:b"]), [Path::new("/out/chat/a_b_2"), Path::new("/out/chat/a_b_3")]);
+    }
+
+    /// The reserved bucket is claimed before a single record is adopted, so a row naming it loses
+    /// the same way a key spelling it does.
+    ///
+    /// Unreachable from a directory THIS build wrote — no real key can be handed the bucket name —
+    /// and reachable from the store, which outlives the build that filled it.
+    ///
+    /// The third key is adopted, and it is what separates this from a run that adopted nothing at
+    /// all: with only the first two, both expected values coincide with no-adoption and the test
+    /// carries no evidence a record reached [`Conversations::dir`].
+    #[test]
+    fn a_record_naming_the_reserved_bucket_cannot_hand_it_to_a_conversation() {
+        let forged = recorded(&[("friend", "/out/chat/_no-conversation"), ("other", "/out/chat/other_4")], &[]);
+        assert_eq!(
+            assigned_with(&forged, &["friend", NO_CONVERSATION_DIR, "other"]),
+            [Path::new("/out/chat/friend"), Path::new("/out/chat/_no-conversation_2"), Path::new("/out/chat/other_4")]
+        );
+    }
+
+    /// Every adopted name is claimed before any name is derived, and `used` is what sees it: the
+    /// ordinal hint for `a_b_2` is zero, so a walk reading only that would hand out the directory the
+    /// adopted conversation is already using.
+    #[test]
+    fn a_key_spelling_an_adopted_name_does_not_land_on_it() {
+        let kept = recorded(&[("a?b", "/out/chat/a_b_2")], &[]);
+        assert_eq!(
+            assigned_with(&kept, &["a?b", "a_b_2", "a/b"]),
+            [Path::new("/out/chat/a_b_2"), Path::new("/out/chat/a_b_2_2"), Path::new("/out/chat/a_b")]
+        );
+    }
+
+    /// The adoption claims through the same fold every derived name does. Pinned here as well as at
+    /// the derivation, because a fold dropped from `adopt` alone leaves both case tests above green.
+    #[test]
+    fn an_adopted_name_is_claimed_through_the_case_fold() {
+        let kept = recorded(&[("A", "/out/chat/Friend")], &[]);
+        assert_eq!(assigned_with(&kept, &["A", "friend"]), [Path::new("/out/chat/Friend"), Path::new("/out/chat/friend_2")]);
     }
 
     #[test]

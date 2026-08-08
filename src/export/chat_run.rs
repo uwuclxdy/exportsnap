@@ -220,8 +220,8 @@ pub enum RunError {
     Discover(DiscoverError),
     /// The source root could not be listed looking for `chat_media` dirs.
     Scan(ChatScanError),
-    /// The manifest could not be opened, enrolled, or written. The one mid-run failure: the state
-    /// store itself is broken, so nothing can be recorded against it.
+    /// The manifest could not be opened, enrolled, read back, or written. The one mid-run failure:
+    /// the state store itself is broken, so nothing can be recorded against it.
     Manifest(ManifestError),
     /// A bug in the pipeline unwound the worker. Not an input state; present so a caller can say
     /// something instead of spinning forever.
@@ -349,7 +349,13 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     let mut manifest = Manifest::open_in(&manifest_dir, &export_id).map_err(RunError::Manifest)?;
     reconciliation.enroll(&mut manifest).map_err(RunError::Manifest)?;
 
-    let plan = chat_fix::plan(&reconciliation, &inputs.out_root, inputs.overlay);
+    // Read after the enrollment and before the plan, which is the only window where it is the state
+    // the run will actually work from: the enrollment is what resets a row whose file came back, and
+    // the resume sweep inside `local_fix::run` is what drops the record of an output the user
+    // deleted — and that one has to land AFTER this, so the rewrite goes back into the directory it
+    // was written into rather than starting a second one for the same thread.
+    let recorded = chat_fix::RecordedDirs::read(&reconciliation, &manifest).map_err(RunError::Manifest)?;
+    let plan = chat_fix::plan(&reconciliation, &inputs.out_root, inputs.overlay, &recorded);
     let counts = counts(&reconciliation, &plan, had_history);
     let rows = plan
         .items

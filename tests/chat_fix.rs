@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use exportsnap::export::chat_fix::{self, OverlayMode, dir_name};
+use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs, dir_name};
 use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Reconciliation, Token, discover, reconcile};
 use exportsnap::export::exif::{Jpeg, Stamp};
 use exportsnap::export::local_fix::{self, DeferralReason, FixReport, Notice, Plan, TimeSource, VideoOptions};
@@ -194,6 +194,12 @@ fn from_names(history: &ChatHistory, files: &[&str]) -> Reconciliation {
     reconcile(history, Discovery::from_files(files, Vec::new()))
 }
 
+/// The plan a FIRST run builds: no manifest has recorded a directory yet, so every one of them is
+/// derived from the conversation-key set.
+fn first_run(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode) -> Plan {
+    chat_fix::plan(reconciliation, out_root, mode, &RecordedDirs::default())
+}
+
 struct Workspace {
     temp: TempDir,
 }
@@ -230,11 +236,17 @@ impl Workspace {
     }
 
     /// [`Self::run`] under a named overlay mode.
+    ///
+    /// Enroll, read back where this export's conversations have been landing, plan, run — the order
+    /// `chat_run::prepare` drives, and the order matters at both ends: the enrollment is what a
+    /// returning file's row is reset by, and the resume sweep that drops a deleted output's record
+    /// runs inside `local_fix::run`, after the plan is fixed.
     fn run_in(&self, history: &ChatHistory, mode: OverlayMode) -> Run {
         let reconciliation = reconcile(history, discover(self.source()).unwrap());
-        let plan = chat_fix::plan(&reconciliation, self.out(), mode);
         let mut manifest = self.manifest();
         reconciliation.enroll(&mut manifest).unwrap();
+        let recorded = RecordedDirs::read(&reconciliation, &manifest).unwrap();
+        let plan = chat_fix::plan(&reconciliation, self.out(), mode, &recorded);
         let report = local_fix::run(&plan, &mut manifest, 3, &copying()).unwrap();
         Run { plan, manifest, report }
     }
@@ -244,9 +256,17 @@ impl Workspace {
         self.plan_in(history, OverlayMode::Both)
     }
 
-    /// [`Self::plan`] under a named overlay mode.
+    /// [`Self::plan`] under a named overlay mode. A FIRST run's plan: no manifest is consulted.
     fn plan_in(&self, history: &ChatHistory, mode: OverlayMode) -> Plan {
-        chat_fix::plan(&reconcile(history, discover(self.source()).unwrap()), self.out(), mode)
+        first_run(&reconcile(history, discover(self.source()).unwrap()), self.out(), mode)
+    }
+
+    /// What a resumed run would plan: the same read of this workspace's manifest [`Self::run_in`]
+    /// makes, without the run behind it.
+    fn replan(&self, history: &ChatHistory) -> Plan {
+        let reconciliation = reconcile(history, discover(self.source()).unwrap());
+        let recorded = RecordedDirs::read(&reconciliation, &self.manifest()).unwrap();
+        chat_fix::plan(&reconciliation, self.out(), OverlayMode::Both, &recorded)
     }
 }
 
@@ -291,6 +311,11 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) {
 /// Every planned output, as a path, in plan order.
 fn outputs(plan: &Plan) -> Vec<&Path> {
     plan.items.iter().map(|item| item.output.as_path()).collect()
+}
+
+/// The directory one planned item's output lands in, or `None` when the plan does not carry it.
+fn dir_of(plan: &Plan, source_id: &str) -> Option<PathBuf> {
+    plan.items.iter().find(|item| item.source_id == source_id).and_then(|item| item.output.parent()).map(Path::to_path_buf)
 }
 
 fn modified(path: &Path) -> SystemTime {
@@ -471,8 +496,8 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says() {
 #[test]
 fn a_png_main_that_pairs_is_copied_through_under_originals_and_re_encoded_otherwise() {
     let names = ["2021-03-04_media~vantsnap-0000009.zip.a1b2c3d.png", "2021-03-04_overlay~vantsnap-0000009.zip.a1b2c3d.png"];
-    let merged = chat_fix::plan(&from_names(&no_history(), &names), "/out", OverlayMode::Both);
-    let kept = chat_fix::plan(&from_names(&no_history(), &names), "/out", OverlayMode::Originals);
+    let merged = first_run(&from_names(&no_history(), &names), "/out", OverlayMode::Both);
+    let kept = first_run(&from_names(&no_history(), &names), "/out", OverlayMode::Originals);
 
     assert_eq!(
         merged.items[0].output,
@@ -782,8 +807,7 @@ fn a_key_longer_than_the_cap_is_shortened_and_two_of_them_still_get_two_folders(
         (&format!("{long}a"), vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")]),
         (&format!("{long}b"), vec![message("b", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")]),
     ]);
-    let plan =
-        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     let dirs: BTreeSet<&Path> = plan.items.iter().filter_map(|item| item.output.parent()).collect();
     assert_eq!(dirs.len(), 2, "two keys, two directories: {dirs:?}");
     assert!(dirs.iter().all(|dir| dir.file_name().is_some_and(|name| name.len() <= 66)), "{dirs:?}");
@@ -797,8 +821,7 @@ fn a_key_that_cleans_to_the_no_conversation_bucket_is_suffixed_away_from_it() {
         // the bucket the first key tried to take.
         ("other", vec![]),
     ]);
-    let plan =
-        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(
         outputs(&plan),
         [
@@ -819,8 +842,8 @@ fn the_collision_suffix_is_the_same_answer_on_a_second_run() {
     ]);
     let reconciliation = from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]);
 
-    let first = chat_fix::plan(&reconciliation, "/out", OverlayMode::Both);
-    let second = chat_fix::plan(&reconciliation, "/out", OverlayMode::Both);
+    let first = first_run(&reconciliation, "/out", OverlayMode::Both);
+    let second = first_run(&reconciliation, "/out", OverlayMode::Both);
     assert_eq!(outputs(&first), [Path::new("/out/chat/a_b/20210304_143005.jpg"), Path::new("/out/chat/a_b_2/20210304_143005.jpg"),]);
     assert_eq!(outputs(&first), outputs(&second));
 }
@@ -846,15 +869,212 @@ fn a_conversation_keeps_its_directory_when_a_neighbours_item_leaves_the_export()
     };
     let all = ["b~aB3xY90001", "b~aB3xY90002", "b~aB3xY90003"];
 
-    let full = chat_fix::plan(&from_names(&rows(&all), &files), "/out", OverlayMode::Both);
+    let full = first_run(&from_names(&rows(&all), &files), "/out", OverlayMode::Both);
     // The first item, which belongs to `a/b`, leaves the export. `a?b` now arrives first.
-    let after = chat_fix::plan(&from_names(&rows(&all[1..]), &files[1..]), "/out", OverlayMode::Both);
+    let after = first_run(&from_names(&rows(&all[1..]), &files[1..]), "/out", OverlayMode::Both);
 
-    let dir_of = |plan: &Plan, source_id: &str| {
-        plan.items.iter().find(|item| item.source_id == source_id).and_then(|item| item.output.parent()).map(Path::to_path_buf)
-    };
     assert_eq!(dir_of(&full, "b~aB3xY90002"), Some(PathBuf::from("/out/chat/a_b_2")), "sorted key order puts `a?b` second");
     assert_eq!(dir_of(&after, "b~aB3xY90002"), dir_of(&full, "b~aB3xY90002"), "an item leaving moved another conversation's directory");
+}
+
+/// The case sorted key order cannot reach: a whole CONVERSATION leaving moves the key set itself,
+/// which is that rule's only input, so every survivor below the departure slides down one suffix and
+/// lands in the tree the run before it filled for its neighbour.
+///
+/// What holds it still is the manifest — the directory a conversation's own rows already name — and
+/// the fixture is built so the two answers are provably different: with three keys cleaning to
+/// `a_b` and the FIRST one's media gone, re-deriving from the key set alone puts `a?b` in `a_b` and
+/// `a|b` in `a_b_2`, the directory `a?b`'s own finished output is sitting in.
+#[test]
+fn a_conversation_keeps_the_directory_the_manifest_recorded_when_a_whole_neighbour_leaves() {
+    let work = Workspace::new();
+    let leaving = plain(&work.source(), Token::B, 1);
+    let middle = plain(&work.source(), Token::B, 2);
+    let last = plain(&work.source(), Token::B, 3);
+    let sent = |id: &str| vec![message("a", "2021-03-04 14:30:05 UTC", id)];
+    let run = work.run(&history(vec![("a/b", sent(&leaving)), ("a?b", sent(&middle)), ("a|b", sent(&last))]));
+    assert_eq!(run.report.fixed, 3);
+
+    let recorded_dir = |source_id: &str| -> PathBuf {
+        let output = run.row(source_id).output_path.expect("a finished row records where it landed");
+        output.parent().expect("an output is inside a directory").to_path_buf()
+    };
+    let chat = work.out().join("chat");
+    assert_eq!(recorded_dir(&middle), chat.join("a_b_2"), "sorted key order put `a?b` second");
+    assert_eq!(recorded_dir(&last), chat.join("a_b_3"), "and `a|b` third");
+
+    // Every item of the FIRST key leaves the export: its file off disk AND its thread out of the
+    // history, so the key set itself is one shorter rather than one item lighter.
+    fs::remove_file(chat_media_dir(&work.source()).join(format!("{DAY}_{leaving}.jpg"))).unwrap();
+    let after = work.replan(&history(vec![("a?b", sent(&middle)), ("a|b", sent(&last))]));
+
+    assert_eq!(dir_of(&after, &middle), Some(recorded_dir(&middle)), "a conversation leaving moved a survivor's directory");
+    assert_eq!(dir_of(&after, &last), Some(recorded_dir(&last)), "a conversation leaving moved a survivor's directory");
+}
+
+/// The mirror of the case above, and the half adoption alone cannot reach: a departed conversation is
+/// in NOBODY's key set, so nothing adopts its directory, and a new key cleaning onto that name is
+/// derived straight into the departed thread's tree — on top of files its finished rows still name.
+///
+/// Driven through the real [`RecordedDirs::read`] rather than a hand-built one, because the
+/// reservation is the half of that read the join filter does not cover: `a/b`'s row is attributed to
+/// no conversation this run names, so only a pass that ignores the join can see its directory at all.
+#[test]
+fn a_departed_conversations_directory_is_not_handed_to_a_new_key() {
+    let work = Workspace::new();
+    let leaving = plain(&work.source(), Token::B, 1);
+    let staying = plain(&work.source(), Token::B, 2);
+    let sent = |id: &str| vec![message("a", "2021-03-04 14:30:05 UTC", id)];
+    let run = work.run(&history(vec![("a/b", sent(&leaving)), ("a?b", sent(&staying))]));
+    assert_eq!(run.report.fixed, 2);
+    let departed = run.row(&leaving).output_path.expect("a finished row records where it landed");
+    assert_eq!(departed.parent(), Some(work.out().join("chat").join("a_b").as_path()), "sorted key order puts `a/b` first");
+
+    // `a/b` leaves outright and a NEW key arrives that cleans onto its name. `a:b` sorts before
+    // `a?b` (0x3A against 0x3F), so key order alone offers it `a_b` — the departed thread's tree.
+    fs::remove_file(chat_media_dir(&work.source()).join(format!("{DAY}_{leaving}.jpg"))).unwrap();
+    let arriving = plain(&work.source(), Token::B, 3);
+    let after = work.replan(&history(vec![("a:b", sent(&arriving)), ("a?b", sent(&staying))]));
+
+    assert_ne!(dir_of(&after, &arriving), departed.parent().map(Path::to_path_buf), "a new key was planned into a departed thread's tree");
+    assert_eq!(dir_of(&after, &arriving), Some(work.out().join("chat").join("a_b_3")), "and it takes the first name nothing recorded");
+    assert_eq!(dir_of(&after, &staying), Some(work.out().join("chat").join("a_b_2")), "the survivor still keeps its own");
+}
+
+/// A conversation whose only finished file vanished still names its own directory, through the
+/// parked row rather than through an item.
+///
+/// The reservation pass cannot tell a departed conversation's directory from a live one's — it just
+/// claims the name — so the only thing keeping a live conversation out of its own tree is that the
+/// adopt pass got there first. A row that carries an output record and is attributable to nobody
+/// breaks exactly that, and `SourceMissing` is the reachable one: `chat_media`'s own docs call a
+/// file vanishing between two runs the ordinary case, and since queue task 39 that transition KEEPS
+/// the output record while moving the row out of `Reconciliation::items`.
+///
+/// Without the key on the gap token the survivor lands in `friend-handle_2` beside the finished
+/// output in `friend-handle`, and it does not self-correct: the next run records the split and
+/// adopts it.
+#[test]
+fn a_conversation_whose_only_finished_file_vanished_keeps_its_own_directory() {
+    let work = Workspace::new();
+    let present = plain(&work.source(), Token::B, 1);
+    let absent = format!("{}~{}", Token::B.as_word(), id(2));
+    let rows = history(vec![(
+        SOLO_KEY,
+        vec![message("a", "2021-03-04 14:30:05 UTC", &present), message("a", "2021-03-04 14:30:05 UTC", &absent)],
+    )]);
+
+    // One file on disk and one token with no file, which is the gap row this turns on.
+    let run = work.run(&rows);
+    assert_eq!(run.report.fixed, 1, "{:?}", run.report.failed);
+    let finished = run.row(&present).output_path.clone().expect("run 1 finished the present file");
+    assert_eq!(run.row(&absent).status, ItemStatus::SourceMissing, "the token with no file parks");
+
+    // The finished file leaves and the parked token's file arrives. The thread is still in the
+    // history, so its own row is now the parked one — and it is the only row naming a directory.
+    fs::remove_file(chat_media_dir(&work.source()).join(format!("{DAY}_{present}.jpg"))).unwrap();
+    let arrived = plain(&work.source(), Token::B, 2);
+    assert_eq!(arrived, absent, "the arriving file carries the token run 1 could not place");
+
+    let two = work.run(&rows);
+    assert_eq!(two.report.fixed, 1, "{:?}", two.report.failed);
+    assert_eq!(two.row(&present).status, ItemStatus::SourceMissing, "the vanished file parks");
+    assert!(two.row(&present).output_path.is_some(), "and keeps the record naming the conversation's directory");
+
+    let arrived_dir = two.row(&arrived).output_path.clone().and_then(|path| path.parent().map(Path::to_path_buf));
+    assert_eq!(arrived_dir, finished.parent().map(Path::to_path_buf), "the conversation was reserved out of its own directory");
+}
+
+/// A new key's minted name must not move on the run AFTER it is minted.
+///
+/// The reservation half of this only ever runs on the mint; from the next run the newcomer has a
+/// record of its own and adoption carries it. Pinned because those are two different code paths
+/// reaching one answer, and a fixture that stops at the mint cannot tell them apart.
+#[test]
+fn a_new_keys_minted_name_survives_the_run_after_it() {
+    let work = Workspace::new();
+    let leaving = plain(&work.source(), Token::B, 1);
+    let staying = plain(&work.source(), Token::B, 2);
+    let sent = |id: &str| vec![message("a", "2021-03-04 14:30:05 UTC", id)];
+    let run = work.run(&history(vec![("a/b", sent(&leaving)), ("a?b", sent(&staying))]));
+    assert_eq!(run.report.fixed, 2);
+
+    fs::remove_file(chat_media_dir(&work.source()).join(format!("{DAY}_{leaving}.jpg"))).unwrap();
+    let arriving = plain(&work.source(), Token::B, 3);
+    let rows = history(vec![("a:b", sent(&arriving)), ("a?b", sent(&staying))]);
+    let second = work.run(&rows);
+    assert_eq!(second.report.fixed, 1, "{:?}", second.report.failed);
+    let minted = second.row(&arriving).output_path.clone().expect("the newcomer finished").parent().expect("a dir").to_path_buf();
+    assert_eq!(minted, work.out().join("chat").join("a_b_3"), "the newcomer takes the first name nothing recorded");
+
+    assert_eq!(dir_of(&work.replan(&rows), &arriving), Some(minted), "the newcomer's name moved on the run after it was minted");
+}
+
+/// [`chat_fix::RecordedDirs::read`]'s own end of the fall-through rule: the unit test pins which
+/// candidate wins, this pins that the read hands over more than one to choose from.
+#[test]
+fn an_unadoptable_record_off_the_manifest_falls_through_too() {
+    let work = Workspace::new();
+    let lower = plain(&work.source(), Token::B, 1);
+    let higher = plain(&work.source(), Token::B, 2);
+    let rows =
+        history(vec![(SOLO_KEY, vec![message("a", "2021-03-04 14:30:05 UTC", &lower), message("a", "2021-03-04 14:30:05 UTC", &higher)])]);
+    let run = work.run(&rows);
+    assert_eq!(run.report.fixed, 2);
+
+    // The lower row is recorded inside the bucket's month tree, which sorts below the conversation
+    // directory and can never be adopted.
+    let split = |source_id: &str, dir: &str| {
+        let output = work.out().join("chat").join(dir).join("20210304_143005.jpg");
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        paint_jpeg(&output);
+        run.manifest.mark_done(ItemKind::ChatMedia, source_id, &output).unwrap();
+    };
+    split(&lower, "_no-conversation/2021/03");
+    split(&higher, &format!("{SOLO_KEY}_7"));
+
+    let after = work.replan(&rows);
+    let kept = work.out().join("chat").join(format!("{SOLO_KEY}_7"));
+    assert_eq!(dir_of(&after, &higher), Some(kept.clone()), "the unadoptable candidate stood in for the conversation");
+    assert_eq!(dir_of(&after, &lower), Some(kept), "and one conversation still gets exactly one directory");
+}
+
+/// Two rows of one conversation can disagree about its directory, if a run older than this rule
+/// split them, and the lowest recorded directory wins.
+///
+/// The alternative — the lowest ROW's — is the defect this whole rule exists to close, one layer
+/// down: the lowest source id leaving would move the answer while every other row still sat where it
+/// was. So the fixture puts the LOWER source id in the HIGHER directory, and puts neither of them in
+/// the name the key set would derive. `manifest.items` is ordered by source id, so all three rules
+/// answer differently here — `_9` for the first row's, `_5` for the lowest directory's, and the bare
+/// key for a run that reads the manifest not at all.
+///
+/// Both directories are forged, through the same `mark_done` a run checks an item in with. What
+/// produces a real split is a build older than this rule, which by definition cannot be driven from
+/// this suite.
+#[test]
+fn two_rows_of_one_conversation_that_disagree_settle_on_the_lowest_directory() {
+    let work = Workspace::new();
+    let lower = plain(&work.source(), Token::B, 1);
+    let higher = plain(&work.source(), Token::B, 2);
+    let rows =
+        history(vec![(SOLO_KEY, vec![message("a", "2021-03-04 14:30:05 UTC", &lower), message("a", "2021-03-04 14:30:05 UTC", &higher)])]);
+    let run = work.run(&rows);
+    assert_eq!(run.report.fixed, 2);
+
+    let split = |source_id: &str, dir: &str| {
+        let output = work.out().join("chat").join(dir).join("20210304_143005.jpg");
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        paint_jpeg(&output);
+        run.manifest.mark_done(ItemKind::ChatMedia, source_id, &output).unwrap();
+    };
+    split(&lower, &format!("{SOLO_KEY}_9"));
+    split(&higher, &format!("{SOLO_KEY}_5"));
+
+    let after = work.replan(&rows);
+    let lowest = work.out().join("chat").join(format!("{SOLO_KEY}_5"));
+    assert_eq!(dir_of(&after, &lower), Some(lowest.clone()), "the lowest recorded directory wins, not the lowest row's");
+    assert_eq!(dir_of(&after, &higher), Some(lowest), "and one conversation still gets exactly one directory");
 }
 
 #[test]
@@ -863,8 +1083,7 @@ fn two_files_in_one_conversation_on_one_second_get_a_counted_suffix() {
         SOLO_KEY,
         vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001"), message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")],
     )]);
-    let plan =
-        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(
         outputs(&plan),
         [Path::new("/out/chat/friend-handle/20210304_143005.jpg"), Path::new("/out/chat/friend-handle/20210304_143005_2.jpg"),]
@@ -878,8 +1097,7 @@ fn two_conversations_with_a_file_on_one_second_do_not_collide_with_each_other() 
         (SOLO_KEY, vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")]),
         (GROUP_KEY, vec![message("b", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")]),
     ]);
-    let plan =
-        chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(
         outputs(&plan),
         [
@@ -893,7 +1111,7 @@ fn two_conversations_with_a_file_on_one_second_do_not_collide_with_each_other() 
 
 #[test]
 fn the_messages_created_outranks_everything_else() {
-    let plan = chat_fix::plan(
+    let plan = first_run(
         &from_names(
             &history(vec![(SOLO_KEY, vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")])]),
             &["2021-03-04_b~aB3xY90001.jpg"],
@@ -946,7 +1164,7 @@ fn no_chat_media_item_ever_carries_a_coordinate() {
     // `chat_history.json` states no location anywhere, so there is nothing to stamp and no timezone
     // lookup to run. Asserted rather than left to an absent call, which reads as an oversight.
     let history = history(vec![(SOLO_KEY, vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")])]);
-    let plan = chat_fix::plan(
+    let plan = first_run(
         &from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg", "2021-03-04_overlay~aB3xY90003.png"]),
         "/out",
         OverlayMode::Both,
@@ -988,7 +1206,7 @@ fn the_sender_and_the_conversation_reach_the_outputs_metadata() {
 
 #[test]
 fn a_file_no_message_names_carries_no_sender_and_no_conversation() {
-    let plan = chat_fix::plan(&from_names(&no_history(), &["2021-03-04_b~aB3xY90001.jpg"]), "/out", OverlayMode::Both);
+    let plan = first_run(&from_names(&no_history(), &["2021-03-04_b~aB3xY90001.jpg"]), "/out", OverlayMode::Both);
     assert_eq!(plan.items[0].attribution, None);
 }
 
@@ -998,7 +1216,7 @@ fn an_empty_conversation_key_is_absence_rather_than_an_empty_metadata_field() {
     // records — so this is reachable, and both ends have to answer for it: an empty string written
     // into `ImageDescription` is noise, and an empty directory name is not a name at all.
     let history = history(vec![("", vec![message("sender-handle", "2021-03-04 14:30:05 UTC", "b~aB3xY90001")])]);
-    let plan = chat_fix::plan(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg"]), "/out", OverlayMode::Both);
+    let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg"]), "/out", OverlayMode::Both);
 
     let attribution = plan.items[0].attribution.as_ref().expect("the message still names a sender");
     assert_eq!(attribution.sender.as_ref().map(|from| from.as_str()), Some("sender-handle"));
@@ -1052,11 +1270,8 @@ fn a_format_this_build_does_not_decode_is_deferred_rather_than_excluded() {
     // `.gif` and `.webp` are 20 of the observed export's plain `b` files. Deferring leaves the row
     // `Pending` so a later build picks it up, which is the side of the line decision 44d's excluded
     // thumbnails are not on.
-    let plan = chat_fix::plan(
-        &from_names(&no_history(), &["2021-03-04_b~aB3xY90001.gif", "2021-03-04_b~aB3xY90002.webp"]),
-        "/out",
-        OverlayMode::Both,
-    );
+    let plan =
+        first_run(&from_names(&no_history(), &["2021-03-04_b~aB3xY90001.gif", "2021-03-04_b~aB3xY90002.webp"]), "/out", OverlayMode::Both);
     assert!(plan.items.is_empty());
     assert!(plan.excluded.is_empty());
     assert_eq!(
@@ -1076,4 +1291,68 @@ fn a_second_run_rewrites_nothing_it_already_finished() {
     assert_eq!((second.fixed, second.skipped), (0, 1));
     assert_eq!(second.resumed.verified, 1, "the finished output re-hashed to exactly what was recorded");
     assert!(second.resumed.demoted.is_empty(), "{:?}", second.resumed.demoted);
+}
+
+/// Plan, run, then plan twice more over an unchanged export: one answer every time.
+///
+/// The adoption is a new input to the plan, so "the same answer on a second run" is now a different
+/// question from the derive-only one `the_collision_suffix_is_the_same_answer_on_a_second_run` asks.
+#[test]
+fn a_replan_over_an_unchanged_export_is_the_same_answer_every_time() {
+    let work = Workspace::new();
+    let one = plain(&work.source(), Token::B, 1);
+    let two = plain(&work.source(), Token::B, 2);
+    let rows = history(vec![
+        ("a/b", vec![message("a", "2021-03-04 14:30:05 UTC", &one)]),
+        ("a?b", vec![message("b", "2021-03-04 14:30:05 UTC", &two)]),
+    ]);
+    let run = work.run(&rows);
+    assert_eq!(run.report.fixed, 2);
+
+    let recorded_dir = |source_id: &str| -> PathBuf {
+        let output = run.row(source_id).output_path.expect("a finished row records where it landed");
+        output.parent().expect("an output is inside a directory").to_path_buf()
+    };
+    let again = work.replan(&rows);
+    assert_eq!(dir_of(&again, &one), Some(recorded_dir(&one)));
+    assert_eq!(dir_of(&again, &two), Some(recorded_dir(&two)));
+    assert_eq!(outputs(&again), outputs(&work.replan(&rows)), "a third pass disagreed with the second");
+}
+
+/// The reservation asks whether a row NAMES a directory, never what status it carries, and a retired
+/// row is what separates those two questions.
+///
+/// Every step here is a production writer and the chain is ordinary: the file goes while the thread
+/// still names its token, so the row parks and keeps its record; then the thread leaves the history
+/// outright, so nothing names the row and it retires — still keeping the record. A reservation that
+/// asked for `done` would drop that row and hand a departed thread's directory to the newcomer,
+/// which is F2's hole arriving by a different status.
+#[test]
+fn a_retired_rows_record_still_reserves_the_directory_it_names() {
+    let work = Workspace::new();
+    let leaving = plain(&work.source(), Token::B, 1);
+    let staying = plain(&work.source(), Token::B, 2);
+    let sent = |id: &str| vec![message("a", "2021-03-04 14:30:05 UTC", id)];
+    let both = || history(vec![("a/b", sent(&leaving)), ("a?b", sent(&staying))]);
+    let run = work.run(&both());
+    assert_eq!(run.report.fixed, 2);
+    let departed = run.row(&leaving).output_path.clone().expect("run 1 finished it");
+    assert_eq!(departed.parent(), Some(work.out().join("chat").join("a_b").as_path()));
+
+    // The file goes while the thread still names its token: the row parks and keeps its record.
+    fs::remove_file(chat_media_dir(&work.source()).join(format!("{DAY}_{leaving}.jpg"))).unwrap();
+    let second = work.run(&both());
+    assert_eq!(second.row(&leaving).status, ItemStatus::SourceMissing, "a named token with no file parks");
+
+    // Now the thread leaves the history too, so nothing names the row at all and it retires.
+    let arriving = plain(&work.source(), Token::B, 3);
+    let rows = history(vec![("a:b", sent(&arriving)), ("a?b", sent(&staying))]);
+    let third = work.run(&rows);
+    assert_eq!(third.report.fixed, 1, "{:?}", third.report.failed);
+    assert_eq!(third.row(&leaving).status, ItemStatus::Retired, "a row nothing names retires");
+    assert_eq!(third.row(&leaving).output_path, Some(departed.clone()), "and keeps the record naming its directory");
+
+    let arrived_dir = third.row(&arriving).output_path.clone().and_then(|path| path.parent().map(Path::to_path_buf));
+    assert_ne!(arrived_dir, departed.parent().map(Path::to_path_buf), "a new key took a retired thread's directory");
+    assert_eq!(arrived_dir, Some(work.out().join("chat").join("a_b_3")), "and it takes the first name nothing records");
 }
