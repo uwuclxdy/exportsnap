@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use exportsnap::export::manifest::{
-    Checksum, Demotion, DemotionReason, ExportId, ItemKind, ItemStatus, Manifest, ManifestError, NewItem, PathProblem, manifest_dir,
+    Checksum, Demotion, DemotionReason, ExportId, Item, ItemKind, ItemStatus, Manifest, ManifestError, NewItem, PathProblem, manifest_dir,
 };
 use exportsnap::export::memories::UnreadableDir;
 use exportsnap::export::model::DownloadUrl;
@@ -70,6 +70,37 @@ impl Workspace {
         fs::write(&path, body).unwrap();
         path
     }
+
+    /// An enrolled row driven all the way to `Done` through the real check-in, returning what the
+    /// three output columns now hold.
+    ///
+    /// The assertion inside is a fixture guard, NOT the vacuity control for the tests below. Each of
+    /// those owns its own: the `keeps the record` ones assert `Some(..)` in every output column, and
+    /// the `drops the record` ones — whose every assertion is otherwise an enrollment default —
+    /// `assert_output_kept` on the row before the transition and watch a field the transition itself
+    /// writes. Scored with the mutant that deletes the `mark_done` below AND this assertion together;
+    /// deleting only `mark_done` measures this assertion rather than the tests.
+    fn finish(&self, manifest: &Manifest, source_id: &str, body: &'static str) -> Finished {
+        let output = self.write_output(source_id, body);
+        manifest.mark_done(ItemKind::Memory, source_id, &output).unwrap();
+        let (checksum, bytes) = Checksum::of_file(&output).unwrap();
+        let item = manifest.item(ItemKind::Memory, source_id).unwrap().unwrap();
+        assert_eq!(
+            (item.status, item.output_path.as_deref(), item.checksum, item.bytes),
+            (ItemStatus::Done, Some(output.as_path()), Some(checksum), Some(bytes)),
+            "the fixture has to start from a row that really carries an output record"
+        );
+        Finished { output, body, checksum, bytes }
+    }
+}
+
+/// What [`Workspace::finish`] left on disk and in the row, so a later assertion compares against
+/// recomputed values rather than against whatever the row happens to say now.
+struct Finished {
+    output: PathBuf,
+    body: &'static str,
+    checksum: Checksum,
+    bytes: u64,
 }
 
 fn enrollment<'a>(source_ids: &'a [&'a str]) -> Vec<NewItem<'a>> {
@@ -778,7 +809,7 @@ fn the_manifest_dir_is_a_per_user_data_dir_outside_the_repo() {
 /// assertion could tell a rewrite from a skip.
 ///
 /// **The still-`Pending` row is the positive control, and it shares the pair of calls.** Without it a
-/// `mark_excluded` that had stopped writing anything at all would pass, because a dead call leaves a
+/// `exclude` that had stopped writing anything at all would pass, because a dead call leaves a
 /// backdated row alone just as well as a correct one does.
 #[test]
 fn excluding_an_already_excluded_row_leaves_it_untouched() {
@@ -891,6 +922,200 @@ fn a_vanished_excluded_row_is_retired() {
     let mut manifest = work.open();
     manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
     assert_eq!(manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap().updated_at, 1_000_000_000);
+}
+
+// ---- what a transition out of `done` does to the output and its record ----
+//
+// One test per status a finished row can be driven to, each starting from a row that genuinely
+// finished: real bytes on disk, checked in through `mark_done`, all three output columns populated.
+// The decision (user's call, 2026-08-08) splits the statuses two ways — the parked ones keep the
+// record, the work ones drop it — and every test here asserts the file itself survived either way,
+// because nothing in this crate deletes an output and a future change that did would be invisible
+// to a row-only assertion.
+
+/// The row still names the output an earlier run checked in, and that file is still the bytes it was
+/// checked in as. Both halves: "the record survived" and "the file survived" are different claims
+/// and a transition could lose either one.
+///
+/// `status` is the positive control every caller passes. Without it a transition that had stopped
+/// writing anything at all would pass this, because a row left at `Done` keeps its record too.
+fn assert_output_kept(item: &Item, finished: &Finished, status: ItemStatus) {
+    assert_eq!(item.status, status, "the transition under test has to have happened at all");
+    assert_eq!(item.output_path.as_deref(), Some(finished.output.as_path()), "a parked row keeps the path it wrote");
+    assert_eq!(item.checksum, Some(finished.checksum), "and the digest describing it");
+    assert_eq!(item.bytes, Some(finished.bytes), "and the length");
+    assert_eq!(fs::read_to_string(&finished.output).unwrap(), finished.body, "and nothing deleted or rewrote the file");
+}
+
+/// The row names no output any more, and the file an earlier run wrote is still on disk untouched:
+/// what a work status drops is the only pointer to it, never the data.
+fn assert_output_unrecorded(item: &Item, finished: &Finished, status: ItemStatus) {
+    assert_eq!(item.status, status, "the transition under test has to have happened at all");
+    assert_eq!(item.output_path, None, "a work status carries no path");
+    assert_eq!(item.checksum, None, "and no digest describing bytes the next attempt is about to overwrite");
+    assert_eq!(item.bytes, None);
+    assert_eq!(fs::read_to_string(&finished.output).unwrap(), finished.body, "and dropping the record did not delete the file");
+}
+
+/// The chat-media case, measured on a real manifest before this was decided: the file a message
+/// names disappears between two runs, so the row run 1 finished is driven straight to
+/// `SourceMissing` under the same id. Run 1's output is still on disk, so the row goes on naming it.
+#[test]
+fn a_finished_row_parked_as_a_gap_keeps_its_output_and_the_record_of_it() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    let finished = work.finish(&manifest, "m-01", "bytes a first run wrote and hashed");
+
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", "the file the message names is gone").unwrap();
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_kept(&item, &finished, ItemStatus::SourceMissing);
+    assert_eq!(item.last_error.as_deref(), Some("the file the message names is gone"), "and it still says why it parked");
+    assert!(owed(&manifest, 3).is_empty(), "a parked row carrying a record is still not work");
+}
+
+/// Decision 44d's case turned around: a build whose rule changed excludes a row an EARLIER build
+/// finished. Excluding is a decision about what THIS build writes and never about the file the last
+/// one already wrote, so the record survives and nothing is orphaned on disk.
+#[test]
+fn a_finished_row_this_build_stops_writing_keeps_its_output_and_the_record_of_it() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    let finished = work.finish(&manifest, "m-01", "bytes an earlier build wrote and hashed");
+
+    manifest.exclude(ItemKind::Memory, &["m-01".to_owned()]).unwrap();
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_kept(&item, &finished, ItemStatus::Excluded);
+    let report = manifest.resume(ItemKind::Memory).unwrap();
+    assert_eq!((report.excluded, report.verified), (1, 0), "and it counts as excluded rather than as finished work");
+}
+
+/// `Retired` is only reachable from `Done` through a park, because `retire_absent` exempts finished
+/// rows. So this drives the whole route and pins the record at BOTH hops: pinning only the end would
+/// pass a `mark_source_missing` that cleared the columns, since the sweep would then have nothing
+/// left to lose.
+#[test]
+fn a_finished_row_parked_then_retired_keeps_its_output_and_the_record_of_it() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    let finished = work.finish(&manifest, "m-01", "bytes finished before the export forgot the row");
+
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", "no media for it in the parts extracted so far").unwrap();
+    let parked = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_kept(&parked, &finished, ItemStatus::SourceMissing);
+
+    // The next run's enumeration cannot name the row at all, and a gap row is not exempt from the
+    // sweep the way a finished one is.
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_kept(&item, &finished, ItemStatus::Retired);
+    assert!(
+        item.last_error.unwrap().contains("no longer holds a source"),
+        "the sweep wrote this row rather than being the thing that skipped it"
+    );
+}
+
+/// The other half of the rule, and the reason it is a split rather than one answer. `Failed` is a
+/// WORK status — `pending` hands the row straight back — so the next attempt overwrites whatever is
+/// at that path and a kept digest would be describing bytes on their way out. The file is untouched:
+/// what is dropped is the pointer, not the data.
+///
+/// **Pinned at both hops, and it has to be**: every state a `drops the record` assertion names is
+/// also the enrollment default, so a fixture that never really finished would satisfy the whole
+/// second half. The `assert_output_kept` before the call is what makes the `None`s below mean
+/// something, and it shares the fixture rather than living in a helper. `retry_count` and
+/// `last_error` are the second control: the transition writes them, so they cannot read as a default.
+#[test]
+fn a_finished_row_driven_back_to_work_by_a_failure_drops_the_record_and_keeps_the_file() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    let finished = work.finish(&manifest, "m-01", "bytes a first run wrote before a later one broke");
+
+    let before = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_kept(&before, &finished, ItemStatus::Done);
+
+    manifest.mark_failed(ItemKind::Memory, "m-01", "connection reset").unwrap();
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_unrecorded(&item, &finished, ItemStatus::Failed);
+    assert_eq!(
+        (item.retry_count, item.last_error.as_deref()),
+        (1, Some("connection reset")),
+        "and the transition wrote its own fields, so the row is not merely sitting where it started"
+    );
+    assert_eq!(owed(&manifest, 3), ["m-01"], "it is work again, which is what makes keeping the digest unsafe");
+}
+
+/// `reset` is the only place a parked row's record ends, and it ends there for the same reason:
+/// `Pending` is a work status, so the item is about to be re-fixed and its output overwritten.
+///
+/// **The fixture fails once before it finishes**, which is not decoration. `Pending` IS the
+/// enrollment default and so is a null output record, so without a non-default `retry_count` to
+/// watch go to zero — and without the `assert_output_kept` before the call — every assertion here
+/// would hold on a row nothing had ever touched. `mark_done` leaves `retry_count` alone, so the row
+/// really is finished while still carrying the earlier failure.
+#[test]
+fn a_finished_row_reset_to_pending_drops_the_record_and_keeps_the_file() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    manifest.mark_failed(ItemKind::Memory, "m-01", "connection reset").unwrap();
+    let finished = work.finish(&manifest, "m-01", "bytes a build that changed its mind wrote");
+
+    let before = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_kept(&before, &finished, ItemStatus::Done);
+    assert_eq!(before.retry_count, 1, "finishing an item does not forget that it failed on the way");
+
+    manifest.reset(ItemKind::Memory, "m-01").unwrap();
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_output_unrecorded(&item, &finished, ItemStatus::Pending);
+    assert_eq!(item.retry_count, 0, "reset is 'as if no run had ever touched it', retry count included");
+    assert_eq!(item.last_error, None);
+    assert_eq!(owed(&manifest, 3), ["m-01"]);
+}
+
+/// The widened rule's one real hazard, and the assumption the split rests on: a parked row now
+/// carries a checksum, so anything reading "has a checksum" as "is finished work" picks it up.
+/// `resume` scopes its re-verify on the STATUS instead, so the parked row is neither re-hashed nor
+/// demoted — pinned with its output DELETED, which is exactly the state that would demote it if the
+/// scoping were on the columns.
+///
+/// **The control shares the call and is a demotion, not a survival**: `m-02` is `Done` with its bytes
+/// swapped, so the sweep demonstrably opened and hashed a file in this very call. A sweep that had
+/// stopped working altogether would leave `m-01` alone just as well as a correctly-scoped one does.
+#[test]
+fn a_parked_row_carrying_a_checksum_is_never_re_verified_as_finished_work() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+    let parked = work.finish(&manifest, "m-01", "bytes m-01 finished with");
+    let control = work.finish(&manifest, "m-02", "bytes m-02 finished with");
+
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", "no media for it in the parts extracted so far").unwrap();
+    fs::remove_file(&parked.output).unwrap();
+    fs::write(&control.output, "bytes m-02 was rewritten with").unwrap();
+
+    let report = manifest.resume(ItemKind::Memory).unwrap();
+
+    assert_eq!(
+        report.demoted,
+        vec![Demotion { kind: ItemKind::Memory, source_id: "m-02".to_owned(), reason: DemotionReason::Changed }],
+        "the parked row is absent because it is out of scope, not because the sweep did nothing"
+    );
+    assert_eq!((report.source_missing, report.verified, report.pending), (1, 0, 1));
+    assert_eq!(owed(&manifest, 3), ["m-02"], "a vanished output does not put a parked row back on the work list");
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(item.status, ItemStatus::SourceMissing);
+    assert_eq!(item.output_path.as_deref(), Some(parked.output.as_path()), "nor take its record away");
+    assert_eq!(item.checksum, Some(parked.checksum));
 }
 
 // ---- the on-disk vocabulary ----

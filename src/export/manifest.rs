@@ -16,9 +16,38 @@
 //! the identity; `source_id` is whatever the export side already calls the record, so nothing here
 //! invents an id.
 //!
-//! `output_path`, `checksum` and `bytes` are set exactly when the status is [`ItemStatus::Done`].
-//! Every transition out of `Done` clears all three, because a checksum kept next to a status that
-//! no longer means "these bytes are on disk" is worse than no checksum.
+//! # What the output record means
+//!
+//! `output_path`, `checksum` and `bytes` are one RECORD between them: what a run wrote, and what it
+//! hashed as it checked the file in. They are set on [`ItemStatus::Done`] and on the three PARKED
+//! statuses — [`ItemStatus::SourceMissing`], [`ItemStatus::Retired`] and [`ItemStatus::Excluded`] —
+//! when an earlier run finished the row before a later one parked it. Nothing is in flight under any
+//! of the three: no run is part-way through that file, so the digest is not describing bytes about
+//! to be overwritten, and dropping the record would drop the only pointer to a file nothing here
+//! deletes. [`Manifest::mark_source_missing`], [`Manifest::exclude`] and
+//! [`Manifest::retire_absent`] therefore leave all three standing (user's call, 2026-08-08, over
+//! deleting the file and over keeping it unrecorded).
+//!
+//! The two WORK statuses clear all three instead. [`ItemStatus::Pending`] and
+//! [`ItemStatus::Failed`] are where a half-written output lives, and a checksum next to bytes
+//! something is about to overwrite is exactly what a checksum must never be allowed to describe, so
+//! [`Manifest::mark_failed`], [`Manifest::reset`] and [`Manifest::resume`]'s demotion null them.
+//!
+//! **On a parked row the record is history, never a live claim about what is on disk.** Re-hashing
+//! is the only thing that makes it current, and [`ItemStatus::Done`] is the only status
+//! [`Manifest::resume`] re-hashes. So a parked row's file may be gone, or may hold another item's
+//! bytes: the output tree belongs to the user and nothing here owns it, and this crate re-derives
+//! each item's output path from the items present in the CURRENT run rather than reading it back off
+//! the row ([`crate::export::chat_fix`] plans the collision-suffixed names that way), so an item
+//! leaving the export can move a later one onto a name a parked row still claims. Neither is
+//! detected and neither is meant to be — the record says what a run did, and only the status says
+//! whether it still holds.
+//!
+//! **A present checksum is therefore not "this row is finished work".** Only `status == Done` says
+//! that; a reader wanting finished work reads the status, and a reader wanting "some run wrote an
+//! output for this row" reads the three fields. Pinned by
+//! `a_parked_row_carrying_a_checksum_is_never_re_verified_as_finished_work`, which deletes the output
+//! and asserts the row goes on naming it.
 //!
 //! # Resume contract
 //!
@@ -46,7 +75,7 @@
 //!   longer name the row at all. Same way back as the gap, [`Manifest::reset`], for the run that
 //!   finds the source again.
 //! - [`ItemStatus::Excluded`] — untouched, never handed back as work, and counted apart from both
-//!   of the above. [`Manifest::mark_excluded`] is what puts a row here: a source that is present
+//!   of the above. [`Manifest::exclude`] is what puts a row here: a source that is present
 //!   and readable and that this build deliberately writes no output for. Same way back,
 //!   [`Manifest::reset`].
 //!
@@ -233,14 +262,16 @@ pub enum ItemStatus {
     Retired,
     /// Enrolled, and deliberately never written. The source is present and readable and this build
     /// produces no output for it at all — decision 44d's dropped chat-media thumbnails are the only
-    /// producer today, through [`Manifest::mark_excluded`].
+    /// producer today, through [`Manifest::exclude`].
     ///
     /// Counted apart from every neighbour because it is a different fact from each of them. Not
-    /// [`Self::Done`]: nothing was written, so there are no bytes to re-hash. Not [`Self::Failed`]:
-    /// no attempt was made and retrying would change nothing. Not [`Self::SourceMissing`] or
-    /// [`Self::Retired`]: the source is right there, and it is this build's own rule rather than the
-    /// export that decides the row produces nothing. Folding it into any of those would report a gap
-    /// the export does not have.
+    /// [`Self::Done`]: this build writes nothing for it, so a resume has nothing to re-hash — a row
+    /// an EARLIER build wrote keeps that output and its record across the transition, which is the
+    /// module's rule for every parked status and still not a reason to call this finished. Not
+    /// [`Self::Failed`]: no attempt was made and retrying would change nothing. Not
+    /// [`Self::SourceMissing`] or [`Self::Retired`]: the source is right there, and it is this
+    /// build's own rule rather than the export that decides the row produces nothing. Folding it
+    /// into any of those would report a gap the export does not have.
     ///
     /// [`Manifest::reset`] is the way back, for the build whose rules change.
     Excluded,
@@ -341,7 +372,11 @@ pub struct Item {
     pub status: ItemStatus,
     /// Recorded failures, bumped by [`Manifest::mark_failed`] and cleared by [`Manifest::reset`].
     pub retry_count: u32,
-    /// Set exactly when `status` is [`ItemStatus::Done`], as are `checksum` and `bytes`.
+    /// Where a run wrote this item's output, with `checksum` and `bytes` describing that file.
+    ///
+    /// Set on [`ItemStatus::Done`] and on a parked row an earlier run finished; cleared on
+    /// [`ItemStatus::Pending`] and [`ItemStatus::Failed`]. See the module's output-record rule. It
+    /// says an output exists, never that the row is finished work — read `status` for that.
     pub output_path: Option<PathBuf>,
     pub checksum: Option<Checksum>,
     pub bytes: Option<u64>,
@@ -693,6 +728,11 @@ impl Manifest {
 
     /// Records a failed attempt and bumps the item's retry count.
     ///
+    /// **Clears the output record, unlike the parked statuses**, because `Failed` is a WORK status:
+    /// the item comes back through [`Self::pending`] and the next attempt overwrites whatever is at
+    /// that path, so the recorded digest would be describing bytes about to change. Pinned by
+    /// `a_finished_row_driven_back_to_work_by_a_failure_drops_the_record_and_keeps_the_file`.
+    ///
     /// `note` is reduced to its plainly-prose tokens before it is stored. An http client's error
     /// message routinely carries the url it was fetching — `reqwest`'s does — and a signed url in
     /// `last_error` is the same secret as the url column with none of its protection. The
@@ -722,6 +762,14 @@ impl Manifest {
     /// Not an attempt, so the retry count is left alone. `reason` is reduced to prose exactly like
     /// [`Self::mark_failed`]'s note; the same channel gets the same guard.
     ///
+    /// **Not a statement about output either**, which is why the three output columns are absent
+    /// from the statement below rather than nulled by it: this says the SOURCE is gone, and a row an
+    /// earlier run finished still has that run's file on disk under the digest it was checked in
+    /// with. That is the whole chat-media case — a message's file vanishing between two runs drives
+    /// the row it already finished straight here — and nulling the columns would drop the only
+    /// pointer to a file nothing in this crate deletes. See the module's output-record rule; pinned
+    /// by `a_finished_row_parked_as_a_gap_keeps_its_output_and_the_record_of_it`.
+    ///
     /// # Errors
     ///
     /// Returns [`ManifestError::UnknownItem`] when nothing enrolled that item, and
@@ -731,7 +779,7 @@ impl Manifest {
         let changed = self
             .conn
             .execute(
-                "UPDATE items SET status = ?1, output_path = NULL, checksum = NULL, bytes = NULL, last_error = ?2, \
+                "UPDATE items SET status = ?1, last_error = ?2, \
                  updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4",
                 params![ItemStatus::SourceMissing.as_stored(), reason, kind.as_stored(), source_id],
             )
@@ -757,10 +805,12 @@ impl Manifest {
     ///
     /// Every other status is overwritten, [`ItemStatus::Done`] included: the plan deciding this row
     /// produces nothing is a statement about the row as it stands rather than about what an earlier
-    /// build did with it, and the module's own rule is that a transition out of `Done` clears the
-    /// output path, the checksum and the length. The residual, stated rather than hidden: an output
-    /// an earlier run wrote and checked in is orphaned on disk by that transition, since nothing
-    /// here deletes files.
+    /// build did with it. What it is NOT a statement about is the file that earlier build already
+    /// wrote, so a finished row keeps its output path, its checksum and its length across the
+    /// transition — the module's rule for every parked status, and the reason those three columns
+    /// are absent from the statement below. Nothing is orphaned: the file stays on disk because
+    /// nothing here deletes one, and the row goes on naming it. Pinned by
+    /// `a_finished_row_this_build_stops_writing_keeps_its_output_and_the_record_of_it`.
     ///
     /// **One transaction for the whole set**, the same shape [`Self::retire_absent`] uses and for the
     /// same reason: a per-item commit is a per-item fsync, and both of these can touch every row of a
@@ -785,7 +835,7 @@ impl Manifest {
         {
             let mut write = tx
                 .prepare(
-                    "UPDATE items SET status = ?1, output_path = NULL, checksum = NULL, bytes = NULL, last_error = ?2, \
+                    "UPDATE items SET status = ?1, last_error = ?2, \
                      updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4 AND status <> ?1",
                 )
                 .map_err(|source| sqlite_error("record excluded items", &path, source))?;
@@ -828,6 +878,13 @@ impl Manifest {
     /// what to write has changed. None of the three is ever offered as work, so a row that becomes
     /// workable again needs this call or it stays parked for ever.
     ///
+    /// **This is where a parked row's output record ends**, and it is the only place it does. The
+    /// three parked statuses keep it, `Pending` is a WORK status and cannot: the item is about to be
+    /// re-fixed and its output overwritten, so the digest would describe bytes on their way out. The
+    /// file an earlier run wrote is not deleted, only unrecorded — a caller wanting it kept has to
+    /// read it off the row before calling this. Pinned by
+    /// `a_finished_row_reset_to_pending_drops_the_record_and_keeps_the_file`.
+    ///
     /// # Errors
     ///
     /// Returns [`ManifestError::UnknownItem`] when nothing enrolled that item, and
@@ -859,6 +916,16 @@ impl Manifest {
     /// disappearing afterwards does not un-do it; [`Self::resume`] is what still re-checks those
     /// bytes. And [`ItemStatus::Retired`], because it is already the answer this sweep would write —
     /// see the comment on the filter for what re-writing it would cost.
+    ///
+    /// **A row this sweep DOES retire keeps whatever output record it had**, which is why the three
+    /// output columns are absent from the statement below. The `Done` exemption is not what saves an
+    /// earlier run's file from being forgotten — the module's rule for every parked status is what
+    /// does that, and a row reaching `Retired` through [`Self::mark_source_missing`] or
+    /// [`Self::exclude`] carries its path, digest and length the whole way. What the exemption still
+    /// buys on top of it is the re-verify: [`Self::resume`] re-hashes `Done` and nothing else, so a
+    /// retired row's recorded bytes are a record of what a run wrote rather than a live claim about
+    /// what is on disk now. Pinned by
+    /// `a_finished_row_parked_then_retired_keeps_its_output_and_the_record_of_it`.
     ///
     /// **[`ItemStatus::Excluded`] is deliberately NOT a third exemption**, and the choice is pinned
     /// by `a_vanished_excluded_row_is_retired`. Excluding is a decision about output; this sweep is
@@ -917,7 +984,7 @@ impl Manifest {
         {
             let mut stmt = tx
                 .prepare(
-                    "UPDATE items SET status = ?1, output_path = NULL, checksum = NULL, bytes = NULL, last_error = ?2, \
+                    "UPDATE items SET status = ?1, last_error = ?2, \
                      updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4",
                 )
                 .map_err(|source| sqlite_error("retire items the export no longer names", &path, source))?;
@@ -1127,6 +1194,13 @@ impl Manifest {
     }
 
     /// Every finished item of `kind`, with what the manifest says its output should be.
+    ///
+    /// **The `status = 'done'` filter is what scopes the re-verify**, not the columns being
+    /// populated. Since parked rows keep their output record, "has a checksum" and "is finished
+    /// work" are different questions, and selecting on the columns instead would demote a
+    /// [`ItemStatus::SourceMissing`] or [`ItemStatus::Excluded`] row back onto the work list the
+    /// first time its output moved. Pinned by
+    /// `a_parked_row_carrying_a_checksum_is_never_re_verified_as_finished_work`.
     fn completed(&self, kind: ItemKind) -> Result<Vec<Completed>, ManifestError> {
         let mut stmt = self
             .conn

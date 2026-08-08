@@ -628,14 +628,20 @@ fn re_enrolling_leaves_a_finished_item_alone_even_when_its_media_is_gone() {
     vanished.enroll(&mut manifest).unwrap();
 
     // The unpaired entry now carries a synthetic id, so it enrolls a row of its own and the uuid
-    // row is never named again. What leaves the finished bytes alone is the sweep's `Done`
-    // exemption, since the uuid row is exactly the kind of unnamed row
-    // `a_row_whose_identity_changed_between_runs_is_retired` watches get retired.
+    // row is never named again. What holds it at `Done` is the sweep's exemption, since the uuid row
+    // is exactly the kind of unnamed row `a_row_whose_identity_changed_between_runs_is_retired`
+    // watches get retired.
+    //
+    // **The STATUS assertion is the one sensitive to that exemption; the two under it are not.** A
+    // parked row keeps its output record too, so a retired row would satisfy them just as well —
+    // they say the record survived, not that the exemption is what saved it. Keeping them anyway,
+    // because "the sweep left the whole row alone" is the claim, and the checksum only means
+    // re-verified while the status is `Done`.
     assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Done), "finished bytes stay finished");
     assert_eq!(status_of(&manifest, "unpaired-entry-0"), Some(ItemStatus::SourceMissing));
     let item = manifest.item(ItemKind::Memory, &uuid(1)).unwrap().unwrap();
     assert_eq!(item.output_path, Some(output));
-    assert!(item.checksum.is_some(), "the checksum that guards the output survives too");
+    assert!(item.checksum.is_some(), "and the record of what that run wrote survives with it");
 }
 
 #[test]

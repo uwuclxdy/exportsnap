@@ -859,7 +859,7 @@ pub fn run(plan: &Plan, manifest: &mut Manifest, max_attempts: u32, video: &Vide
     // Before the sweep, not after it: an excluded row has to already be excluded when `resume`
     // counts the statuses and when `pending` reads the work list, or the first run of a plan reports
     // every one of them as owed work it then never does. Idempotent from the second run on —
-    // `mark_excluded` leaves an already-excluded row's timestamp alone — and a no-op loop on the
+    // `exclude` leaves an already-excluded row's timestamp alone — and a no-op loop on the
     // memories leg, whose `excluded` is always empty.
     manifest.exclude(plan.kind, &plan.excluded)?;
     let resumed = manifest.resume(plan.kind)?;
