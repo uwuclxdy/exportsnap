@@ -60,9 +60,33 @@ pub fn head_ellipsis(text: &str, budget: usize) -> String {
 /// width whatever the id's length.
 ///
 /// Shared by both media screens' identity column — a memory's uuid and a chat-media file's
-/// `b~<id>` — which is why it sits here beside [`head_ellipsis`] rather than inside one screen. The
-/// ids either renders are ascii, so chars and cells agree on them; the `keep` split is on chars, so
-/// a wide character would cost a cell the budget did not reserve.
+/// `b~<id>` — which is why it sits here beside [`head_ellipsis`] rather than inside one screen.
+///
+/// **The `keep` split is on chars while `budget` is in cells, so the two agree only on ascii
+/// input**, and nothing here checks. What holds is a gate at each grammar rather than a rule of this
+/// helper: `export::chat_media::ChatMediaFile::parse` builds its id out of a token literal, a `Day`
+/// written from integers, and runs its `is_alphanumeric_run` and `is_ascii_digit` accepted;
+/// `export::memories::MemoryFile::parse` builds its uuid out of a stem its `is_uuid` accepted. Every
+/// one of those predicates tests BYTES against an ascii class, and a non-ascii scalar carries a byte
+/// none of them admits, so an accepted run is ascii whole. **The compiler rejects none of that**, so
+/// it is a convention pinned by tests, not an invariant:
+/// `every_id_the_filename_grammar_mints_is_ascii` in `tests/chat_media.rs` and
+/// `every_uuid_the_filename_grammar_mints_is_ascii` in `tests/memories.rs`. Loosen either grammar to
+/// the `char` alphabetics and this is what breaks downstream of it.
+///
+/// What a wide character costs is never a panic — the cut walks `chars()` and indexes no bytes,
+/// which `a_middle_ellipsis_cuts_on_char_boundaries_rather_than_bytes` pins. It costs two other
+/// things. **An overflowed column**: `keep` wide chars plus the ellipsis reach `2 * budget - 1`
+/// cells, which is attained rather than merely bounded (the test's 5-cell budget yields 9) and is
+/// meaningless at `budget == 0`, where any non-empty text returns the ellipsis alone; [`right_pad`]
+/// then saturates rather than truncating, so the status pill and output name shift right and the
+/// last column loses its tail. **And a duplicated character**, which is the worse of the two,
+/// because an identity cell then misreports the id it names: with fewer than `keep` chars the head
+/// and the tail overlap, so `middle_ellipsis("世界語", 5)` yields `世界…界語`. Ascii reaches neither —
+/// there `cells > budget` implies `chars > keep`.
+///
+/// Being `pub`, this promises a caller outside the crate none of the above; the convention covers
+/// the crate's one call site, which is the progress table both legs render through.
 #[must_use]
 pub fn middle_ellipsis(text: &str, budget: usize) -> String {
     if cells(text) <= budget {
@@ -182,6 +206,26 @@ mod tests {
         // half: `b~` heads every one of the 8005 plain files.
         assert_eq!(middle_ellipsis("b~aB3xY9aB3xY9aB3xY9", 12), "b~aB3…aB3xY9");
         assert_eq!(middle_ellipsis("b~aB3xY9aB3xY9aB3xY9", 12).chars().count(), 12);
+    }
+
+    /// No id reaches this — see [`middle_ellipsis`]'s own docs for the two grammars that keep the
+    /// identity column ascii — but the cut has to survive one anyway, because `&text[..keep / 2]`
+    /// is the obvious collapse of the two `chars()` walks and it PANICS here: `keep / 2` is 2 and
+    /// `世` is three bytes, so byte 2 is not a char boundary.
+    #[test]
+    fn a_middle_ellipsis_cuts_on_char_boundaries_rather_than_bytes() {
+        // Nine cells against a five-cell budget, which is the overflow those docs name and NOT a
+        // width this asserts is right: `right_pad` saturates rather than truncating, so what stops
+        // it reaching a screen is the ascii id alphabet upstream, pinned in the two grammars' own
+        // test files.
+        assert_eq!(middle_ellipsis("世界世界", 5), "世界…世界");
+        assert_eq!(cells(middle_ellipsis("世界世界", 5).as_str()), 9);
+        // Fewer than `keep` chars and the head and tail OVERLAP, so `界` renders twice — a cell
+        // misreporting the id it names, which is the worse half of what those docs describe. Ascii
+        // reaches neither: there `cells > budget` implies `chars > keep`.
+        assert_eq!(middle_ellipsis("世界語", 5), "世界…界語");
+        // A budget that fits takes the early return, where chars never come into it.
+        assert_eq!(middle_ellipsis("世界世界", 8), "世界世界");
     }
 
     #[test]

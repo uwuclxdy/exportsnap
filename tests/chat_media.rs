@@ -184,6 +184,59 @@ fn every_shape_the_filename_grammar_rejects_stays_unparsed() {
     }
 }
 
+/// The chat-media screen renders this id through `tui::format::middle_ellipsis`, which splits on
+/// CHARS against a budget in CELLS — an agreement only ascii input makes. Nothing in that helper
+/// checks, so the alphabet has to be closed at the grammar, and this is where it is closed.
+///
+/// Every OPAQUE run the two families hold is gated on BYTES — `is_alphanumeric_run` for the plain
+/// tail and the zip family's word and hash, `is_ascii_digit` for its digits — and a non-ascii scalar
+/// carries a byte neither admits, so an accepted run is ascii whole. **The compiler rejects none of
+/// that**, so it is a convention pinned here rather than an invariant: swap either to the `char`
+/// alphabetics — `'世'.is_alphanumeric()` is true, `'١'.is_numeric()` is true — and these names parse
+/// into ids that render wider than the 18 cells the identity column reserved, shifting the status
+/// pill and the output name beside them.
+///
+/// **The day the zip id also carries is deliberately unprobed, because no probe could fail for it.**
+/// That id interpolates `{day}` — `Day`'s `Display` over its private `u16`/`u8` — and never the day
+/// TEXT, so a day that parses at all formats back as ascii however `Day::parse` is loosened.
+/// Measured: rewriting its `fixed_width` to `chars().count()` and `char::is_numeric` leaves this
+/// test green, and opening `Day::parse` outright reds it holding an ASCII id — a true assertion for
+/// a false reason, which is the defect this whole task exists to close. What closes that link is the
+/// private fields plus the ascii literal in `Display`, pinned by `Day::parse`'s own doctest: weaker
+/// than compiler-held, since nothing rejects respelling that separator, and stronger than the byte
+/// conventions above.
+///
+/// It asserts the ID rather than asserting the grammar refuses non-ascii, because those are not the
+/// same claim: the EXTENSION is verbatim and unchecked, and is sound that way both because no id is
+/// built from it and because `local_fix::Leg::of` matches ascii literals with `eq_ignore_ascii_case`,
+/// so a non-ascii one defers as an unknown format rather than ever reaching a planned item.
+#[test]
+fn every_id_the_filename_grammar_mints_is_ascii() {
+    // Non-vacuity: the shapes a real export carries still parse, so a grammar that stopped reading
+    // anything at all could not pass this by refusing everything below.
+    for file in [bare("2021-03-04", 1), plain("2021-03-04", Token::Overlay, 2, "png"), zip("2021-03-04", Token::Media, 3, "mp4")] {
+        assert!(file.id.is_ascii(), "{:?} is the shape the identity column is sized for", file.id);
+    }
+
+    for name in [
+        // The plain family's tail, which IS the id.
+        "2021-03-04_b~aB3xY9世.jpg",
+        // The zip family's three runs, each of which the id concatenates.
+        "2021-03-04_media~vantsnap世-1234567.zip.a1b2c3d.mp4",
+        "2021-03-04_media~vantsnap-123456١.zip.a1b2c3d.mp4",
+        "2021-03-04_media~vantsnap-1234567.zip.a1b2c3世.mp4",
+    ] {
+        let id = ChatMediaFile::parse(Path::new(DIR).join(name)).map(|file| file.id);
+        assert_eq!(id, None, "{name:?} would mint a non-ascii id for the identity column");
+    }
+
+    // The one part of a name that is neither checked nor ascii. It parses, and the id it yields is
+    // still ascii, which is the whole reason the unchecked extension costs nothing here.
+    let odd = ChatMediaFile::parse(Path::new(DIR).join("2021-03-04_b~aB3xY9.jp世")).expect("the extension is not part of the grammar");
+    assert_eq!(odd.extension, "jp世", "reported as it is on disk, like any other extension");
+    assert!(odd.id.is_ascii(), "{:?} is built from the tail and the token word, never the extension", odd.id);
+}
+
 #[test]
 fn a_shouted_token_normalizes_rather_than_forking_the_identity() {
     let shouted = ChatMediaFile::parse("/export/chat_media/2021-03-04_B~aB3xY9.JPG").unwrap();

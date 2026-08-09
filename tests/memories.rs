@@ -136,6 +136,52 @@ fn every_shape_the_filename_grammar_rejects_stays_unparsed() {
     }
 }
 
+/// The memories screen renders this uuid through `tui::format::middle_ellipsis`, which splits on
+/// CHARS against a budget in CELLS — an agreement only ascii input makes. The chat leg's twin of
+/// this test is `every_id_the_filename_grammar_mints_is_ascii` in `tests/chat_media.rs`; both close
+/// one half of that helper's input, and neither closes the other's.
+///
+/// `is_uuid` gates on BYTES, and a non-ascii scalar carries a byte it does not admit, so an accepted
+/// stem is ascii whole. **The compiler rejects none of that**, so it is a convention pinned here
+/// rather than an invariant.
+///
+/// **Of its two conjuncts only the alphabet one closes this**, and the length one is an EQUIVALENT
+/// mutant rather than a coverage gap: wherever the byte predicate passes, every byte is ascii, so
+/// `len()` and `chars().count()` agree identically and no test anywhere can kill that swap. It is
+/// measured green, and is written down so the next reader does not spend a run trying to kill it.
+///
+/// So the two names below cover the two REWRITES instead. The first is 36 bytes and 35 chars, so a
+/// `chars().count()` length conjunct refuses it and `&&` short-circuits before the alphabet is even
+/// consulted; only the byte predicate becoming `char::is_alphanumeric` reds it. The second is 36
+/// chars and 38 bytes, so that mutation leaves it refused and only the full char rewrite of both
+/// conjuncts admits it. Drop either name and one of those two rewrites ships green.
+#[test]
+fn every_uuid_the_filename_grammar_mints_is_ascii() {
+    // Non-vacuity: a real uuid still parses, so a grammar that stopped reading anything could not
+    // pass this by refusing everything below.
+    assert!(main_file("2020-07-28", 1, "mp4").uuid.is_ascii());
+
+    for stem in [
+        // 34 ascii characters and a two-byte one: 36 bytes with the four dashes still at 8, 13, 18
+        // and 23, so the length conjunct is satisfied and only the alphabet one refuses it.
+        "2ca92da1-3ff7-45f1-95f9-a2fda6ba0fé",
+        // 35 ascii characters and a wide one: 36 characters but 38 bytes, so only the length
+        // conjunct refuses it.
+        "2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8世",
+    ] {
+        let name = format!("2020-07-28_{stem}-main.jpg");
+        let uuid = MemoryFile::parse(Path::new("/export/memories").join(&name)).map(|file| file.uuid);
+        assert_eq!(uuid, None, "{name:?} would mint a non-ascii uuid for the identity column");
+    }
+
+    // The extension is verbatim and unchecked, and is sound that way because no uuid is built from
+    // it — the same split the chat leg's twin makes.
+    let odd = MemoryFile::parse("/export/memories/2020-07-28_2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8e-main.jp世")
+        .expect("the extension is not part of the grammar");
+    assert_eq!(odd.extension, "jp世", "reported as it is on disk, like any other extension");
+    assert!(odd.uuid.is_ascii(), "{:?} is the stem alone, never the extension", odd.uuid);
+}
+
 #[test]
 fn the_role_is_matched_without_regard_to_case() {
     let shouted = MemoryFile::parse("/export/memories/2020-07-28_2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8e-MAIN.MP4").unwrap();
