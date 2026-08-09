@@ -17,7 +17,7 @@ use exportsnap::export::manifest::{
 use exportsnap::export::memories::UnreadableDir;
 use exportsnap::export::model::DownloadUrl;
 use exportsnap::export::zip::discover_parts;
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use tempfile::TempDir;
 
 /// The 13-digit id shape the one observed export used.
@@ -515,6 +515,69 @@ fn retiring_leaves_an_already_retired_row_untouched() {
     assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Retired, "positive control: that same call did run, and did retire a new row");
 }
 
+/// The ceiling on the sweep's note constant, made loud — `exclude`'s twin, one layer up. There the
+/// guard is a SQL clause; here it is the selection filter's `Retired` arm, which keeps an
+/// already-retired row out of the statement entirely. Same consequence either way: the note is
+/// frozen at the sweep that wrote it, so rewording the constant reaches no existing row, and the
+/// control below pins the current bytes so the reword reds here rather than shipping silently.
+///
+/// Queue task 49 ruled that cost worth paying, and the reason is sharper on this writer than on
+/// `exclude`: repairing the note means restamping `updated_at`, which on a retired row is the only
+/// thing that can RECONSTRUCT when the row vanished, while the note reconstructs nothing the status
+/// does not already say. Neither column is rendered by any screen today; the ruling turns on what is
+/// recoverable, not on what is displayed.
+///
+/// **The still-`Pending` row is the positive control, and it shares the one call.** Without it a
+/// `retire_absent` that did nothing whatever would pass, because a dead sweep leaves a stranded note
+/// and a backdated timestamp exactly as untouched as a correct one does.
+#[test]
+fn an_already_retired_rows_note_is_frozen_at_the_sweep_that_retired_it() {
+    /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
+    const SENTINEL: i64 = 1_000_000_000;
+    /// What a build whose constant read differently would have left on the row.
+    const OLDER_BUILDS_NOTE: &str = "the export has stopped naming a source for this item";
+    /// The constant's current bytes, duplicated on purpose: this is the tripwire a reword hits.
+    const TODAYS_NOTE: &str = "the export no longer holds a source for this item";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+        manifest.retire_absent(ItemKind::Memory, &BTreeSet::from(["m-02"]), &[]).unwrap();
+        assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Retired, "the row the next sweep must leave alone");
+        assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending, "and the one it must still be able to retire");
+    }
+
+    // Only reachable by editing the database, which is the point: no API here rewrites a parked
+    // row's note in place, so this is how a build carrying an older constant reaches this run.
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET last_error = ?1, updated_at = ?2 WHERE source_id = 'm-01'", params![OLDER_BUILDS_NOTE, SENTINEL])
+        .unwrap();
+    drop(conn);
+
+    let mut manifest = work.open();
+    // Neither row is named now: `m-01` is already retired, `m-02` has just left the export.
+    manifest.retire_absent(ItemKind::Memory, &BTreeSet::new(), &[]).unwrap();
+
+    let stranded = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(
+        stranded.last_error.as_deref(),
+        Some(OLDER_BUILDS_NOTE),
+        "a reworded note reached a row an earlier sweep had already retired; that is the decision reversing, not a bug fixing"
+    );
+    assert_eq!(stranded.updated_at, SENTINEL, "and repairing the note cost the row's own vanish time, which is what the ruling refuses");
+    assert_eq!(stranded.status, ItemStatus::Retired, "the row never moved, so neither reading above survived by it changing identity");
+
+    let control = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+    assert_eq!(control.status, ItemStatus::Retired, "positive control: that same call did run, and did retire a new row");
+    assert_eq!(
+        control.last_error.as_deref(),
+        Some(TODAYS_NOTE),
+        "the note constant was reworded: every row an earlier sweep retired still carries the old sentence, and nothing revisits one. \
+         Read the ceiling on RETIRED_NOTE before updating this string"
+    );
+}
+
 #[test]
 fn a_retired_item_is_reported_apart_from_the_gap_and_never_handed_back_as_work() {
     let work = Workspace::new();
@@ -984,6 +1047,70 @@ fn excluding_an_already_excluded_row_leaves_it_untouched() {
     let control = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
     assert_eq!(control.status, ItemStatus::Excluded, "positive control: the same call did run, and did exclude a new row");
     assert_ne!(control.updated_at, SENTINEL, "and it stamped that transition");
+}
+
+/// The ceiling on `exclude`'s note constant, made loud. Queue task 49 ruled the note stays OUT of
+/// that guard — the guard is the status alone — so an already-excluded row is never revisited and
+/// whatever note it was parked with is what it carries until the row leaves `Excluded`, which nothing
+/// in a normal run does to it except the retirement sweep (`a_vanished_excluded_row_is_retired`).
+/// Rewording the constant therefore
+/// leaves every existing database on the old sentence. This test is what puts that in front of
+/// whoever reaches to reword it: the control below pins the current bytes, so a reword reds here
+/// instead of shipping silently, and the stranded row above pins the behaviour that makes the reword
+/// matter at all.
+///
+/// The old note is planted by editing the database, which is the state a build carrying a different
+/// constant would have left. `updated_at` is backdated for the reason the neighbouring pins give:
+/// `unixepoch()` has one-second resolution, so nothing else could tell a rewrite from a skip.
+///
+/// **The still-`Pending` row is the positive control, and it shares the one call.** Without it an
+/// `exclude` that had stopped writing anything at all would pass, because a dead call leaves a
+/// stranded note and a backdated timestamp exactly as untouched as a guarded one does.
+#[test]
+fn an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it() {
+    /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
+    const SENTINEL: i64 = 1_000_000_000;
+    /// What a build whose constant read differently would have left on the row.
+    const OLDER_BUILDS_NOTE: &str = "this build produces nothing for this item";
+    /// The constant's current bytes, duplicated on purpose: this is the tripwire a reword hits.
+    const TODAYS_NOTE: &str = "this build writes no output for this item";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+        manifest.exclude(ItemKind::Memory, &["m-01".to_owned()]).unwrap();
+        assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Excluded, "the row the next call must leave alone");
+        assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending, "and the one it must still be able to exclude");
+    }
+
+    // Only reachable by editing the database, which is the point: no API here rewrites a parked
+    // row's note in place, so this is how a build carrying an older constant reaches this run.
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET last_error = ?1, updated_at = ?2 WHERE source_id = 'm-01'", params![OLDER_BUILDS_NOTE, SENTINEL])
+        .unwrap();
+    drop(conn);
+
+    let mut manifest = work.open();
+    manifest.exclude(ItemKind::Memory, &["m-01".to_owned(), "m-02".to_owned()]).unwrap();
+
+    let stranded = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(
+        stranded.last_error.as_deref(),
+        Some(OLDER_BUILDS_NOTE),
+        "a reworded note reached a row an earlier run had already excluded; that is the decision reversing, not a bug fixing"
+    );
+    assert_eq!(stranded.updated_at, SENTINEL, "and repairing the note cost the row's own timestamp, which is what the ruling refuses");
+    assert_eq!(stranded.status, ItemStatus::Excluded, "the row never moved, so neither reading above survived by it changing identity");
+
+    let control = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+    assert_eq!(control.status, ItemStatus::Excluded, "positive control: the same call did run, and did exclude a new row");
+    assert_eq!(
+        control.last_error.as_deref(),
+        Some(TODAYS_NOTE),
+        "the note constant was reworded: every row an earlier run excluded still carries the old sentence, and nothing revisits one. \
+         Read the ceiling on EXCLUDED_NOTE before updating this string"
+    );
 }
 
 #[test]

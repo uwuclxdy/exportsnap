@@ -792,8 +792,31 @@ impl Manifest {
     /// [`crate::export::chat_media::MissingReason::Unscanned`] — so a run that hits one unlistable
     /// directory writes it everywhere and the next clean run writes the real reason for the same
     /// rows. A status-only guard would freeze the stale reason with the status column reading
-    /// correct. The predicate is the SET list: skip only when every column this statement writes
-    /// already holds what it would write.
+    /// correct.
+    ///
+    /// **What generalizes is narrower than "the predicate is the SET list", which queue task 49
+    /// corrected to the axis this module already draws to decide which notes reach the redactor.**
+    /// **Among the statements this module makes CONDITIONAL**, a column belongs in the guard when its
+    /// value comes from this run's observation, because two runs of one build can then disagree about
+    /// it — that is `reason` here, and the `Unscanned` paragraph above is the whole case. A module
+    /// constant is the other half of the axis: no run computes it, so no two runs can disagree, and
+    /// [`Self::exclude`] and [`Self::retire_absent`] guard on the status alone for that reason rather
+    /// than by oversight. What a constant pays instead is a ceiling written on the constant itself,
+    /// which both carry: rewording one reaches no row an earlier run already parked. The trade and
+    /// its rejected alternative are in design.md's manifest notes.
+    ///
+    /// **The leading clause is load-bearing and the rule is wrong without it.** Two writers here put
+    /// run-derived text in `last_error` under no guard at all — [`Self::mark_failed`] and
+    /// [`Self::resume`]'s demotion, whose note is a third origin again, neither caller text nor
+    /// module constant but a [`DemotionReason`] this run computed. Two more null the column just as
+    /// unconditionally ([`Self::mark_done`], [`Self::reset`]); `NULL` is neither text nor
+    /// run-derived, so they are outside what this rule is about and are named here only so the next
+    /// reader counting `UPDATE`s does not think one was missed. All four are unconditional because
+    /// they record an EVENT rather than re-derive a standing
+    /// verdict, so there is no repeat to skip. Reading the rule as a bald universal and adding a note
+    /// clause to [`Self::mark_failed`] would be actively harmful: that statement also does
+    /// `retry_count = retry_count + 1`, so an identically-repeating failure would stop incrementing
+    /// and [`Self::pending`]'s `retry_count < ?4` would go on offering the row for ever.
     ///
     /// `IS NOT` rather than `<>` because `last_error` is nullable and `<>` against `NULL` is
     /// `NULL`, which is not true, so the plain operator would skip a row whose note has to be
@@ -863,6 +886,14 @@ impl Manifest {
     /// [`ManifestError::UnknownItem`] answerable once a zero row count no longer implies the row is
     /// absent. Pinned by `excluding_an_already_excluded_row_leaves_it_untouched`.
     ///
+    /// **The note is deliberately not a second half of that clause**, which is where this parts
+    /// company with [`Self::mark_source_missing`]'s `status <> ?1 OR last_error IS NOT ?2`: that
+    /// note is caller text two runs of one build genuinely disagree about, and this one is a
+    /// constant no run computes. The consequence a reader has to be able to see is that rewording
+    /// the constant reaches no already-excluded row, and it is written on the constant rather than
+    /// here, because that is the line someone rewording it is looking at. Pinned by
+    /// `an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it`.
+    ///
     /// Every other status is overwritten, [`ItemStatus::Done`] included: the plan deciding this row
     /// produces nothing is a statement about the row as it stands rather than about what an earlier
     /// build did with it. What it is NOT a statement about is the file that earlier build already
@@ -883,6 +914,26 @@ impl Manifest {
     /// longer parses, and [`ManifestError::Sqlite`] when a read or a write fails.
     pub fn exclude(&mut self, kind: ItemKind, source_ids: &[String]) -> Result<(), ManifestError> {
         /// What an excluded row's `last_error` says.
+        ///
+        /// **Rewording this strands every row an earlier run already excluded.** The guard below
+        /// skips such a row on its status alone, and nothing else in this module rewrites a parked
+        /// row's note in place, so an existing database goes on carrying the old sentence with its
+        /// status column reading correct. Queue task 49 ruled that cost worth paying rather than
+        /// joining the note to the guard: repairing the note that way restamps `updated_at`, the one
+        /// column here holding a fact no other column can reconstruct, and this note holds none —
+        /// `status` already says exactly this. Upgrade path, if a reword ever has to reach old rows:
+        /// add `OR last_error IS NOT ?2` the way [`Manifest::mark_source_missing`] has it (`IS NOT`
+        /// because the column is nullable) and accept the restamp. A reword is loud rather than
+        /// silent because `an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it` pins
+        /// these bytes.
+        ///
+        /// **A stranded note is only ever replaced by the row LEAVING this status.** Every statement
+        /// in this module that writes `last_error` also writes `status`, and the one that would land
+        /// back on `Excluded` is the guarded statement below, so nothing refreshes the note in place.
+        /// [`Manifest::reset`] is the deliberate route out; [`Manifest::retire_absent`] is an
+        /// incidental one and is reachable — an excluded row the export stops naming is not exempt
+        /// from that sweep, which is the settled answer rather than a missed exemption, pinned by
+        /// `a_vanished_excluded_row_is_retired`.
         const EXCLUDED_NOTE: &str = "this build writes no output for this item";
 
         if source_ids.is_empty() {
@@ -1015,6 +1066,31 @@ impl Manifest {
         /// text, so it skips the note redactor every caller-supplied note goes through: there is no
         /// secret in a fixed string, and no per-row url read to pay for on a sweep that can touch
         /// every row of a kind.
+        ///
+        /// **Rewording this strands every row an earlier sweep already retired**, the same ceiling
+        /// [`Manifest::exclude`]'s own note carries and reached one layer up: the `Retired` arm of
+        /// the selection filter below keeps such a row out of the statement entirely, so the note is
+        /// frozen at the sweep that wrote it and no later run revisits it. Queue task 49 ruled that
+        /// cost worth paying here for a sharper reason than at `exclude` — repairing the note means
+        /// restamping `updated_at`, and on a retired row that column is the only thing that can
+        /// RECONSTRUCT when the row vanished, while this note reconstructs nothing — `status` already
+        /// says it. That asymmetry is the whole argument, and it is deliberately not "one of them is
+        /// on a screen": no screen renders either column today, `ResumeReport::retired` has no reader
+        /// in `src/` at all, and the ruling would be the same if both were rendered. Upgrade path, if
+        /// a reword ever has to reach old
+        /// rows: give the filter's `Retired` arm a note comparison instead of a blanket exemption,
+        /// and accept the restamp on every row it lets through. A reword is loud rather than silent
+        /// because `an_already_retired_rows_note_is_frozen_at_the_sweep_that_retired_it` pins these
+        /// bytes.
+        ///
+        /// **A stranded note is only ever replaced by the row LEAVING this status.** Every statement
+        /// in this module that writes `last_error` also writes `status`, and the one that would land
+        /// back on `Retired` is this sweep, whose filter exempts `Retired`, so nothing refreshes the
+        /// note in place. [`Manifest::reset`] is the deliberate route out. [`Manifest::exclude`]'s
+        /// `status <> ?1` does admit a `Retired` row at the SQL level, but its only caller feeds it a
+        /// plan built from sources that are present, and a retired row's source is gone by
+        /// definition — so that path is unproven in either direction rather than known-live, and
+        /// nothing should be built on it.
         const RETIRED_NOTE: &str = "the export no longer holds a source for this item";
 
         if !unreadable.is_empty() {
@@ -1028,6 +1104,12 @@ impl Manifest {
         // rewriting the field there turns it into the last RUN, and "when did this vanish from the
         // export" is the half of a retired row only that field can answer.
         // Pinned by `retiring_leaves_an_already_retired_row_untouched`.
+        //
+        // The exemption's other consequence, ruled on rather than overlooked (queue task 49): it is
+        // also what freezes an already-retired row's NOTE, so rewording `RETIRED_NOTE` reaches none
+        // of them. The ceiling for that is written on the constant, where whoever rewords it is
+        // looking. Note the arms are not interchangeable — `Done` is exempt for its own reason,
+        // given in the rustdoc above, and carries no retirement note to strand.
         let stale: Vec<String> = self
             .items(kind)?
             .into_iter()
