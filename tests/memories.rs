@@ -841,3 +841,53 @@ fn a_source_missing_item_that_paired_again_is_reset_rather_than_left_parked() {
     assert_eq!(status_of(&manifest, &uuid(1)), Some(ItemStatus::Pending));
     assert_eq!(manifest.item(ItemKind::Memory, &uuid(1)).unwrap().unwrap().retry_count, 0);
 }
+
+/// `enroll` re-derives every gap from scratch and re-states it, so the 90 unpaired entries of the
+/// observed export go through `mark_source_missing` on every run. Their `updated_at` is the only
+/// record of WHEN the export stopped holding media for them, and a run that rewrites it turns that
+/// into the date of the last run.
+///
+/// `enrollment_gives_every_entry_a_row_and_marks_the_unpaired_ones_missing` already re-runs the same
+/// export and asserts the status; a status assertion cannot see this class, which is why the timestamp
+/// is pinned here and why the sentinel below is load-bearing — `unixepoch()` has one-second
+/// resolution, so two runs inside one test land in the same second and an as-is comparison would pass
+/// with no guard at all.
+///
+/// **The row that goes missing and pairs again is the positive control**, and it rides the same
+/// second `enroll` call: without it an `enroll` that had stopped writing anything would pass, because
+/// a dead call leaves a backdated row alone just as well as a correct one does.
+#[test]
+fn two_runs_over_an_unchanged_export_leave_a_gap_rows_timestamp_alone() {
+    /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
+    const SENTINEL: i64 = 1_000_000_000;
+
+    let workspace = Workspace::new();
+    let reconciliation = reconciled(&[(&at("2020-07-28"), "Image"), (&at("2020-07-29"), "Image")], vec![main_file("2020-07-28", 1, "jpg")]);
+    let gap = reconciliation.items.iter().find(|item| matches!(item.pairing, Pairing::Missing(_))).expect("one entry pairs with nothing");
+    let gap = gap.source_id.clone();
+
+    {
+        let mut manifest = workspace.open();
+        reconciliation.enroll(&mut manifest).unwrap();
+        assert_eq!(status_of(&manifest, &gap), Some(ItemStatus::SourceMissing), "the row the second run must leave alone");
+        // The control's setup, in the shape the downloader a later task adds will produce it: a
+        // PAIRED row whose source went missing, so the second run's `reset` has something to stamp.
+        manifest.mark_source_missing(ItemKind::Memory, &uuid(1), "gone for now").unwrap();
+    }
+
+    // Only reachable by editing the database, which is the point: it backdates both rows so a rewrite
+    // is distinguishable from a skip.
+    let conn = rusqlite::Connection::open(workspace.dir.path().join(format!("{EXPORT_ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET updated_at = ?1", [SENTINEL]).unwrap();
+    drop(conn);
+
+    let mut manifest = workspace.open();
+    reconciliation.enroll(&mut manifest).unwrap();
+
+    let untouched = manifest.item(ItemKind::Memory, &gap).unwrap().unwrap();
+    assert_eq!(untouched.updated_at, SENTINEL, "a second run over an unchanged export restamped a gap row");
+    assert_eq!(untouched.status, ItemStatus::SourceMissing, "and it is still a gap, so the timestamp did not survive by the row moving");
+    let control = manifest.item(ItemKind::Memory, &uuid(1)).unwrap().unwrap();
+    assert_eq!(control.status, ItemStatus::Pending, "positive control: the same call did run, and did move a row it had to move");
+    assert_ne!(control.updated_at, SENTINEL, "and it stamped that transition");
+}

@@ -384,7 +384,13 @@ pub struct Item {
     /// way in: a token survives only if it holds none of `/ = % & @` and is under 64 characters.
     pub last_error: Option<String>,
     pub url: Option<DownloadUrl>,
-    /// Unix seconds of the last status transition.
+    /// Unix seconds of the last status transition, or of the last change to what the row records
+    /// under an unchanged status — [`Manifest::mark_source_missing`] restamps a gap row whose reason
+    /// changed, and [`Manifest::mark_failed`] restamps every recorded attempt.
+    ///
+    /// What it is NOT is the last run: none of the three parked writers rewrites a row it would
+    /// leave unchanged, which is what keeps "when did this vanish from the export" answerable off a
+    /// column every run's re-derivation would otherwise touch. Each names its own pin.
     pub updated_at: i64,
 }
 
@@ -770,21 +776,74 @@ impl Manifest {
     /// pointer to a file nothing in this crate deletes. See the module's output-record rule; pinned
     /// by `a_finished_row_parked_as_a_gap_keeps_its_output_and_the_record_of_it`.
     ///
+    /// **Re-stating a gap a row already carries touches nothing**, the property [`Self::exclude`]
+    /// and [`Self::retire_absent`] pay for and for the same reason: both media legs call this once
+    /// per gap row on EVERY run — [`crate::export::memories::Reconciliation::enroll`] for the
+    /// observed export's 90 unpaired entries, [`crate::export::chat_media`] for its own — so an
+    /// unconditional statement would rewrite `updated_at`, documented on [`Item::updated_at`], on
+    /// every run for every gap row, turning it into the last RUN for exactly the rows that answer
+    /// "when did this vanish".
+    ///
+    /// The condition is `status <> ?1 OR last_error IS NOT ?2` rather than the status alone,
+    /// because unlike those two this note is CALLER TEXT and one row's reason genuinely changes
+    /// between runs. **Both legs**, not just the memories one: each has an `Unscanned` reason
+    /// chosen once per run off the walk's unreadable list and displacing that leg's filesystem
+    /// verdict for every row of the run — [`crate::export::memories::MissingReason::Unscanned`] and
+    /// [`crate::export::chat_media::MissingReason::Unscanned`] — so a run that hits one unlistable
+    /// directory writes it everywhere and the next clean run writes the real reason for the same
+    /// rows. A status-only guard would freeze the stale reason with the status column reading
+    /// correct. The predicate is the SET list: skip only when every column this statement writes
+    /// already holds what it would write.
+    ///
+    /// `IS NOT` rather than `<>` because `last_error` is nullable and `<>` against `NULL` is
+    /// `NULL`, which is not true, so the plain operator would skip a row whose note has to be
+    /// written. **No call here stores a note-less gap row** — every one of them writes a note — so
+    /// that is a future writer's footgun closed rather than a live one, and the pin below reaches
+    /// the row by editing the database rather than through this API. Pinned by
+    /// `re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched`,
+    /// `a_gap_row_is_written_whenever_its_status_or_its_reason_differs`,
+    /// `a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it`, and — over
+    /// two whole runs of the leg that pays for this — `memories`'
+    /// `two_runs_over_an_unchanged_export_leave_a_gap_rows_timestamp_alone`.
+    ///
+    /// The read below is what keeps [`ManifestError::UnknownItem`] answerable once a zero row count
+    /// no longer implies the row is absent — [`Self::exclude`]'s shape, and required rather than
+    /// decorative: a bare `require_hit` would call every already-parked row unknown.
+    ///
     /// # Errors
     ///
-    /// Returns [`ManifestError::UnknownItem`] when nothing enrolled that item, and
-    /// [`ManifestError::Sqlite`] when the write fails.
+    /// Returns [`ManifestError::UnknownItem`] when nothing enrolled that item,
+    /// [`ManifestError::CorruptRow`] when the read's stored status no longer parses, and
+    /// [`ManifestError::Sqlite`] when a read or the write fails.
     pub fn mark_source_missing(&self, kind: ItemKind, source_id: &str, reason: &str) -> Result<(), ManifestError> {
         let reason = self.redacted(kind, source_id, reason)?;
         let changed = self
             .conn
             .execute(
                 "UPDATE items SET status = ?1, last_error = ?2, \
-                 updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4",
+                 updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4 AND (status <> ?1 OR last_error IS NOT ?2)",
                 params![ItemStatus::SourceMissing.as_stored(), reason, kind.as_stored(), source_id],
             )
             .map_err(|source| sqlite_error("record a missing source", &self.path, source))?;
-        self.require_hit(changed, kind, source_id)
+        if changed != 0 {
+            return Ok(());
+        }
+        // Nothing changed means one of exactly two things, since the only row the statement above
+        // can miss is one already carrying both values it writes: the row already says this, or
+        // nothing enrolled it. Only a read tells them apart, and the status column alone answers it
+        // — a row present here can only be `SourceMissing`, so a full-row read would materialize an
+        // output path, a url and a checksum the verdict never looks at.
+        let stored: Option<String> = self
+            .conn
+            .query_row("SELECT status FROM items WHERE kind = ?1 AND source_id = ?2", params![kind.as_stored(), source_id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|source| sqlite_error("record a missing source", &self.path, source))?;
+        match stored {
+            Some(stored) if ItemStatus::from_stored(&stored)? == ItemStatus::SourceMissing => Ok(()),
+            _ => Err(ManifestError::UnknownItem { kind, source_id: source_id.to_owned() }),
+        }
     }
 
     /// Records that this build writes no output for these items at all.
@@ -798,10 +857,11 @@ impl Manifest {
     /// property [`Self::retire_absent`] pays for and it is load-bearing for the same reason: an
     /// excluded row is re-derived by every later run from the same rule, so a statement matching it
     /// unconditionally would rewrite `updated_at` — documented on [`Item::updated_at`] as the last
-    /// status TRANSITION — on every run, for every excluded row, turning that column into the last
-    /// RUN. The `status <> ?1` clause is what makes the write conditional, and the read below is
-    /// what keeps [`ManifestError::UnknownItem`] answerable once a zero row count no longer implies
-    /// the row is absent. Pinned by `excluding_an_already_excluded_row_leaves_it_untouched`.
+    /// time the row's own state moved, and explicitly not as the last run — on every run, for every
+    /// excluded row, turning that column into exactly the thing it says it is not. The
+    /// `status <> ?1` clause is what makes the write conditional, and the read below is what keeps
+    /// [`ManifestError::UnknownItem`] answerable once a zero row count no longer implies the row is
+    /// absent. Pinned by `excluding_an_already_excluded_row_leaves_it_untouched`.
     ///
     /// Every other status is overwritten, [`ItemStatus::Done`] included: the plan deciding this row
     /// produces nothing is a statement about the row as it stands rather than about what an earlier
@@ -819,7 +879,8 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns [`ManifestError::UnknownItem`] when nothing enrolled one of the items — the whole
-    /// transaction rolls back — and [`ManifestError::Sqlite`] when a read or a write fails.
+    /// transaction rolls back — [`ManifestError::CorruptRow`] when the read's stored status no
+    /// longer parses, and [`ManifestError::Sqlite`] when a read or a write fails.
     pub fn exclude(&mut self, kind: ItemKind, source_ids: &[String]) -> Result<(), ManifestError> {
         /// What an excluded row's `last_error` says.
         const EXCLUDED_NOTE: &str = "this build writes no output for this item";
@@ -962,9 +1023,10 @@ impl Manifest {
         // Exempting `Retired` is what makes this sweep idempotent, and the cost of leaving it out is
         // not the wasted writes. A retired row is unnamed BY DEFINITION — being unnamed is why it was
         // retired — so it re-enters this list on every later run, and the statement below would reset
-        // `updated_at`, which [`Item::updated_at`] documents as the last status TRANSITION. Rewriting
-        // it on a row whose status did not transition turns that field into the last RUN, and "when
-        // did this vanish from the export" is the half of a retired row only that field can answer.
+        // `updated_at`, which [`Item::updated_at`] documents as the last time the row's own state
+        // moved. This sweep's note is a constant, so a row it re-writes moved in no way at all:
+        // rewriting the field there turns it into the last RUN, and "when did this vanish from the
+        // export" is the half of a retired row only that field can answer.
         // Pinned by `retiring_leaves_an_already_retired_row_untouched`.
         let stale: Vec<String> = self
             .items(kind)?

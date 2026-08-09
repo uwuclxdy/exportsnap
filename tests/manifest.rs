@@ -274,6 +274,148 @@ fn reset_puts_a_source_missing_item_back_on_the_work_list() {
     assert_eq!(item.last_error, None);
 }
 
+/// Both media legs re-derive their gaps from scratch on every run and re-state every one of them —
+/// 90 rows on the observed export — so a `mark_source_missing` that wrote unconditionally would turn
+/// `updated_at` into the last RUN for exactly the rows that answer "when did this vanish".
+///
+/// The sentinel is load-bearing, not decoration: `unixepoch()` has one-second resolution, so a second
+/// call landing in the same second as the first rewrites the row with the value it already had and no
+/// assertion could tell a rewrite from a skip.
+///
+/// **The still-`Pending` row is the positive control.** Without it a `mark_source_missing` that had
+/// stopped writing anything at all would pass, because a dead call leaves a backdated row alone just
+/// as well as a correct one does.
+#[test]
+fn re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched() {
+    /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
+    const SENTINEL: i64 = 1_000_000_000;
+    const REASON: &str = "the export holds no memory media for this entry's day and kind";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+        manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON).unwrap();
+        assert_eq!(status_of(&manifest, "m-01"), ItemStatus::SourceMissing, "the row the next run must leave alone");
+        assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending, "and the one it must still be able to park");
+    }
+
+    // Only reachable by editing the database, which is the point: it backdates both rows so a
+    // rewrite is distinguishable from a skip.
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET updated_at = ?1", [SENTINEL]).unwrap();
+    drop(conn);
+
+    // The second run, re-deriving the same gap and re-stating it verbatim.
+    let manifest = work.open();
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON).unwrap();
+    manifest.mark_source_missing(ItemKind::Memory, "m-02", REASON).unwrap();
+
+    let untouched = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(untouched.updated_at, SENTINEL, "a second run rewrote a row that says exactly what it said before");
+    assert_eq!(untouched.status, ItemStatus::SourceMissing, "and it is still a gap, so the timestamp did not survive by the row moving");
+    assert_eq!(untouched.last_error.as_deref(), Some(REASON), "and it still says why");
+    let control = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+    assert_eq!(control.status, ItemStatus::SourceMissing, "positive control: the same run did run, and did park a new row");
+    assert_ne!(control.updated_at, SENTINEL, "and it stamped that transition");
+}
+
+/// The write direction, one leg per half of the guard's condition: a guard is only as good as the
+/// narrowest thing it still lets through, and each half is what lets one of these two rows through.
+///
+/// The REASON leg is why this is not `exclude`'s bare `status <> ?1`. That note is a constant the
+/// module owns; this one is CALLER TEXT, and `MissingReason::Unscanned` is scan-wide, so one
+/// unlistable directory makes a run write it for every unpaired entry and the next clean run has to
+/// replace it on all of them. A status-only guard would freeze the stale reason with the status
+/// column reading correct.
+///
+/// The STATUS leg is the mirror, and it is the half a note-only guard would drop: a failed attempt
+/// whose note already reads like a gap's is still not a gap until this call says so.
+#[test]
+fn a_gap_row_is_written_whenever_its_status_or_its_reason_differs() {
+    const SENTINEL: i64 = 1_000_000_000;
+    const UNSCANNED: &str = "part of the source could not be listed, so media for this entry may exist but was never seen";
+    const NO_MEDIA: &str = "the export holds no memory media for this entry's day and kind";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+        manifest.mark_source_missing(ItemKind::Memory, "m-01", UNSCANNED).unwrap();
+        manifest.mark_failed(ItemKind::Memory, "m-02", NO_MEDIA).unwrap();
+        let failed = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+        // Both notes have to be the SAME stored bytes or the status leg is testing a note that
+        // differs too, and the redactor is between the caller and the column on both paths.
+        assert_eq!(
+            failed.last_error.as_deref(),
+            Some(NO_MEDIA),
+            "the note reached the column verbatim, which is what the leg below rests on"
+        );
+    }
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET updated_at = ?1", [SENTINEL]).unwrap();
+    drop(conn);
+
+    // The run with the directory readable again: a verdict the last run could not make.
+    let manifest = work.open();
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", NO_MEDIA).unwrap();
+    manifest.mark_source_missing(ItemKind::Memory, "m-02", NO_MEDIA).unwrap();
+
+    let reason_changed = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(reason_changed.last_error.as_deref(), Some(NO_MEDIA), "a run that learned why has to be able to say so");
+    assert_ne!(reason_changed.updated_at, SENTINEL, "and that is a change to what the row records, so it is stamped");
+    assert_eq!(reason_changed.status, ItemStatus::SourceMissing);
+
+    let status_changed = manifest.item(ItemKind::Memory, "m-02").unwrap().unwrap();
+    assert_eq!(status_changed.status, ItemStatus::SourceMissing, "a matching note does not make a failed attempt a gap already");
+    assert_ne!(status_changed.updated_at, SENTINEL, "and parking it is a transition, so it is stamped");
+}
+
+/// The guard's `IS NOT` rather than the `<>` a reader reaches for first. `last_error` is nullable and
+/// SQL defines `<>` against `NULL` as `NULL` — which is not true — so the plain operator would read a
+/// note-less gap row as "already says this" and never give it one.
+///
+/// No call in this crate produces that row: `mark_source_missing` always writes a note. It is reached
+/// by editing the database, the same way the `Incomplete` demotion above reaches a `Done` row with no
+/// checksum, so the operator choice is pinned rather than resting on the comment next to it.
+#[test]
+fn a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it() {
+    const SENTINEL: i64 = 1_000_000_000;
+    const REASON: &str = "the export holds no memory media for this entry's day and kind";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01"])).unwrap();
+        manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON).unwrap();
+    }
+    let conn = rusqlite::Connection::open(work.state.join(format!("{ID}.sqlite"))).unwrap();
+    conn.execute("UPDATE items SET last_error = NULL, updated_at = ?1", [SENTINEL]).unwrap();
+    drop(conn);
+
+    let manifest = work.open();
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON).unwrap();
+
+    let item = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap();
+    assert_eq!(item.last_error.as_deref(), Some(REASON), "a null note is not the note the caller passed");
+    assert_ne!(item.updated_at, SENTINEL, "and writing it is a change to what the row records, so it is stamped");
+}
+
+#[test]
+fn marking_a_gap_on_a_row_no_run_enrolled_is_refused_rather_than_silently_doing_nothing() {
+    // The guard above means a zero row count no longer implies the row is absent, so this is the case
+    // that would go quiet if the read that discriminates them were dropped — and the case that reds
+    // every already-parked row as unknown if the read were left out entirely.
+    let work = Workspace::new();
+    let manifest = work.open();
+    match manifest.mark_source_missing(ItemKind::Memory, "never-enrolled", "no media for it") {
+        Err(ManifestError::UnknownItem { kind, source_id }) => {
+            assert_eq!((kind, source_id.as_str()), (ItemKind::Memory, "never-enrolled"));
+        }
+        other => panic!("expected UnknownItem, got {other:?}"),
+    }
+}
+
 /// The sweep's whole rule in one fixture, one row per verdict: every status an unnamed row can be
 /// at is retired, and `Done` is the exemption — its bytes are on disk and checksum-verified, so the
 /// source leaving the export does not un-do the work.
@@ -332,8 +474,8 @@ fn retiring_sweeps_nothing_while_a_directory_could_not_be_listed() {
 /// The sweep has to be idempotent, and `updated_at` is the field that proves it. A retired row is
 /// unnamed by definition — being unnamed is why it was retired — so it re-enters the sweep on every
 /// later run unless it is exempt, and the `UPDATE` would reset a timestamp `Item` documents as the
-/// last status TRANSITION. That destroys the "when did this vanish" half of what a retired row is
-/// kept for.
+/// last time the row's own state moved. That destroys the "when did this vanish" half of what a
+/// retired row is kept for.
 ///
 /// The sentinel is load-bearing, not decoration: `unixepoch()` has one-second resolution, so a second
 /// sweep landing in the same second as the first rewrites the row with the value it already had and
