@@ -32,6 +32,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Color;
 use tempfile::TempDir;
 
 const EXPORT_ID: &str = "1784667002819";
@@ -559,14 +560,49 @@ fn screen_text(buffer: &Buffer) -> String {
     (0..buffer.area.height).map(|y| row(buffer, y)).collect::<Vec<_>>().join("\n")
 }
 
+/// The COLUMN a run of cells spells `needle` at, and the only one.
+///
+/// Deliberately not `str::find` on the flattened row: that answers in BYTES, and the caret, the
+/// panel border and the clause separator sitting ahead of these runs are all multi-byte, so the two
+/// answers disagree by several cells on exactly the rows a colour assertion reads — measured, at 4
+/// cells on the form's cycle row and 8 on the counts line.
+///
+/// **A second occurrence is a panic rather than a first-match win.** An absent needle and a
+/// wide glyph inside one already fail loudly; a duplicated run would not, and silently colouring
+/// the wrong occurrence is the one failure a reader could not tell from a pass. Nothing on these
+/// rows duplicates today, so the check is what keeps that true.
+fn column_of(buffer: &Buffer, y: u16, needle: &str) -> u16 {
+    let symbols: Vec<&str> = (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect();
+    let starts: Vec<usize> =
+        symbols.windows(needle.chars().count()).enumerate().filter(|(_, run)| run.concat() == needle).map(|(start, _)| start).collect();
+    match starts.as_slice() {
+        [start] => u16::try_from(*start).unwrap(),
+        [] => panic!("{needle:?} is not on row {y}: {:?}", cell_run(buffer, y)),
+        several => panic!("{needle:?} is on row {y} at columns {several:?}, so no single run is the subject: {:?}", cell_run(buffer, y)),
+    }
+}
+
+/// Asserts every cell of the `needle` run on row `y` carries `fg`, so a colour claim is anchored to
+/// the text it is about rather than to a column number layout drift would silently move.
+fn assert_run_fg(buffer: &Buffer, y: u16, needle: &str, fg: Color, what: &str) {
+    let start = column_of(buffer, y, needle);
+    for offset in 0..u16::try_from(needle.chars().count()).unwrap() {
+        let x = start + offset;
+        assert_eq!(buffer[(x, y)].style().fg, Some(fg), "{what}: cell ({x}, {y}) of {needle:?}");
+    }
+}
+
 fn environment() -> Environment {
     Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) }
 }
 
 /// An app on the chat media tab with a FIXED, short source, so the form's path rows are byte-stable
 /// on every box — a tempdir's base length decides whether the head-ellipsis fires.
-fn app_on_fixed_source() -> App {
-    let mut app = App::new(Tier::Full).with_source_environment(PathBuf::from("/export"), Some(PathBuf::from("/export/out")), environment());
+///
+/// `tier` is a parameter rather than a second helper because the tier decides only which colour
+/// column the palette resolves to; every other property this fixture exists for is the same on both.
+fn app_on_fixed_source(tier: Tier) -> App {
+    let mut app = App::new(tier).with_source_environment(PathBuf::from("/export"), Some(PathBuf::from("/export/out")), environment());
     on_tab(&mut app, Tab::ChatMedia);
     app
 }
@@ -594,7 +630,7 @@ fn clean_counts() -> PlanCounts {
 
 #[test]
 fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
-    let mut app = app_on_fixed_source();
+    let mut app = app_on_fixed_source(Tier::Full);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -624,7 +660,7 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
 /// ONLY while the row holds focus, and `space` walks it.
 #[test]
 fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
-    let mut app = app_on_fixed_source();
+    let mut app = app_on_fixed_source(Tier::Full);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
 
     // Blurred (the caret starts on `source`): every option is a bare word, no brackets anywhere.
@@ -733,6 +769,95 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
         "{:?}",
         row(terminal.backend().buffer(), 23)
     );
+}
+
+// ---- the compatible tier ----
+//
+// Every other render test on this screen drives `Tier::Full`. Nothing in the widget code branches on
+// the tier — `Palette` keeps its own `tier` field private so that it cannot — which makes the two
+// tiers agreeing the expected result rather than a discovery. The two frames below capture it
+// anyway, because low-by-construction is exactly the claim a frame either confirms or kills, and the
+// overview screen's tier work is what established that the two tiers can disagree at all.
+//
+// **Every FOREGROUND expectation is a per-tier literal: four roles — `ACCENT`, `TEXT_FAINT`,
+// `WARNING`, `TEXT_DIM` — spelled out once per tier, and no role shares a value across the two.**
+// That is what separates these from a text-only pin: brackets are ascii and a clause is a clause, so
+// glyphs alone would read identically whatever the palette resolved to, while a palette that
+// flattened the two tiers into one column reds on one of the two passes.
+//
+// The focused row's `BG_HOVER` is the one expectation that is NOT a literal — it derives from
+// `Palette::new(tier)`, so it cannot detect a flattening. Measured: moving `compatible::BG_HOVER`
+// from 236 to 240 leaves both tests here green and reds `tests/theme.rs`'s two literal pins instead.
+// It earns its place as the landing guard below rather than as a colour pin, and the literal for
+// that constant is `tests/theme.rs`'s job, which it holds.
+
+/// The cycle row's `[brackets]` and its `ACCENT`/`TEXT_FAINT` split, on both tiers.
+///
+/// The row is walked to before the frame is taken, because a cycle row wears its brackets **only
+/// while focused** — a frame with the caret still on `source` shows none, so a bracket assertion
+/// there would be asserting a bug.
+///
+/// **The two frame assertions pin the two halves of `row_focused = row_selected && !descended`, and
+/// that is why both are here.** The brackets in the text assertion need `focused`, so a walk landing
+/// short reds there — measured, with the walk cut to two: the row renders `overlay mode  merged
+/// both  originals` and no caret. The tint read off the bracket's own cells needs `selected`, the
+/// other half, and is independently killable. An `overlay_mode() == Both` check would pin neither:
+/// `Both` is the `#[default]` and no key pressed here changes it, so it holds whatever the caret
+/// did — it passes verbatim with the walk two rows short. It is deliberately absent; don't add it
+/// back as a landing guard.
+#[test]
+fn the_cycle_rows_brackets_and_selection_colours_survive_the_compatible_tier() {
+    for (tier, accent, faint) in
+        [(Tier::Full, Color::Rgb(67, 171, 229), Color::Rgb(127, 132, 156)), (Tier::Compatible, Color::Indexed(75), Color::Indexed(102))]
+    {
+        let mut app = app_on_fixed_source(tier);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert!(cell_run(buffer, 5).contains("overlay mode  merged  [both]  originals"), "{tier:?}: {:?}", cell_run(buffer, 5));
+        assert_eq!(
+            buffer[(column_of(buffer, 5, "[both]"), 5)].style().bg,
+            Some(Palette::new(tier).bg_hover),
+            "{tier:?}: the brackets are on a row that is really focused"
+        );
+
+        assert_run_fg(buffer, 5, "[both]", accent, &format!("{tier:?} selected option"));
+        assert_run_fg(buffer, 5, "merged", faint, &format!("{tier:?} unselected option"));
+        assert_run_fg(buffer, 5, "originals", faint, &format!("{tier:?} unselected option"));
+    }
+}
+
+/// The counts line's lower-bound qualifier, on both tiers.
+///
+/// The qualifier is the only clause on that line carrying a semantic colour instead of the dim
+/// default, so it is the one a tier could quietly flatten. An ordinary count clause rides in the
+/// same fixture on purpose: both colours come off one frame, so a palette that collapsed `WARNING`
+/// into `TEXT_DIM` on this tier reds here rather than reading as a pass.
+#[test]
+fn the_counts_lines_lower_bound_qualifier_survives_the_compatible_tier() {
+    const QUALIFIER: &str = "some dirs unreadable, counts are lower bounds";
+    for (tier, warning, dim) in
+        [(Tier::Full, Color::Rgb(249, 226, 175), Color::Rgb(166, 173, 200)), (Tier::Compatible, Color::Indexed(223), Color::Indexed(145))]
+    {
+        let mut app = app_on_fixed_source(tier);
+        let state = TempDir::new().unwrap();
+        let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+        feed_plan(&mut app, state.path(), Vec::new(), PlanCounts { partial: true, unmatched_overlays: 2, ..clean_counts() });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let line = cell_run(buffer, 2);
+        assert!(line.contains(&format!("{QUALIFIER} · 2 overlays unmatched")), "{tier:?}: {line}");
+        assert_run_fg(buffer, 2, QUALIFIER, warning, &format!("{tier:?} lower-bound qualifier"));
+        assert_run_fg(buffer, 2, "2 overlays unmatched", dim, &format!("{tier:?} ordinary clause"));
+    }
 }
 
 /// **The privacy gate, at the pixels.** A real run against an export whose conversation key is
@@ -1141,7 +1266,7 @@ fn a_channel_that_goes_dead_without_a_finished_event_reports_a_panic() {
 
 #[test]
 fn the_focused_form_row_tint_reaches_the_padding_boundary() {
-    let mut app = app_on_fixed_source();
+    let mut app = app_on_fixed_source(Tier::Full);
     // At 55 wide the panels stack and the form takes the full width, so its interior is wider than
     // the row's own content — exactly the case where a tint that stops at the last span shows a gap
     // before the padding boundary.
