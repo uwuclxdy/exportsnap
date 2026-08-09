@@ -621,17 +621,19 @@ impl Plan {
     ///
     /// So both reads are pinned at the composition and so is each leg's position against its own
     /// sweep. **One gap is left, and this is its own reason rather than a shared one**: nothing
-    /// pins either read against the ENROLLMENT. Separating that needs a row that went
-    /// `SourceMissing` and came back, since enrollment's `reset` is what clears a record and a row
-    /// that never parked has none to clear. That is unbuilt rather than unbuildable — three
+    /// pins either read against the ENROLLMENT. Separating that needs a row that PARKED and came
+    /// back — `SourceMissing` or `Retired`, since both legs reset on the pair
+    /// (`memories.rs`'s `matches!` on the item's status, `chat_media.rs`'s `parked` set) — because
+    /// enrollment's `reset` is what clears a record and a row that never parked has none to clear. That is unbuilt rather than unbuildable — three
     /// `collect()` calls with a source removed and then restored, plus a newcomer to make the
     /// adopted and derived answers differ, all of it with helpers both screen suites already have.
     /// A cost, not a barrier.
     ///
     /// Three earlier drafts of this paragraph were wrong and all three are retracted here rather
     /// than quietly dropped: the first claimed the ordering was what saved a rewrite; the second
-    /// claimed no test reached either run composition; the third gave the `SourceMissing` reason
-    /// above for TWO gaps when it fits only the enrollment one — the position gap was open because
+    /// claimed no test reached either run composition; the third gave the parked-row reason above
+    /// for TWO gaps when it fits only the enrollment one, and named `SourceMissing` alone where both
+    /// legs reset on `SourceMissing` or `Retired` — the position gap was open because
     /// no fixture had a newcomer sorting ahead of a recorded item, which is a different fact, and
     /// it is now closed on both legs.
     #[must_use]
