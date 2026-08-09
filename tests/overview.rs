@@ -777,10 +777,14 @@ fn row_clipping_begins_one_row_below_the_last_height_that_fits() {
 
 #[test]
 fn load_probes_the_environment_rather_than_leaving_it_empty() {
-    // `Overview::load` is the only path `main` takes, and every other test here uses `load_with` to
-    // bypass the real probe. Without this, swapping `Environment::probe(dir)` for
-    // `Environment::default()` inside `load` leaves the whole suite green while shipping a screen
-    // that reports no tools and no disk space.
+    // Every other test here uses `load_with` to bypass the real probe, so without this, swapping
+    // `Environment::probe(dir)` for `Environment::default()` inside `load` leaves the whole suite
+    // green while `load` reports no tools and no disk space.
+    //
+    // Scope, since it moved: this pins `load`'s own composition and no longer covers the binary.
+    // `main` builds every screen through `App::start`, which calls `load_with` and probes once for
+    // all three — the equivalent production mutation now lives there and is caught by that
+    // composition's own walk-count test.
     //
     // The disk figure is what gets asserted: it is the one part of a real probe whose answer is
     // knowable here. Whether ffmpeg is installed on the machine running this is not this test's

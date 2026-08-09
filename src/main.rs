@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use exportsnap::app::App;
-use exportsnap::tui::screens::overview::Overview;
 use exportsnap::tui::theme::{self, Tier};
 
 /// The `--version` text, four lines: the binary name and version, the
@@ -43,14 +42,9 @@ fn main() -> Result<()> {
     // The config precedence level has no loader yet; `detect_from_env` still orders it.
     let tier = theme::detect_from_env(cli_tier, None);
 
-    // The dir the user points at, or the one they ran from. Read before the terminal is taken
+    // The dir the user points at, or the one they ran from. Parsed before the terminal is taken
     // over, so a bad argument is a plain message on a plain terminal rather than a flash of
-    // alternate screen. The read itself never fails: an absent or unreadable export is a state the
-    // overview has words for.
-    //
-    // Deliberate ceiling: this is blocking, so a large `json/` delays the first frame with nothing
-    // on screen to say why. The upgrade path is the phase-2 tokio runtime plus the overview's own
-    // loading state, which needs the tick timer no screen has earned yet.
+    // alternate screen.
     let source = match parse_source_arg(args.iter().cloned())? {
         Some(dir) => dir,
         None => std::env::current_dir().context("could not read the working dir; pass --source=<dir> instead")?,
@@ -58,7 +52,14 @@ fn main() -> Result<()> {
     // `--out=<dir>` names where a memories run writes (decision 33); absent, the run uses
     // `default_out_root(source)`. Parsed before the terminal is taken over, like the source.
     let out = parse_out_arg(args)?;
-    let overview = Overview::load(&source);
+
+    // Every screen is built here, before the terminal is taken over, and the reads never fail: an
+    // absent or unreadable export is a state the overview has words for.
+    //
+    // Deliberate ceiling: this is blocking, so a large `json/` delays the first frame with nothing
+    // on screen to say why. The upgrade path is the phase-2 tokio runtime plus the overview's own
+    // loading state, which needs the tick timer no screen has earned yet.
+    let mut app = App::start(tier, source, out);
 
     // `try_init` installs ratatui's own restore-then-chain panic hook; unlike `init` it hands
     // back the failure instead of panicking on it. It enables raw mode on `/dev/tty` before
@@ -70,7 +71,6 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::try_init()
         .inspect_err(|_| ratatui::restore())
         .context("failed to take over the terminal; run exportsnap in an interactive terminal")?;
-    let mut app = App::new(tier).with_overview(overview).with_source(source, out);
     let result = app.run(&mut terminal);
     ratatui::restore();
 

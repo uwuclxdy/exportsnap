@@ -132,11 +132,18 @@ pub struct Overview {
 
 impl Overview {
     /// The state before anything has been read: no source named, nothing found, nothing measured.
-    /// `main` replaces it before the first frame, so this is what a render test or a pre-load
+    /// `App::start` replaces it before the first frame, so this is what a render test or a pre-load
     /// frame draws.
     #[must_use]
     pub fn unloaded() -> Self {
         Self { source: None, parts: Parts::None, counts: Counts::NotUnpacked, environment: Environment::default() }
+    }
+
+    /// What the machine could do when this screen was built. Test-only: `App`'s own startup test
+    /// reads it to pin that one probe reaches every screen.
+    #[cfg(test)]
+    pub(crate) const fn environment(&self) -> &Environment {
+        &self.environment
     }
 
     /// Reads `source_dir` once: which export parts sit there, what an unpacked `json/` holds, and

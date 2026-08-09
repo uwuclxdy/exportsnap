@@ -145,8 +145,8 @@ pub struct Environment {
 /// The nearest existing ancestor of `path` — the filesystem a `statvfs` probe can actually measure.
 ///
 /// An output root is created only at the first write, so a run pointed at a brand-new dir must not
-/// report "unknown" disk free. Lives here rather than beside a screen because both media screens ask
-/// it and the question is about the filesystem, not about a widget.
+/// report "unknown" disk free. Lives here rather than beside a screen because the question is about
+/// a filesystem, not about a widget.
 #[must_use]
 pub fn probe_target(path: impl AsRef<Path>) -> PathBuf {
     let mut candidate = path.as_ref().to_path_buf();
@@ -163,8 +163,31 @@ impl Environment {
     /// Probes `PATH` for every [`Tool::ALL`] and measures the filesystem holding `path`.
     #[must_use]
     pub fn probe(path: impl AsRef<Path>) -> Self {
+        Self::probe_with(locate, path)
+    }
+
+    /// [`Self::probe`] against an explicit locator rather than [`locate`] — the seam the startup
+    /// composition takes so a test can count the `PATH` walks it makes. The real [`locate`] cannot
+    /// be made to report them: counting through the environment needs `PATH` changed, and
+    /// `std::env::set_var` is `unsafe`, which this crate forbids.
+    #[must_use]
+    pub(crate) fn probe_with(locate: impl Fn(Tool) -> Option<PathBuf>, path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
         Self::from_probes(locate, available_space(path).ok(), total_space(path).ok())
+    }
+
+    /// This probe's tools against a second filesystem: the same [`Tool`] answers, the space figures
+    /// re-measured at `path`.
+    ///
+    /// Where a tool sits does not depend on the path being measured, so a caller that needs figures
+    /// for two filesystems walks `PATH` once per tool and spends two `statvfs` calls on the second
+    /// rather than a whole second probe. Startup is that caller: the overview reports the source
+    /// dir's filesystem and the media screens report the output root's, which are the same one
+    /// until `--out` names another.
+    #[must_use]
+    pub(crate) fn measured_at(&self, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        Self { available_space: available_space(path).ok(), total_space: total_space(path).ok(), ..self.clone() }
     }
 
     /// The field wiring, split from the probes so a unit test can hand in a locator that answers

@@ -42,7 +42,7 @@ use ratatui::widgets::{ListState, Paragraph};
 
 use crate::export::chat_fix::{CHAT_DIR, OverlayMode};
 use crate::export::chat_run::{self, HistoryOutcome, PlanCounts, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
-use crate::export::env::{Environment, probe_target};
+use crate::export::env::Environment;
 use crate::export::local_fix::{VideoOptions, default_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::tui::alert::RunAlert;
@@ -216,17 +216,14 @@ struct TablePane {
 }
 
 impl ChatMedia {
-    /// The state before any run: the source the app was pointed at and the output root the run will
-    /// write into. `out_root` resolves to [`default_out_root`] when no `--out` was passed.
-    #[must_use]
-    pub fn new(source: PathBuf, out_root: Option<PathBuf>) -> Self {
-        let out_root = out_root.unwrap_or_else(|| default_out_root(&source));
-        let environment = Environment::probe(probe_target(&out_root));
-        Self::with_environment(source, Some(out_root), environment)
-    }
-
-    /// [`Self::new`] with the environment handed in — the seam a render test uses to pin the
-    /// disk-free row without reaching for the real filesystem.
+    /// The state before any run: the source the app was pointed at, the output root the run will
+    /// write into, and what the machine can do. `out_root` resolves to [`default_out_root`] when no
+    /// `--out` was passed.
+    ///
+    /// The environment is handed in rather than probed here — `App::start` probes once and hands
+    /// the answer to every screen, where a constructor that probed for itself cost a whole walk of
+    /// `PATH` per screen. It is also the seam a render test uses to pin the disk-free row without
+    /// reaching for the real filesystem.
     #[must_use]
     pub fn with_environment(source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
         let out_root = out_root.unwrap_or_else(|| default_out_root(&source));
@@ -244,6 +241,13 @@ impl ChatMedia {
             form_focus: 0,
             table: TablePane { descended: false, list: ListState::default() },
         }
+    }
+
+    /// What the machine could do when this screen was built. Test-only: `App`'s own startup test
+    /// reads it to pin that one probe reaches every screen.
+    #[cfg(test)]
+    pub(crate) const fn environment(&self) -> &Environment {
+        &self.environment
     }
 
     /// Swaps in a receiver the caller feeds, exactly the channel [`Self::start_run`] creates — the

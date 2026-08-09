@@ -8,7 +8,8 @@ use std::time::Duration;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::export::env::Environment;
+use crate::export::env::{Environment, Tool, locate, probe_target};
+use crate::export::local_fix::default_out_root;
 use crate::tui::alert::RunAlert;
 use crate::tui::screens::chat_media::ChatMedia;
 use crate::tui::screens::memories::Memories;
@@ -117,6 +118,13 @@ pub struct App {
 }
 
 impl App {
+    /// An app with no export behind it: the overview tab active and every screen in its own
+    /// pre-read state.
+    ///
+    /// Every screen starts on [`Environment::default`] rather than on a probe of its own. Nothing
+    /// here knows which dir the run is about yet, so a probe would measure a path the user never
+    /// named and be thrown away by [`Self::start`] a moment later — which is what it used to do,
+    /// twice.
     #[must_use]
     pub fn new(tier: Tier) -> Self {
         Self {
@@ -125,34 +133,56 @@ impl App {
             quit_armed: false,
             running: true,
             overview: Overview::unloaded(),
-            memories: Memories::new(PathBuf::new(), None),
-            chat_media: ChatMedia::new(PathBuf::new(), None),
+            memories: Memories::with_environment(PathBuf::new(), None, Environment::default()),
+            chat_media: ChatMedia::with_environment(PathBuf::new(), None, Environment::default()),
         }
     }
 
-    /// Hands the overview screen a real read of the source dir. `main` calls this before the first
-    /// frame; [`Self::new`] on its own draws the unloaded state.
+    /// The whole startup composition, and the only thing `main` builds a running app with: read the
+    /// source dir once, probe the machine once, hand every screen the result.
+    ///
+    /// **`PATH` is walked once per [`Tool`], not once per screen.** Where a tool sits does not
+    /// depend on the path being measured, so the media screens take the overview's answers with
+    /// only the two space figures re-measured — the output root's filesystem is the source's until
+    /// `--out` names another, and even when it does the difference is two `statvfs` calls rather
+    /// than a second walk of every `PATH` entry.
+    ///
+    /// Deliberately not a process-wide cache behind a `OnceLock`. This is a long-lived TUI: a cached
+    /// "ffmpeg missing" would outlive the user leaving to install it, and no reload path could ever
+    /// clear it. A snapshot taken per startup carries the same staleness the screens already have
+    /// and stays a value a test can hand in.
+    #[must_use]
+    pub fn start(tier: Tier, source: PathBuf, out_root: Option<PathBuf>) -> Self {
+        Self::start_with(tier, source, out_root, locate)
+    }
+
+    /// [`Self::start`] against an explicit locator — the seam that makes the walk count above
+    /// observable, since the real [`locate`] cannot be made to report its calls.
+    fn start_with(tier: Tier, source: PathBuf, out_root: Option<PathBuf>, locate: impl Fn(Tool) -> Option<PathBuf>) -> Self {
+        // Resolved here rather than left to each screen so the probe below measures the filesystem
+        // the run will actually write to.
+        let out_root = out_root.unwrap_or_else(|| default_out_root(&source));
+        let environment = Environment::probe_with(locate, &source);
+        let media = environment.measured_at(probe_target(&out_root));
+
+        Self::new(tier).with_overview(Overview::load_with(&source, environment)).with_source_environment(source, Some(out_root), media)
+    }
+
+    /// Hands the overview screen a real read of the source dir. [`Self::start`] calls this before
+    /// the first frame; [`Self::new`] on its own draws the unloaded state.
     #[must_use]
     pub fn with_overview(mut self, overview: Overview) -> Self {
         self.overview = overview;
         self
     }
 
-    /// Hands both media screens their run context: the source dir and the output root, `--out`'s
-    /// value or the default. `main` calls this before the first frame.
+    /// Hands both media screens their run context: the source dir, the output root — `--out`'s
+    /// value or the default — and the machine probe [`Self::start`] already made.
     ///
     /// One call rather than one per screen: the two legs read one export and write under one output
     /// root, so a caller handing them different sources would be describing a state that cannot
-    /// arise from the command line.
-    #[must_use]
-    pub fn with_source(mut self, source: PathBuf, out_root: Option<PathBuf>) -> Self {
-        self.memories = Memories::new(source.clone(), out_root.clone());
-        self.chat_media = ChatMedia::new(source, out_root);
-        self
-    }
-
-    /// [`Self::with_source`] with the environment handed in — the seam a render test uses to
-    /// pin the disk-free rows.
+    /// arise from the command line. It is also the seam a render test uses to pin the disk-free
+    /// rows without reaching for the real filesystem.
     #[must_use]
     pub fn with_source_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
         self.memories = Memories::with_environment(source.clone(), out_root.clone(), environment.clone());
@@ -395,5 +425,50 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn startup_walks_path_once_per_tool() {
+        // Three screens want a machine probe and the two space figures are the only part of one
+        // that depends on the path, so the walk count belongs to the tool roster and not to the
+        // screen count. It read five walks per tool before this was the composition.
+        let walks = RefCell::new(Vec::new());
+        // A source dir that is not there: the export read answers "missing" off one failed listing,
+        // which leaves the probes as the only thing this drives.
+        let app = App::start_with(Tier::Full, PathBuf::from("/nope"), None, |tool| {
+            walks.borrow_mut().push(tool);
+            Some(PathBuf::from(format!("/located/{}", tool.command())))
+        });
+
+        // Tied to the tool roster but deliberately NOT to its order: `Tool::ALL` is declared as
+        // report order, a display concern, and reordering it for a display reason must not red a
+        // walk-count pin.
+        let walks = walks.into_inner();
+        assert_eq!(walks.len(), Tool::ALL.len(), "one walk per tool and no more: {walks:?}");
+        for tool in Tool::ALL {
+            assert_eq!(walks.iter().filter(|walked| **walked == tool).count(), 1, "{tool:?} is looked up exactly once");
+        }
+
+        // The count alone stays green if the composition locates the tools and then hands the
+        // screens a default environment, so pin that the one probe reaches all three of them.
+        for environment in [app.overview().environment(), app.memories().environment(), app.chat_media().environment()] {
+            assert_eq!(environment.ffmpeg.as_deref(), Some(Path::new("/located/ffmpeg")), "that one probe reaches every screen");
+        }
+
+        // The tools are shared but the space figures are not: the overview measures the source dir
+        // and the media screens measure the output root. Here the source is not there and the
+        // default out root climbs to a dir that is, so the two differ by whether they can be
+        // measured at all rather than by a byte count no machine agrees on.
+        assert_eq!(app.overview().environment().available_space, None, "the overview measures the source dir, which is absent");
+        assert!(app.memories().environment().available_space.is_some(), "the media screens measure the output root");
+        assert!(app.chat_media().environment().available_space.is_some(), "the media screens measure the output root");
     }
 }
