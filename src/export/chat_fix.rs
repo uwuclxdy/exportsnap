@@ -69,7 +69,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::export::chat_media::{ChatMediaItem, MediaDate, Message, Reconciliation, Token};
-use crate::export::local_fix::{self, Capture, DeferralReason, Deferred, Leg, Originals, Plan, PlannedItem, SourceMedia};
+use crate::export::local_fix::{
+    self, Capture, DeferralReason, Deferred, Leg, Originals, Outputs, Plan, PlannedItem, RecordedOutputs, SourceMedia,
+};
 use crate::export::manifest::{ItemKind, Manifest, ManifestError};
 use crate::export::model::{Attribution, ConversationId};
 
@@ -333,6 +335,10 @@ pub struct RecordedDirs {
     /// Every directory ANY row of this kind names, the ones no conversation of this run owns
     /// included.
     occupied: BTreeSet<PathBuf>,
+    /// The same rows read one layer down: the output PATH each row records, which is what stops a
+    /// departing item shifting a later one onto a finished row's file. Decision 52, and it rides on
+    /// this type rather than on a second read for the reason [`Self::read`] gives.
+    outputs: RecordedOutputs,
 }
 
 impl RecordedDirs {
@@ -340,9 +346,16 @@ impl RecordedDirs {
     ///
     /// One whole-kind [`Manifest::items`] read rather than a point query per unit, for the reason
     /// [`Reconciliation::enroll`] gives about its own two: a real export would make that 9001 point
-    /// queries. Skipped altogether when the reconciliation joins nothing, which is every export
-    /// delivered without the chat category: [`plan`] derives no conversation directory at all there,
-    /// so there is nothing to adopt and nothing a reservation could protect.
+    /// queries. **One read for both layers**, so decision 52's per-item seed costs no second query:
+    /// the rows are read once and [`RecordedOutputs::of`] takes its own answer out of them.
+    ///
+    /// **The read is unconditional, and it did not used to be.** It returned early when the
+    /// reconciliation joined nothing — every export delivered without the chat category — on the
+    /// grounds that [`plan`] derives no conversation directory there, so nothing could be adopted
+    /// and nothing reserved. That is still true of the DIRECTORY layer and false of the item layer:
+    /// with no history at all every file lands in the `_no-conversation` bucket, which is exactly
+    /// where a day's items share one directory and collide by default. The early return would have
+    /// left decision 52 unenforced on the one export shape that needs it most.
     ///
     /// # Errors
     ///
@@ -358,12 +371,10 @@ impl RecordedDirs {
             .filter_map(|item| item.message().map(|message| (item.source_id(), &message.conversation)))
             .chain(reconciliation.missing.iter().map(|missing| (missing.token.as_str(), &missing.conversation)))
             .collect();
-        if conversations.is_empty() {
-            return Ok(Self::default());
-        }
 
-        let mut recorded = Self::default();
-        for row in manifest.items(ItemKind::ChatMedia)? {
+        let rows = manifest.items(ItemKind::ChatMedia)?;
+        let mut recorded = Self { outputs: RecordedOutputs::of(&rows), ..Self::default() };
+        for row in rows {
             let Some(dir) = row.output_path.as_deref().and_then(Path::parent) else { continue };
             recorded.occupied.insert(dir.to_path_buf());
             if let Some(conversation) = conversations.get(row.source_id.as_str()) {
@@ -445,10 +456,15 @@ fn portable(c: char) -> bool {
 /// One directory per conversation key, with collisions broken by position in the plan.
 ///
 /// Two distinct keys can clean to one name — `a/b` and `a?b` both become `a_b` — and the second one
-/// to appear gets `_2`, the third `_3`, exactly as [`Plan::build`] breaks an output-name collision
-/// and for exactly the same reason: **the suffix is a position in this plan, never the next free
+/// to appear gets `_2`, the third `_3`: **the suffix is a position in this plan, never the next free
 /// name on disk**, so a resumed run recomputes the same answer instead of asking a half-written
 /// output tree what is left.
+///
+/// That used to read "exactly as [`Plan::build`] breaks an output-name collision, and for exactly
+/// the same reason", and decision 52 retired the comparison rather than this rule. Both planners now
+/// break an output-NAME collision through [`super::local_fix::Outputs`], which asks the manifest
+/// first and only falls back to a position; a directory name still has nothing above it to ask, so
+/// the position is the whole answer here.
 ///
 /// The residual that shape carries, stated because it is real: an item leaving the export shifts the
 /// positions after it, so two keys that collided can swap names between runs. The manifest records
@@ -460,13 +476,14 @@ fn portable(c: char) -> bool {
 /// and NTFS**, which fold case, where they are one. Decision 11 is cross-platform, so the merge is a
 /// real outcome and not a curiosity.
 ///
-/// The merge is only the first half of what that would cost. [`plan`]'s output-name collision map is
-/// keyed on the joined path, which stays case-DISTINCT, so two files landing on one
-/// `YYYYMMDD_HHMMSS.<ext>` inside a folded directory would each take the plain name and one would
-/// overwrite the other — leaving two `Done` rows pointing at one file, which
-/// [`crate::export::manifest::Manifest::resume`] then demotes and rewrites alternately, for ever.
-/// That is the oscillation class this repo has already shipped once, arriving through the filesystem
-/// instead of through an id spelling.
+/// The merge used to cost a second thing on top of that, and decision 52 took it away: [`plan`]'s
+/// output-name collision map was keyed case-DISTINCTLY, so two files landing on one
+/// `YYYYMMDD_HHMMSS.<ext>` inside a folded directory each took the plain name and one overwrote the
+/// other — two `Done` rows over one file, which [`crate::export::manifest::Manifest::resume`] then
+/// demoted and rewrote alternately, for ever, which is the oscillation class this repo has already
+/// shipped once. [`super::local_fix::Outputs`] folds its own claim set now, so the merge would cost
+/// the grouping alone. **That is not a reason to stop folding here**: two threads sharing one
+/// directory is the user-visible half and it is the half this type owns.
 ///
 /// Folding only the KEY is what keeps `Friend` readable as `Friend` while making its neighbour
 /// `friend_2`. Pinned by `two_keys_differing_only_in_case_get_two_directories_everywhere`.
@@ -489,9 +506,11 @@ fn portable(c: char) -> bool {
 /// **Its mirror is the same defect and needs the other half of that read.** A departed conversation
 /// is in nobody's key set, so nothing would claim its directory, and a NEW key cleaning onto that
 /// name would be derived straight into a departed thread's tree — on top of files its finished rows
-/// still name, which is where the per-ITEM ordinal below then overwrites them. So `adopt` reserves
-/// every directory the manifest records and not only the ones this run can attribute. What is left
-/// deriving a fresh name is a key the recorded tree has no directory for at all.
+/// still name. So `adopt` reserves every directory the manifest records and not only the ones this
+/// run can attribute. What is left deriving a fresh name is a key the recorded tree has no directory
+/// for at all. What the newcomer would then do INSIDE that tree is a second question and it is
+/// answered a layer down: [`super::local_fix::Outputs`] reserves the individual output paths those
+/// finished rows record, so an item is not planned onto one of them either.
 struct Conversations {
     root: PathBuf,
     /// The next ordinal to try for a folded cleaned name, so a long collision run costs one lookup
@@ -613,10 +632,20 @@ impl Conversations {
 ///
 /// `recorded` is where this export's conversations have been landing so far, and a caller with no
 /// manifest to read one out of passes [`RecordedDirs::default`] to get a first run's answer. It is
-/// read BEFORE [`super::local_fix::run`]'s resume sweep rather than after, and that ordering is the
-/// point: a conversation whose only finished output the user deleted still names the directory that
-/// output was written into, so the rewrite goes back where it was instead of starting a second
-/// directory for the same thread.
+/// read BEFORE [`super::local_fix::run`]'s resume sweep rather than after: the sweep clears the
+/// record of an output the user deleted, and a cleared record names no directory at all.
+///
+/// **What that ordering is worth is smaller than the sentence above used to claim**, and the reason
+/// is the same one [`Plan::build`] gives at its own seed. A conversation whose record is cleared
+/// re-derives from the key set, and where nothing collided that derivation answers with the very
+/// name the record held — so the two coincide and the ordering is unobservable. They separate only
+/// where the cleaned name collided, which is where the ordinal in the record is not what a fresh
+/// derivation would produce. What IS pinned is the read itself:
+/// `a_conversation_that_outlives_its_neighbour_keeps_its_own_directory` in
+/// `tests/chat_media_screen.rs` drives [`super::chat_run::run`] and reds when this seed is
+/// defaulted. The read's POSITION against the sweep is pinned by nothing. Corrected here rather
+/// than left standing, because this file states the sharper rule two paragraphs up and a reader
+/// meeting both takes the looser one as current.
 ///
 /// **A mode no longer moves an output PATH, and that is a change rather than a fact that was always
 /// true.** It used to: `local_fix`'s pass-through predicate folded in `SourceMedia::overlay`, which
@@ -628,33 +657,23 @@ impl Conversations {
 /// two of the three, the copies kept beside it. Unreachable from the observed export either way,
 /// where only the zip family pairs and every zip main is a video.
 ///
-/// What survives that is the per-ITEM ordinal below, which is the same shape [`RecordedDirs`] answers
-/// one layer up and is NOT answered by it: `taken` is a position in this plan too, and nothing reads
-/// it back off the manifest.
-///
-/// **That one is measured rather than argued, and it loses bytes.** Two items landing in one
-/// directory on one second take `<stem>.<ext>` and `<stem>_2.<ext>`; the first leaves the export
-/// while the second is still owed work; the second is then planned onto `<stem>.<ext>` and writes
-/// over the first's finished output. Measured end state, run by run: two [`super::manifest::ItemStatus::Done`] rows
-/// over one path with disagreeing digests — [`Manifest::retire_absent`] exempts `Done`, so the
-/// departed row does not park — then the next resume finds it `Changed` and demotes it, and since
-/// its source is gone it is never planned again and retires. The repaired file is destroyed and
-/// `<stem>_2.<ext>` is orphaned. It does NOT alternate for ever: where the overwritten row's source
-/// is still in the export it is re-fixed at its own shifted name on the next run and converges.
-///
-/// **The `_no-conversation` bucket is where this is ordinary rather than rare**, since a whole day's
-/// items there share one directory and every one of them whose date falls all the way through to the
-/// filename takes `YYYYMMDD_000000`. The bucket is 6877 of the observed export's 9465 FILES, which
-/// is 6413 items — a zip pair's 464 overlay halves ride on the media they pair with — and how many
-/// of those 6413 actually fall through to midnight rather than to an embedded timestamp is
-/// unmeasured, so the collision set is bounded by 6413 and not known to be it.
-///
-/// Open in `docs/todo.md` rather than closed here — it is a different layer, and widening this
-/// change to reach it was not the task.
+/// The per-ITEM ordinal is answered the same way one layer down, and decision 52 is what made it so.
+/// [`super::local_fix::Outputs`] hands an item back the path its own row already records and reserves
+/// every path any row records before one is derived, so `recorded` seeds both layers off one read.
+/// Until 2026-08-09 this layer re-derived: two items landing in one directory on one second took
+/// `<stem>.<ext>` and `<stem>_2.<ext>`, the first left the export while the second was still owed
+/// work, and the second was then planned onto `<stem>.<ext>` and wrote over the first's finished
+/// output. The `_no-conversation` bucket is what made that ordinary rather than rare — 6413 items
+/// share one directory and every one whose date falls all the way through to the filename takes
+/// `YYYYMMDD_000000`.
 #[must_use]
 pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode, recorded: &RecordedDirs) -> Plan {
     let chat_root = out_root.as_ref().join(CHAT_DIR);
     let no_conversation = chat_root.join(NO_CONVERSATION_DIR);
+    // The chat root rather than the out root, so a record this leg could not have written — a
+    // memories-tree path, a path under an older out root — neither adopts nor reserves. Same root
+    // the directory layer contains against, one component up from where it checks.
+    let mut outputs = Outputs::new(chat_root.clone(), &recorded.outputs);
     let mut conversations = Conversations::new(chat_root, recorded);
 
     // Every conversation key the reconciliation names, in sorted order, assigned before a single
@@ -670,11 +689,6 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
     let mut items = Vec::new();
     let mut deferred = Vec::new();
     let mut excluded = Vec::new();
-    // Keyed by the whole candidate path, not by the name: two conversations may each hold a file
-    // that wants `20210304_000000.jpg`, and those two do not collide. Where the directory an item
-    // lands in is now read back off the manifest, this ordinal is still a position in the plan alone
-    // — the open residual `plan`'s docs measure.
-    let mut taken: BTreeMap<PathBuf, u32> = BTreeMap::new();
 
     for item in &reconciliation.items {
         // Decision 44d, and it comes first so a thumbnail is never deferred over its format or
@@ -711,11 +725,11 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
         };
         let stem = local.format("%Y%m%d_%H%M%S").to_string();
         // The RESOLVED extension, so the PNGs that keep their own format and the JPEGs beside them
-        // key their collisions on the names they actually take.
+        // key their collisions on the names they actually take. Keyed by the whole path and not by
+        // the name: two conversations may each hold a file that wants `20210304_000000.jpg`, and
+        // those two do not collide.
         let extension = local_fix::output_extension(leg, &media);
-        let ordinal = taken.entry(dir.join(format!("{stem}.{extension}"))).or_default();
-        let output = dir.join(local_fix::output_name(&stem, &extension, *ordinal));
-        *ordinal += 1;
+        let output = outputs.path(item.source_id(), &dir, &stem, &extension);
 
         items.push(PlannedItem {
             source_id: item.source_id().to_owned(),

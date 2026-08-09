@@ -35,8 +35,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs, dir_name};
 use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Reconciliation, Token, discover, reconcile};
 use exportsnap::export::exif::{Jpeg, Stamp};
-use exportsnap::export::local_fix::{self, DeferralReason, FixReport, Notice, Plan, TimeSource, VideoOptions};
-use exportsnap::export::manifest::{ExportId, Item, ItemKind, ItemStatus, Manifest};
+use exportsnap::export::local_fix::{self, DeferralReason, FixReport, Notice, Plan, RecordedOutputs, TimeSource, VideoOptions};
+use exportsnap::export::manifest::{Checksum, DemotionReason, ExportId, Item, ItemKind, ItemStatus, Manifest};
 use exportsnap::export::model::ChatHistory;
 use exportsnap::export::schema;
 use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
@@ -161,6 +161,25 @@ fn paint_split_png(path: &Path, opaque: Rgba<u8>) {
 fn plain(root: &Path, token: Token, seed: u32) -> String {
     let stem = format!("{}~{}", token.as_word(), id(seed));
     paint_jpeg(&chat_media_dir(root).join(format!("{DAY}_{stem}.jpg")));
+    stem
+}
+
+/// [`plain`] painted a distinct colour, so two items that land on one path produce two different
+/// files.
+///
+/// **The constraint is the one [`paint_split_png`] records one layer over, and here it decides
+/// whether an overwrite is observable at all.** [`plain`] paints one deterministic pattern and the
+/// fix pass is deterministic too, so two items built from it come out byte-identical: a checksum
+/// then cannot separate "this file survived" from "it was overwritten by its neighbour", which is
+/// the exact question `an_item_leaving_the_export_does_not_shift_a_survivor_onto_its_finished_file`
+/// asks. `shade` is that dimension and the test guards it rather than assuming it.
+fn plain_shaded(root: &Path, token: Token, seed: u32, shade: u8) -> String {
+    let stem = format!("{}~{}", token.as_word(), id(seed));
+    let mut pixels = RgbImage::new(WIDTH, HEIGHT);
+    for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+        *pixel = Rgb([shade, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]);
+    }
+    pixels.save_with_format(chat_media_dir(root).join(format!("{DAY}_{stem}.jpg")), ImageFormat::Jpeg).unwrap();
     stem
 }
 
@@ -1315,6 +1334,140 @@ fn two_rows_of_one_conversation_that_disagree_settle_on_the_lowest_directory() {
     assert_eq!(dir_of(&after, &higher), Some(lowest), "and one conversation still gets exactly one directory");
 }
 
+/// Decision 52's own verify line, on the leg the defect was measured on.
+///
+/// Two items in one directory on one second take `<stem>.jpg` and `<stem>_2.jpg`. The second is
+/// driven back to work, which per decision 50 CLEARS its output record; the first then leaves the
+/// export, taking its position in the plan with it. Re-deriving the ordinal plans the survivor onto
+/// the departed row's path and the run writes over a repaired file — after which the departed row
+/// demotes, is never planned again because its source is gone, and retires, so nothing ever puts
+/// that file back.
+///
+/// **Adoption cannot be what saves it here, and that is why this is the shape the queue named.** The
+/// survivor's record is gone by the time the plan runs, so the only thing standing between it and
+/// the departed row's file is the reservation of every path the manifest records.
+///
+/// The first assertion is the fixture's own self-guard: with both files painted alike the two
+/// outputs are byte-identical and the digest comparison below cannot fail whatever the code does.
+#[test]
+fn an_item_leaving_the_export_does_not_shift_a_survivor_onto_its_finished_file() {
+    let work = Workspace::new();
+    let one = plain_shaded(&work.source(), Token::B, 1, 40);
+    let two = plain_shaded(&work.source(), Token::B, 2, 220);
+    let run = work.run(&no_history());
+    assert_eq!(run.report.fixed, 2, "{:?}", run.report.failed);
+
+    let bucket = work.out().join("chat/_no-conversation/2021/03");
+    let recorded = |source_id: &str| {
+        let row = run.row(source_id);
+        (row.output_path.expect("a finished row records where it landed"), row.checksum.expect("and what it wrote there"))
+    };
+    let (one_output, one_digest) = recorded(&one);
+    let (two_output, two_digest) = recorded(&two);
+    assert_ne!(one_digest, two_digest, "the two outputs are byte-identical, so no digest below could see an overwrite");
+    assert_eq!(
+        [one_output.clone(), two_output.clone()].into_iter().collect::<BTreeSet<_>>(),
+        [bucket.join("20210304_000000.jpg"), bucket.join("20210304_000000_2.jpg")].into_iter().collect::<BTreeSet<_>>(),
+        "the fixture is not two items on one second in one directory"
+    );
+    // Which of the two took the plain name is the plan's answer, not this fixture's.
+    let (departing, survivor) = if one_output == bucket.join("20210304_000000.jpg") { (one, two) } else { (two, one) };
+
+    // Driven back to work: `Pending`, retry count zeroed, output record dropped, file left alone —
+    // the state a resume writes when the user deletes an output, reached here without a run.
+    run.manifest.reset(ItemKind::ChatMedia, &survivor).unwrap();
+    fs::remove_file(chat_media_dir(&work.source()).join(format!("{DAY}_{departing}.jpg"))).unwrap();
+
+    let after = work.run(&no_history());
+    assert_eq!(after.report.fixed, 1, "{:?}", after.report.failed);
+
+    // The assertion this test is NAMED for goes first, deliberately: a sibling assertion above it
+    // aborts the body, and a red from there banks as a kill while this line never executes.
+    let row = after.row(&departing);
+    let output = row.output_path.expect("the departed row still records the file it finished");
+    let digest = Checksum::of_file(&output).expect("and that file is still there").0;
+    assert_eq!(Some(digest), row.checksum, "the departed item's repaired file was written over: {}", output.display());
+
+    assert_eq!(
+        after.row(&survivor).output_path.as_deref(),
+        Some(bucket.join("20210304_000000_2.jpg").as_path()),
+        "the survivor moved off its own name"
+    );
+}
+
+/// Decision 52's ADOPTION half at run level: an item whose finished output the user deleted is
+/// rewritten at the path it recorded, rather than at wherever a fresh walk would put it.
+///
+/// **It does NOT pin the read-before-resume ordering, and an earlier draft of this doc said it
+/// did.** Measured: with the item set unmoved, a derived name walks to the first unclaimed path and
+/// an adopted path normally IS that path, so the two mechanisms coincide. `Plan::build`'s own doc
+/// carries the residual and the one case that separates them.
+///
+/// **No departure and no `reset`, and both omissions are the point.** The item set does not move, so
+/// a red here can only be about adoption; and the record has to still be on the row when the plan is
+/// built, which means the demotion must come from `resume` INSIDE `local_fix::run` rather than from
+/// a `reset` beforehand. Reach for `reset` out of symmetry with the test above and this silently
+/// becomes a second copy of the reservation pin.
+///
+/// The live path, which is why this is not unit-testable: `chat_fix::plan` plans every reconciliation
+/// item whatever its status, `local_fix::run` only then filters on what the manifest owes, and the
+/// resume sweep sits between the two. So the survivor is adopted off a record that is about to be
+/// cleared, demoted, and rewritten at the adopted path.
+///
+/// Without adoption both records are still RESERVED, so the two items derive `_3` and `_4`: the
+/// survivor's file moves for no reason and the numbering is scrambled from then on. That is the
+/// outcome this asserts against, and it is why dropping adoption alone stays green on the test above
+/// and reds here — the two tests are the 2x2 decision 52a asks for.
+///
+/// **Dropping BOTH halves leaves this green, which is not a weakness.** With nothing reserved the
+/// positional walk hands out the same two names it always did, so the two errors cancel on this
+/// fixture. The discriminating mutation for this test is the adoption half alone; the test above is
+/// the one that reds when the whole fix goes.
+///
+/// The demotion arm is named rather than assumed: a deleted output is
+/// [`exportsnap::export::manifest::DemotionReason::Vanished`], which is a different arm of
+/// `demotion_reason` from the one `an_output_that_changed_since_it_was_recorded_is_redone_rather_than_trusted`
+/// exercises, and asserting it is what proves the sweep ran at all rather than the row being skipped.
+#[test]
+fn an_item_whose_output_was_deleted_is_rewritten_at_the_path_it_recorded() {
+    let work = Workspace::new();
+    let one = plain_shaded(&work.source(), Token::B, 1, 40);
+    let two = plain_shaded(&work.source(), Token::B, 2, 220);
+    let run = work.run(&no_history());
+    assert_eq!(run.report.fixed, 2, "{:?}", run.report.failed);
+
+    let bucket = work.out().join("chat/_no-conversation/2021/03");
+    let recorded = |source_id: &str| run.row(source_id).output_path.expect("a finished row records where it landed");
+    let (first, second) = (recorded(&one), recorded(&two));
+    assert_eq!(
+        [first.clone(), second.clone()].into_iter().collect::<BTreeSet<_>>(),
+        [bucket.join("20210304_000000.jpg"), bucket.join("20210304_000000_2.jpg")].into_iter().collect::<BTreeSet<_>>(),
+        "the fixture is not two items on one second in one directory"
+    );
+    // The one on the SUFFIXED name is the one with something to lose: its path is the one a
+    // re-derivation would move. Which of the two that is, is the plan's answer, not this fixture's.
+    let suffixed_output = bucket.join("20210304_000000_2.jpg");
+    let suffixed = if first == suffixed_output { one } else { two };
+
+    // Only the OUTPUT goes. Both sources stay, both rows keep their records, and nothing is reset.
+    fs::remove_file(&suffixed_output).unwrap();
+
+    let after = work.run(&no_history());
+    assert_eq!(
+        after.report.resumed.demoted.iter().map(|one| (one.source_id.as_str(), one.reason)).collect::<Vec<_>>(),
+        [(suffixed.as_str(), DemotionReason::Vanished)],
+        "the resume sweep did not demote the deleted output, so nothing below is about a rewrite"
+    );
+    assert_eq!(after.report.fixed, 1, "{:?}", after.report.failed);
+
+    assert_eq!(
+        after.row(&suffixed).output_path.as_deref(),
+        Some(suffixed_output.as_path()),
+        "the rewrite landed somewhere other than the file this item had already finished at"
+    );
+    assert!(suffixed_output.is_file(), "the recorded path was not written back");
+}
+
 #[test]
 fn two_files_in_one_conversation_on_one_second_get_a_counted_suffix() {
     let history = history(vec![(
@@ -1500,7 +1653,7 @@ fn a_memories_plan_still_carries_no_attribution_and_no_originals() {
     // that introduced them.
     let memories = exportsnap::export::model::Memories { saved_media: vec![] };
     let reconciliation = exportsnap::export::memories::reconcile(&memories, exportsnap::export::memories::Discovery::default());
-    let plan = Plan::build(&memories, &reconciliation, "/out");
+    let plan = Plan::build(&memories, &reconciliation, "/out", &RecordedOutputs::default());
     assert_eq!(plan.kind, ItemKind::Memory);
     assert!(plan.excluded.is_empty());
     assert!(plan.items.iter().all(|item| item.attribution.is_none() && item.originals.is_none()));

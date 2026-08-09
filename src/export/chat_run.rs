@@ -353,7 +353,9 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     // the run will actually work from: the enrollment is what resets a row whose file came back, and
     // the resume sweep inside `local_fix::run` is what drops the record of an output the user
     // deleted — and that one has to land AFTER this, so the rewrite goes back into the directory it
-    // was written into rather than starting a second one for the same thread.
+    // was written into rather than starting a second one for the same thread. One read serves both
+    // layers: the same rows carry decision 52's per-item output paths, and the same ordering
+    // argument applies to them one component down.
     let recorded = chat_fix::RecordedDirs::read(&reconciliation, &manifest).map_err(RunError::Manifest)?;
     let plan = chat_fix::plan(&reconciliation, &inputs.out_root, inputs.overlay, &recorded);
     let counts = counts(&reconciliation, &plan, had_history);

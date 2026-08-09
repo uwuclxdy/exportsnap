@@ -223,6 +223,68 @@ fn a_conversation_that_outlives_its_neighbour_keeps_its_own_directory() {
     assert!(!dir.path().join("out/chat/a_b/20210304_154507.jpg").exists(), "and it started a second directory for one thread");
 }
 
+/// Decision 52's ITEM seed, pinned where it is wired and separated from the mere fact of the read.
+///
+/// `chat_run::prepare` reads one seed that carries both layers. The DIRECTORY half is pinned by the
+/// test above; the item half was mutable to green here, reddening only `tests/chat_fix.rs`, which
+/// re-drives the composition's order rather than driving `prepare`.
+///
+/// **Three items in ONE named conversation, not in the `_no-conversation` bucket.** Decision 46b's
+/// bucket is where a collision on one second is ordinary and a conversation folder is where it is
+/// merely possible, so the bucket is the more faithful shape — but building it needs a history that
+/// joins nothing, and every helper here is one the file already uses for a named thread. A joined
+/// item also takes the message's own timestamp instead of a midnight fallback, so the collision is
+/// stated by the fixture rather than inherited from a date chain. The directory layer is held still
+/// by the single key, so a red here can only be the item layer.
+///
+/// **The newcomer is what makes this an ORDERING pin and not just a read pin.** Seed 1 sorts ahead
+/// of both recorded items (`Discovery::from_files` orders by id and `media_id` zero-pads), so:
+///
+/// - correct — every record is claimed before any derive, so seed 1 walks past both to `_3` and
+///   seed 3 is handed back the `_2` it already finished at;
+/// - seed defaulted — seed 1 takes the plain name, over the file seed 2 finished;
+/// - seed read AFTER the resume sweep — seed 3's deleted output has already demoted and cleared its
+///   record, so seed 1 takes `_2` and seed 3 is pushed to `_3`, off its own file.
+///
+/// The third is the one nothing else in this repo reaches, and it is why the assertion is on seed
+/// 3's row rather than on the newcomer's. **It is measured rather than reasoned**: planting that
+/// inversion and reading all three rows gives `_2` / plain / `_3` for seeds 1, 2 and 3 verbatim —
+/// seed 2 keeps the plain name throughout, because its own record survives the sweep and is adopted
+/// either way, which is what leaves the newcomer and the demoted item to fight over `_2`.
+#[test]
+fn a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name() {
+    let sent = "2021-03-04 14:30:05 UTC";
+    let dir = export_tree(&[("friend-handle", &[(sent, "b~aB3xY90002"), (sent, "b~aB3xY90003")])], &[2, 3]);
+    let (inputs, _state) = inputs(&dir, OverlayMode::Both);
+    let first = collect(&inputs);
+    assert_eq!(report(finished(&first)).fixed, 2, "{:?}", report(finished(&first)).failed);
+
+    let named = |snapshot: &PlanSnapshot, seed: u32| {
+        snapshot.rows.iter().find(|row| row.source_id == media_id(seed)).map(|row| row.output_name.clone())
+    };
+    let snapshot = planned(&first);
+    assert_eq!(named(snapshot, 2).as_deref(), Some("20210304_143005.jpg"), "the fixture is not two items on one second");
+    assert_eq!(named(snapshot, 3).as_deref(), Some("20210304_143005_2.jpg"), "the fixture is not two items on one second");
+
+    // Only seed 3's OUTPUT goes: its row keeps the record until the sweep inside the next run
+    // clears it, which is the window this test is about. Then a newcomer arrives that sorts ahead of
+    // both, through the same history rewrite the test above already does.
+    let part = dir.path().join(format!("mydata~{EXPORT_ID}"));
+    fs::remove_file(dir.path().join("out/chat/friend-handle/20210304_143005_2.jpg")).unwrap();
+    write_media(&part, 1);
+    write_history(&part.join("json"), &[("friend-handle", &[(sent, "b~aB3xY90002"), (sent, "b~aB3xY90003"), (sent, "b~aB3xY90001")])]);
+
+    let second = collect(&inputs);
+    assert_eq!(report(finished(&second)).fixed, 2, "{:?}", report(finished(&second)).failed);
+    let after = planned(&second);
+    assert_eq!(
+        named(after, 3).as_deref(),
+        Some("20210304_143005_2.jpg"),
+        "the recorded item was pushed off the file it had already finished at"
+    );
+    assert_eq!(named(after, 1).as_deref(), Some("20210304_143005_3.jpg"), "the newcomer took a name a record already claimed");
+}
+
 /// **The privacy gate, at the boundary the screen reads from.** A conversation key is a friend's
 /// username and it names an output DIRECTORY, so it must reach neither a table row nor the counts.
 /// Asserted against the event the screen actually consumes, so a future field that carried a path

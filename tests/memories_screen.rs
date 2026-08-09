@@ -144,6 +144,123 @@ fn a_run_over_a_synthetic_export_plans_then_finishes_every_item() {
     assert_eq!(manifest.items(ItemKind::Memory).unwrap().len(), 2);
 }
 
+/// Decision 52's seed, pinned where it is actually WIRED rather than where its type lives.
+///
+/// `memories_run::prepare` reads a [`exportsnap::export::local_fix::RecordedOutputs`] between the
+/// enrollment and the plan, and until this test that line was mutable to green: defaulting it left
+/// the whole suite passing, on the leg decision 52b exists to cover. `tests/local_fix.rs` pins the
+/// same behaviour but re-drives the composition's order itself, so it proves the plan can take a
+/// seed and never that the composition still hands it one.
+///
+/// Two entries on one day and two files make an ambiguous bucket, so neither item may take its time
+/// from its entry and both fall to the filename day's midnight, wanting one name. The survivor is
+/// driven back to work through the manifest the snapshot names — the state a resume writes when a
+/// user deletes an output — and then the other item's SOURCE leaves the export while its `Done` row
+/// keeps the record naming the file it already wrote. Without the seed the survivor is planned onto
+/// that file.
+///
+/// Asserted on the `PlanSnapshot` row rather than on bytes: `write_main` paints one solid colour for
+/// every seed, so two outputs here are byte-identical and no digest could tell an overwrite from a
+/// rewrite.
+#[test]
+fn a_departed_items_recorded_output_is_reserved_through_the_run_composition() {
+    let dir = export_tree("seed", &[(&at("2021-01-15", "01:00:00"), "Image", ""), (&at("2021-01-15", "23:00:00"), "Image", "")]);
+    let (inputs, _state) = inputs(&dir);
+    let first = collect(&inputs);
+    assert_eq!(report(finished(&first)).fixed, 2);
+
+    let snapshot = planned(&first);
+    assert_eq!(
+        snapshot.rows.iter().map(|row| row.output_name.as_str()).collect::<Vec<_>>(),
+        ["20210115_000000.jpg", "20210115_000000_2.jpg"],
+        "the fixture is not two items landing on one second"
+    );
+    let departing = snapshot.rows[0].source_id.clone();
+    let survivor = snapshot.rows[1].source_id.clone();
+    let manifest = Manifest::open_in(&snapshot.manifest_dir, &snapshot.export_id).unwrap();
+    manifest.reset(ItemKind::Memory, &survivor).unwrap();
+    drop(manifest);
+
+    // The departed item's row stays `Done` and keeps its record: `retire_absent` exempts `Done` and
+    // decision 50 keeps the three output columns across a park. That record is the whole reservation.
+    let main = dir.path().join(format!("mydata~{EXPORT_ID}/memories/2021-01-15_{departing}-main.jpg"));
+    assert!(main.is_file(), "the fixture must remove a file that is there");
+    fs::remove_file(&main).unwrap();
+
+    let second = collect(&inputs);
+    assert_eq!(report(finished(&second)).fixed, 1, "{:?}", report(finished(&second)).failed);
+    let rewritten = planned(&second).rows.iter().find(|row| row.source_id == survivor).expect("the survivor is planned");
+    assert_eq!(rewritten.output_name, "20210115_000000_2.jpg", "the survivor was planned onto the file the departed row still records");
+}
+
+/// Decision 52's seed read against its own resume sweep, on the leg that had no pin for either.
+///
+/// The twin of `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name` in
+/// `tests/chat_media_screen.rs`. 52b is a ruling about both legs, and this is the leg whose seed
+/// read was mutable to green one round ago, so it is the worse one to leave stated-but-unpinned.
+///
+/// **The newcomer is what separates the seed being READ from its being read in the right PLACE.**
+/// Defaulting the seed reds the pin above; only moving the sweep ahead of the read reds this one.
+///
+/// - correct — every record is claimed before any derive, so seed 1 walks past both to `_3` and
+///   seed 3 is handed back the `_2` it already finished at;
+/// - sweep read AHEAD of the seed — seed 3's deleted output has already demoted and cleared its
+///   record, so seed 1 takes `_2` and seed 3 is pushed to `_3`, off its own file.
+///
+/// **Why seed 1 is planned first, stated carefully because the obvious reason is wrong.** It is NOT
+/// that item order is uuid order: `memories::reconcile` builds items in ENTRY order
+/// (`memories.rs:765`) and each entry then pops the lowest UNCLAIMED uuid from its bucket
+/// (`:768`). So the k-th entry carries the k-th lowest uuid, and the row carrying `uuid(1)` is
+/// planned first wherever the newcomer's ENTRY sits in the json. That is stronger than an ordering
+/// claim would be, and this fixture appends the new entry LAST precisely so a reader cannot take
+/// json position as the mechanism. `sorted()` orders the discovered FILES, never the items.
+///
+/// Built by hand rather than through `export_tree`, which hardcodes `seed = index + 1` and so
+/// cannot leave seed 1 free for a later arrival.
+#[test]
+fn a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name() {
+    let dir = TempDir::new().unwrap();
+    let part = dir.path().join(format!("mydata~{EXPORT_ID}"));
+    // Two entries on one day at two times: an ambiguous bucket, so neither may take its entry's
+    // time and both fall to the filename day's midnight and want one name.
+    let early = at("2021-01-15", "01:00:00");
+    let late = at("2021-01-15", "23:00:00");
+    write_json(&part.join("json"), &[(&early, "Image", ""), (&late, "Image", "")]);
+    write_main(&part, "2021-01-15", 2);
+    write_main(&part, "2021-01-15", 3);
+
+    let (inputs, _state) = inputs(&dir);
+    let first = collect(&inputs);
+    assert_eq!(report(finished(&first)).fixed, 2, "{:?}", report(finished(&first)).failed);
+    let named = |snapshot: &PlanSnapshot, seed: u32| {
+        snapshot.rows.iter().find(|row| row.source_id == uuid(seed)).map(|row| row.output_name.clone())
+    };
+    let snapshot = planned(&first);
+    assert_eq!(named(snapshot, 2).as_deref(), Some("20210115_000000.jpg"), "the fixture is not two items on one second");
+    assert_eq!(named(snapshot, 3).as_deref(), Some("20210115_000000_2.jpg"), "the fixture is not two items on one second");
+
+    // Only seed 3's OUTPUT goes: its row keeps the record until the sweep inside the next run
+    // clears it, which is the window this test is about.
+    fs::remove_file(dir.path().join("out/2021/01/20210115_000000_2.jpg")).unwrap();
+    write_main(&part, "2021-01-15", 1);
+    let noon = at("2021-01-15", "12:00:00");
+    write_json(&part.join("json"), &[(&early, "Image", ""), (&late, "Image", ""), (&noon, "Image", "")]);
+
+    let second = collect(&inputs);
+    assert_eq!(report(finished(&second)).fixed, 2, "{:?}", report(finished(&second)).failed);
+    let after = planned(&second);
+    // The newcomer needs its own ENTRY and not just a file: an unclaimed file no entry pairs with
+    // lands in `files_without_entry` and never becomes an item at all, which would leave a two-item
+    // plan and every name below passing for the wrong reason.
+    assert_eq!(after.rows.len(), 3, "the newcomer never became an item, so the names below prove nothing");
+    assert_eq!(
+        named(after, 3).as_deref(),
+        Some("20210115_000000_2.jpg"),
+        "the recorded item was pushed off the file it had already finished at"
+    );
+    assert_eq!(named(after, 1).as_deref(), Some("20210115_000000_3.jpg"), "the newcomer took a name a record already claimed");
+}
+
 #[test]
 fn a_run_writes_nothing_outside_the_out_root() {
     let dir = export_tree("out-boundary", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);

@@ -23,8 +23,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::NaiveDate;
 use exportsnap::export::exif::{Jpeg, Stamp};
-use exportsnap::export::local_fix::{self, DeferralReason, Leg, Notice, Plan, TimeSource, TranscodeSkip, VideoOptions};
-use exportsnap::export::manifest::{ExportId, ItemKind, ItemStatus, Manifest};
+use exportsnap::export::local_fix::{self, DeferralReason, Leg, Notice, Plan, RecordedOutputs, TimeSource, TranscodeSkip, VideoOptions};
+use exportsnap::export::manifest::{Checksum, DemotionReason, ExportId, ItemKind, ItemStatus, Manifest};
 use exportsnap::export::memories::{Discovery, MemoryFile, Reconciliation, reconcile};
 use exportsnap::export::model::{Field, LocationPoint, Memories};
 use exportsnap::export::schema;
@@ -142,6 +142,25 @@ fn block_mean(image: &RgbaImage, channel: usize, block: [u32; 4]) -> f64 {
 /// assertions elsewhere still have a clean "is this red" question to ask.
 fn write_main(dir: &Path, day: &str, seed: u32) -> MemoryFile {
     write_main_sized(dir, day, seed, WIDTH, HEIGHT)
+}
+
+/// [`write_main`] painted a distinct colour, so two items that land on one path produce two
+/// different files.
+///
+/// **The constraint is the one [`write_overlay`]'s neighbours record, and here it decides whether an
+/// overwrite is observable at all.** [`write_main`] paints one deterministic pattern and the fix pass
+/// is deterministic too, so two items built from it come out byte-identical: a checksum then cannot
+/// separate "this file survived" from "it was overwritten by its neighbour", which is the exact
+/// question `an_item_leaving_the_export_does_not_shift_a_survivor_onto_its_finished_file` asks.
+/// `shade` is that dimension and the test guards it rather than assuming it.
+fn write_main_shaded(dir: &Path, day: &str, seed: u32, shade: u8) -> MemoryFile {
+    let mut pixels = RgbImage::new(WIDTH, HEIGHT);
+    for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+        *pixel = Rgb([shade, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]);
+    }
+    let path = memories_dir(dir).join(format!("{day}_{}-main.jpg", uuid(seed)));
+    pixels.save_with_format(&path, ImageFormat::Jpeg).unwrap();
+    MemoryFile::parse(path).unwrap()
 }
 
 /// [`write_main`] at any size, for a fixture whose dimensions have to disagree with the overlay's.
@@ -291,6 +310,12 @@ fn reconciled(memories: &Memories, files: Vec<MemoryFile>) -> Reconciliation {
     reconcile(memories, Discovery::from_files(files, Vec::new()))
 }
 
+/// The plan a FIRST run builds: no manifest has recorded an output path yet, so every name this
+/// hands out is a position in the plan. The same shape `tests/chat_fix.rs` uses for its own leg.
+fn first_run(memories: &Memories, reconciliation: &Reconciliation, out: impl AsRef<Path>) -> Plan {
+    Plan::build(memories, reconciliation, out, &RecordedOutputs::default())
+}
+
 fn manifest(dir: &TempDir, reconciliation: &Reconciliation) -> Manifest {
     let mut manifest = Manifest::open_in(dir.path().join("state"), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
     reconciliation.enroll(&mut manifest).unwrap();
@@ -415,7 +440,7 @@ fn a_memory_carries_no_attribution_and_keeps_no_originals() {
     let files = vec![write_main(dir.path(), "2021-01-15", 1), write_overlay(dir.path(), "2021-01-15", 1)];
     let reconciliation = reconciled(&memories, files);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.kind, ItemKind::Memory);
     assert!(plan.excluded.is_empty(), "the memories leg excludes nothing: {:?}", plan.excluded);
@@ -438,7 +463,7 @@ fn an_exact_bucket_takes_its_time_and_place_from_the_entry() {
     let reconciliation = reconciled(&memories, files);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.items.len(), 1);
     let item = &plan.items[0];
@@ -469,7 +494,7 @@ fn an_agreeing_ambiguous_bucket_keeps_its_gps_and_a_disagreeing_one_loses_it() {
         write_main(dir.path(), "2021-02-20", 4),
     ];
     let reconciliation = reconciled(&memories, files);
-    let plan = Plan::build(&memories, &reconciliation, dir.path().join("out"));
+    let plan = first_run(&memories, &reconciliation, dir.path().join("out"));
 
     let paris = LocationPoint::parse(Field::Location, PARIS).unwrap();
     let located: Vec<Option<LocationPoint>> = plan.items.iter().map(|item| item.location).collect();
@@ -494,7 +519,7 @@ fn an_ambiguous_bucket_holding_one_entry_with_no_location_stamps_nothing() {
     let memories = entries(&[(&at("2021-01-15", "01:00:00"), "Image", PARIS), (&at("2021-01-15", "23:00:00"), "Image", "")]);
     let files = vec![write_main(dir.path(), "2021-01-15", 1), write_main(dir.path(), "2021-01-15", 2)];
     let reconciliation = reconciled(&memories, files);
-    let plan = Plan::build(&memories, &reconciliation, dir.path().join("out"));
+    let plan = first_run(&memories, &reconciliation, dir.path().join("out"));
 
     assert_eq!(plan.items.iter().map(|item| item.location).collect::<Vec<_>>(), [None, None]);
 }
@@ -515,7 +540,7 @@ fn an_unpaired_entry_is_planned_for_nothing_while_a_video_gets_its_own_leg() {
     ];
     let reconciliation = reconciled(&memories, files);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.items.iter().map(|item| item.leg).collect::<Vec<_>>(), [Leg::Image, Leg::Video]);
     assert!(plan.deferred.is_empty(), "a video is fixed by this pass now, not deferred out of it: {:?}", plan.deferred);
@@ -537,7 +562,7 @@ fn an_image_and_a_video_landing_on_one_second_both_keep_the_plain_name() {
     ];
     let reconciliation = reconciled(&memories, files);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
 
     // Two files, one name, two extensions: nothing collides on disk, so nothing gets a suffix.
     // Counting per stem alone would hand the second one `_2` for a clash that cannot happen.
@@ -552,7 +577,7 @@ fn a_main_in_a_format_the_image_leg_does_not_read_is_deferred_rather_than_attemp
     let memories = entries(&[(&at("2021-01-15", "01:00:00"), "SHARE", PARIS)]);
     let files = vec![write_raw(dir.path(), &format!("2021-01-15_{}-main.heic", uuid(1)), b"\x00\x00\x00\x18ftypheic")];
     let reconciliation = reconciled(&memories, files);
-    let plan = Plan::build(&memories, &reconciliation, dir.path().join("out"));
+    let plan = first_run(&memories, &reconciliation, dir.path().join("out"));
 
     assert!(plan.items.is_empty());
     assert_eq!(plan.deferred.iter().map(|one| one.reason).collect::<Vec<_>>(), [DeferralReason::UnknownFormat]);
@@ -572,13 +597,156 @@ fn memories_landing_on_one_second_get_counted_names_rather_than_overwriting_each
     let reconciliation = reconciled(&memories, files);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(outputs(&plan, &out), ["2021/01/20210115_000000.jpg", "2021/01/20210115_000000_2.jpg", "2021/01/20210115_000000_3.jpg"]);
 
-    // Re-planning the same input hands out the same names. That is what makes a resume safe: the
-    // suffix is a position in the plan, never the next free slot on disk.
-    let again = Plan::build(&memories, &reconciliation, &out);
+    // Re-planning the same input hands out the same names, which is what a FIRST run's answer has
+    // to be: the suffix is a position in the plan, never the next free slot on disk. What makes a
+    // resume safe is a different mechanism and it is not this one — decision 52's adopt-plus-reserve
+    // off the manifest, which `first_run` deliberately withholds by seeding an empty
+    // `RecordedOutputs`. See `Plan`'s own doc for the split.
+    let again = first_run(&memories, &reconciliation, &out);
     assert_eq!(outputs(&again, &out), outputs(&plan, &out));
+}
+
+/// Decision 52b's half: the memories leg carries the same defect and takes the same fix.
+///
+/// Two items in one directory on one second take `20210115_000000.jpg` and `_2.jpg`. The second is
+/// driven back to work, which per decision 50 CLEARS its output record; the first then leaves the
+/// export, taking its position in the plan with it. Re-deriving the ordinal plans the survivor onto
+/// the departed row's path and the run writes over a repaired file that nothing will produce again,
+/// since its source is gone.
+///
+/// **Only the reservation can save it, because the survivor has no record left to adopt**, which is
+/// why the mutation that drops the reservation reds here and the one that drops adoption does not.
+/// The chat leg's twin is `tests/chat_fix.rs`'s test of the same name, and the two are pinned apart
+/// because 52b is a ruling about both legs: the memories leg's reachability is unmeasured, and its
+/// date chain falls through to the filename day at midnight exactly as the chat one does.
+///
+/// The first digest assertion is the fixture's own self-guard: with both mains painted alike the
+/// two outputs are byte-identical and the comparison below cannot fail whatever the code does.
+#[test]
+fn an_item_leaving_the_export_does_not_shift_a_survivor_onto_its_finished_file() {
+    let dir = TempDir::new().unwrap();
+    // Two ambiguous entries on one day, so neither may take its time from its entry and both fall
+    // all the way through to the filename's midnight.
+    let memories = entries(&[(&at("2021-01-15", "01:00:00"), "Image", PARIS), (&at("2021-01-15", "23:00:00"), "Image", PARIS)]);
+    let files = vec![write_main_shaded(dir.path(), "2021-01-15", 1, 40), write_main_shaded(dir.path(), "2021-01-15", 2, 220)];
+    let reconciliation = reconciled(&memories, files);
+    let mut first = manifest(&dir, &reconciliation);
+
+    let out = dir.path().join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 2);
+    assert_eq!(
+        outputs(&plan, &out),
+        ["2021/01/20210115_000000.jpg", "2021/01/20210115_000000_2.jpg"],
+        "the fixture is not two items on one second in one directory"
+    );
+
+    let row = |manifest: &Manifest, source_id: &str| manifest.item(ItemKind::Memory, source_id).unwrap().expect("the row is enrolled");
+    let (departing, survivor) = (plan.items[0].source_id.clone(), plan.items[1].source_id.clone());
+    assert_ne!(
+        row(&first, &departing).checksum,
+        row(&first, &survivor).checksum,
+        "the two outputs are byte-identical, so no digest below could see an overwrite"
+    );
+
+    // Driven back to work: `Pending`, output record dropped, file left alone — the state a resume
+    // writes when the user deletes an output, reached here without a run.
+    first.reset(ItemKind::Memory, &survivor).unwrap();
+    fs::remove_file(&plan.items[0].media.main).unwrap();
+
+    let after = reconciled(&memories, vec![MemoryFile::parse(plan.items[1].media.main.clone()).unwrap()]);
+    let mut second = manifest(&dir, &after);
+    let recorded = RecordedOutputs::read(&second, ItemKind::Memory).unwrap();
+    let replan = Plan::build(&memories, &after, &out, &recorded);
+    assert_eq!(local_fix::run(&replan, &mut second, 3, &copying()).unwrap().fixed, 1);
+
+    // The assertion this test is NAMED for goes first, deliberately: a sibling assertion above it
+    // aborts the body, and a red from there banks as a kill while this line never executes.
+    let kept = row(&second, &departing);
+    let output = kept.output_path.expect("the departed row still records the file it finished");
+    let digest = Checksum::of_file(&output).expect("and that file is still there").0;
+    assert_eq!(Some(digest), kept.checksum, "the departed item's repaired file was written over: {}", output.display());
+
+    assert_eq!(outputs(&replan, &out), ["2021/01/20210115_000000_2.jpg"], "the survivor moved off its own name");
+}
+
+/// Decision 52's ADOPTION half at run level: an item whose finished output the user deleted is
+/// rewritten at the path it recorded, rather than at wherever a fresh walk would put it. The chat
+/// leg's twin carries the same name in `tests/chat_fix.rs`, and decision 52b is a ruling about both.
+///
+/// **It does NOT pin the read-before-resume ordering, and an earlier draft of this doc said it
+/// did.** Measured: with the item set unmoved, a derived name walks to the first unclaimed path and
+/// an adopted path normally IS that path, so the two mechanisms coincide. `Plan::build`'s own doc
+/// carries the residual and the one case that separates them.
+///
+/// **No departure and no `reset`, and both omissions are the point.** The item set does not move, so
+/// a red here can only be about adoption; and the record has to still be on the row when the plan is
+/// built, which means the demotion must come from `resume` INSIDE `local_fix::run` rather than from
+/// a `reset` beforehand. Reach for `reset` out of symmetry with the test above and this silently
+/// becomes a second copy of the reservation pin.
+///
+/// Without adoption both records are still RESERVED, so the two items derive `_3` and `_4`: the
+/// survivor's file moves for no reason and the numbering is scrambled from then on.
+///
+/// **Dropping BOTH halves leaves this green, which is not a weakness.** With nothing reserved the
+/// positional walk hands out the same two names it always did, so the two errors cancel on this
+/// fixture. The discriminating mutation for this test is the adoption half alone; the test above is
+/// the one that reds when the whole fix goes.
+///
+/// The demotion arm is named rather than assumed: a deleted output is [`DemotionReason::Vanished`],
+/// a different arm of `demotion_reason` from the one
+/// `an_output_that_changed_since_it_was_recorded_is_redone_rather_than_trusted` exercises, and
+/// asserting it is what proves the sweep ran rather than the row being skipped.
+#[test]
+fn an_item_whose_output_was_deleted_is_rewritten_at_the_path_it_recorded() {
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "01:00:00"), "Image", PARIS), (&at("2021-01-15", "23:00:00"), "Image", PARIS)]);
+    let files = vec![write_main_shaded(dir.path(), "2021-01-15", 1, 40), write_main_shaded(dir.path(), "2021-01-15", 2, 220)];
+    let reconciliation = reconciled(&memories, files);
+    let mut first = manifest(&dir, &reconciliation);
+
+    let out = dir.path().join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 2);
+    assert_eq!(
+        outputs(&plan, &out),
+        ["2021/01/20210115_000000.jpg", "2021/01/20210115_000000_2.jpg"],
+        "the fixture is not two items on one second in one directory"
+    );
+
+    // The one on the SUFFIXED name is the one with something to lose: its path is the one a
+    // re-derivation would move. Only its OUTPUT goes — both sources stay, both rows keep their
+    // records, and nothing is reset.
+    let suffixed = plan.items[1].source_id.clone();
+    let suffixed_output = out.join("2021/01/20210115_000000_2.jpg");
+    fs::remove_file(&suffixed_output).unwrap();
+
+    let again = reconciled(
+        &memories,
+        vec![MemoryFile::parse(plan.items[0].media.main.clone()).unwrap(), MemoryFile::parse(plan.items[1].media.main.clone()).unwrap()],
+    );
+    let mut second = manifest(&dir, &again);
+    let recorded = RecordedOutputs::read(&second, ItemKind::Memory).unwrap();
+    let replan = Plan::build(&memories, &again, &out, &recorded);
+    let report = local_fix::run(&replan, &mut second, 3, &copying()).unwrap();
+
+    assert_eq!(
+        report.resumed.demoted.iter().map(|one| (one.source_id.as_str(), one.reason)).collect::<Vec<_>>(),
+        [(suffixed.as_str(), DemotionReason::Vanished)],
+        "the resume sweep did not demote the deleted output, so nothing below is about a rewrite"
+    );
+    assert_eq!(report.fixed, 1, "{:?}", report.failed);
+
+    let rewritten = second.item(ItemKind::Memory, &suffixed).unwrap().expect("the row is enrolled");
+    assert_eq!(
+        rewritten.output_path.as_deref(),
+        Some(suffixed_output.as_path()),
+        "the rewrite landed somewhere other than the file this item had already finished at"
+    );
+    assert!(suffixed_output.is_file(), "the recorded path was not written back");
 }
 
 #[test]
@@ -603,7 +771,7 @@ fn a_file_whose_own_metadata_dates_it_uses_that_before_falling_back_to_its_filen
     stamped.write(&files[0].path).unwrap();
 
     let reconciliation = reconciled(&memories, files);
-    let plan = Plan::build(&memories, &reconciliation, dir.path().join("out"));
+    let plan = first_run(&memories, &reconciliation, dir.path().join("out"));
 
     let sources: Vec<TimeSource> = plan.items.iter().map(|item| item.capture.source()).collect();
     assert_eq!(sources, [TimeSource::Embedded, TimeSource::Filename]);
@@ -622,7 +790,7 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 1);
@@ -665,7 +833,7 @@ fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
 
@@ -705,7 +873,7 @@ fn an_overlay_whose_aspect_mismatches_the_main_is_scaled_to_fit_centred_rather_t
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
 
@@ -761,7 +929,7 @@ fn an_overlay_that_is_webp_bytes_under_a_png_name_composites_through_the_real_pa
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
 
@@ -781,7 +949,7 @@ fn a_main_with_no_overlay_is_copied_byte_for_byte_rather_than_re_encoded() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     // Only the metadata segment changed, so decoding gives back the identical pixels. A re-encode
@@ -797,7 +965,7 @@ fn a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path() {
     let reconciliation = reconciled(&memories, vec![write_main(dir.path(), "2021-01-15", 1)]);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let output = plan.items[0].output.clone();
 
     // Something much larger is already sitting where this item is about to land — the shape a
@@ -825,7 +993,7 @@ fn a_run_that_already_finished_an_item_does_not_touch_it_again() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let first = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
     assert_eq!((first.fixed, first.skipped), (1, 0));
 
@@ -845,7 +1013,7 @@ fn an_output_that_changed_since_it_was_recorded_is_redone_rather_than_trusted() 
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     fs::remove_file(&plan.items[0].output).unwrap();
@@ -869,7 +1037,7 @@ fn a_memory_that_cannot_be_fixed_is_recorded_against_its_own_row_and_the_rest_of
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 1, "the healthy memory is still fixed");
@@ -952,7 +1120,7 @@ fn an_opaque_png_main_under_an_overlay_keeps_its_own_format_because_the_rule_rea
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
@@ -1002,7 +1170,7 @@ fn a_png_main_whose_own_transparency_sits_under_an_overlay_keeps_it() {
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
@@ -1052,7 +1220,7 @@ fn a_lone_png_main_is_copied_through_with_its_transparency_intact() {
     let reconciliation = reconciled(&memories, vec![MemoryFile::parse(path).unwrap()]);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
 
@@ -1103,7 +1271,7 @@ fn a_main_whose_existing_metadata_cannot_be_read_fails_instead_of_being_replaced
     let reconciliation = reconciled(&memories, vec![main]);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 0);
@@ -1126,7 +1294,7 @@ fn a_main_whose_marker_chain_is_truncated_is_refused_with_its_own_message() {
     let reconciliation = reconciled(&memories, vec![main]);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.failed.len(), 1);
@@ -1145,7 +1313,7 @@ fn the_stamped_output_reads_back_correctly_through_an_independent_reader() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
 
     let Some(tags) = exiftool(&plan.items[0].output) else {
@@ -1175,7 +1343,7 @@ fn a_southern_and_western_coordinate_reads_back_with_the_right_hemispheres() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
 
     let Some(tags) = exiftool(&plan.items[0].output) else {
@@ -1205,7 +1373,7 @@ fn an_ambiguous_buckets_gps_verdict_survives_all_the_way_into_the_written_file()
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 4);
 
     let Some(agreeing) = exiftool(&plan.items[0].output) else {
@@ -1243,7 +1411,7 @@ fn metadata_the_source_already_carried_survives_the_stamp() {
     let reconciliation = reconciled(&memories, vec![main]);
     let mut manifest = manifest(&dir, &reconciliation);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
 
     let tags = exiftool(&plan.items[0].output).unwrap();
@@ -1271,7 +1439,7 @@ fn a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
@@ -1311,7 +1479,7 @@ fn a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &copying()).unwrap();
 
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
@@ -1354,7 +1522,7 @@ fn an_overlay_is_burned_in_only_by_a_transcode_and_the_run_says_when_it_was_not(
 
     let reconciliation = reconciled(&memories, vec![video, overlay]);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
 
     // Transcoding: the caption is drawn, scaled up to the frame, and nothing is reported.
@@ -1368,7 +1536,7 @@ fn an_overlay_is_burned_in_only_by_a_transcode_and_the_run_says_when_it_was_not(
     let plain = TempDir::new().unwrap();
     let mut second = manifest(&plain, &reconciliation);
     let out = plain.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut second, 3, &copying()).unwrap();
 
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
@@ -1395,7 +1563,7 @@ fn a_run_with_no_ffmpeg_finishes_every_video_and_reports_what_it_could_not_do() 
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     // Decision 2's degrade: an optional tool being absent costs a capability, never the run. The
     // reason is distinguishable from a user turning transcoding off, because the fixes differ.
     let report = local_fix::run(&plan, &mut manifest, 3, &VideoOptions { transcode: true, ffmpeg: None }).unwrap();
@@ -1422,7 +1590,7 @@ fn a_video_whose_date_cannot_be_stored_leaves_the_output_path_alone() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let output = plan.items[0].output.clone();
 
     // Something already sitting where this item would land. The all-or-nothing property is that a
@@ -1455,7 +1623,7 @@ fn a_video_that_is_not_one_is_recorded_against_its_own_row_and_the_run_carries_o
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     // Transcoding off, so the refusal is this crate's guard rather than ffmpeg's decoder: those are
     // two different messages and only one of them names what the file actually is.
     let report = local_fix::run(&plan, &mut manifest, 3, &copying()).unwrap();
@@ -1481,7 +1649,7 @@ fn a_video_ffmpeg_cannot_decode_fails_that_item_alone_and_keeps_its_message() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
     assert_eq!(report.fixed, 1, "one bad file out of two must not cost the other");
@@ -1523,7 +1691,7 @@ fn a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename(
 
     let reconciliation = reconciled(&memories, vec![dated, undated]);
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.items.iter().map(|item| item.capture.source()).collect::<Vec<_>>(), [TimeSource::Embedded, TimeSource::Filename]);
     // The header holds a UTC instant with no offset field, so Paris moves it an hour forward on the
@@ -1545,7 +1713,7 @@ fn a_finished_video_is_not_transcoded_again_on_a_resume() {
     let mut manifest = manifest(&dir, &reconciliation);
 
     let out = dir.path().join("out");
-    let plan = Plan::build(&memories, &reconciliation, &out);
+    let plan = first_run(&memories, &reconciliation, &out);
     let first = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
     assert_eq!((first.fixed, first.skipped), (1, 0));
     let finished = fs::read(&plan.items[0].output).unwrap();

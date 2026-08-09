@@ -30,8 +30,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
-use crate::export::local_fix::{self, DEFAULT_MAX_ATTEMPTS, FixReport, Leg, Plan, VideoOptions};
-use crate::export::manifest::{ExportId, Manifest, ManifestError};
+use crate::export::local_fix::{self, DEFAULT_MAX_ATTEMPTS, FixReport, Leg, Plan, RecordedOutputs, VideoOptions};
+use crate::export::manifest::{ExportId, ItemKind, Manifest, ManifestError};
 use crate::export::memories::{self, ScanError, reconcile};
 use crate::export::zip::{DiscoverError, discover_parts};
 use crate::export::{ExportJson, LoadError};
@@ -241,7 +241,13 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     let mut manifest = Manifest::open_in(&manifest_dir, &export_id).map_err(RunError::Manifest)?;
     reconciliation.enroll(&mut manifest).map_err(RunError::Manifest)?;
 
-    let plan = Plan::build(&memories, &reconciliation, &inputs.out_root);
+    // Read after the enrollment and before the plan, which is the only window where it is the state
+    // the run will actually work from — the same ordering `chat_run::prepare` takes for its own
+    // seed, and for the same reason: the resume sweep inside `local_fix::run` is what drops the
+    // record of an output the user deleted, and it has to land AFTER this so the rewrite goes back
+    // to the path it was written at instead of shifting onto a neighbour's.
+    let recorded = RecordedOutputs::read(&manifest, ItemKind::Memory).map_err(RunError::Manifest)?;
+    let plan = Plan::build(&memories, &reconciliation, &inputs.out_root, &recorded);
     let rows = plan
         .items
         .iter()

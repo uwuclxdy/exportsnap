@@ -48,13 +48,16 @@
 //! [`Plan::build`] is the memories planner and it is the only memories-specific thing left here.
 //! [`PlannedItem`], [`fix`] and [`run`] are leg-agnostic: they take a [`SourceMedia`], a
 //! [`Capture`], a coordinate that may be `None` and an output path, and they neither know nor ask
-//! which enumeration produced them. [`super::chat_fix`] is the second planner, and it fills the
+//! which enumeration produced them. So is [`Outputs`], which decides that output path: the two legs
+//! disagree about which directory an item lands in and about how its stem is worked out, and not at
+//! all about what a collision is or what a run already wrote. [`super::chat_fix`] is the second planner, and it fills the
 //! same [`Plan`] rather than growing a second copy of the composite-stamp-write-date sequence —
 //! two copies of that sequence would be two places a metadata rule has to be kept true.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -66,7 +69,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, 
 use crate::export::env::{self, Tool};
 use crate::export::exif::{ExifError, Jpeg, Stamp};
 use crate::export::ffmpeg::{self, FfmpegError};
-use crate::export::manifest::{ItemKind, Manifest, ManifestError, ResumeReport};
+use crate::export::manifest::{Item, ItemKind, Manifest, ManifestError, ResumeReport};
 use crate::export::memories::{Bucket, Day, Pairing, Reconciliation};
 use crate::export::model::{Attribution, LocationPoint, Memories, Memory, Timestamp};
 use crate::export::overlay::{self, OverlayError};
@@ -555,8 +558,13 @@ pub struct Deferred {
 /// Planned whole rather than item by item because output names collide and the collision has to be
 /// broken the same way on every run. Two memories on one day with no usable time both want
 /// `20210115_000000.jpg`; picking the next free name off disk would hand a resumed run a different
-/// answer than the first one, depending on which of the two had finished. The suffix is a position
-/// in this list instead, so it does not move.
+/// answer than the first one, depending on which of the two had finished.
+///
+/// A name a run already placed comes back off the manifest and every name any row records is
+/// reserved before one is derived — [`RecordedOutputs`] and [`Outputs`] are that, and the constant
+/// they preserve is that no item is ever planned onto a path another row's record still claims. A
+/// name nothing has recorded is a position in this list, which is what makes a first run's answer
+/// and a re-plan of it the same answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// Which manifest rows this plan is about. Carried here rather than passed to [`run`] beside
@@ -583,13 +591,56 @@ impl Plan {
     /// one piece of I/O here. That read is best-effort: a file that cannot be read at plan time
     /// drops to the filename date and the real failure is reported when the fix step reaches it,
     /// rather than one bad file taking down the whole plan.
+    ///
+    /// `recorded` is where this export's memories have been landing so far, and a caller with no
+    /// manifest to read one out of passes [`RecordedOutputs::default`] to get a first run's answer.
+    /// The seed is read in a window with a constraint on each side. AFTER the enrollment, because
+    /// enrollment `reset`s a row whose source came back (`memories.rs`'s
+    /// `SourceMissing | Retired` arm, `chat_media.rs`'s parked set) and a reset clears the output
+    /// record, so a read ahead of it adopts a path the run is about to stop believing. BEFORE
+    /// [`run`]'s resume sweep, because that sweep clears the record of an output the user deleted,
+    /// and a cleared record seeds nothing: read afterwards, such an item is adopted by nobody and
+    /// derives instead.
+    ///
+    /// **What the ordering is worth is smaller than it reads, and the reason is the reservation.**
+    /// A derived name walks to the first path nothing has claimed, and an adopted path is normally
+    /// exactly that — it was assigned by this same walk on an earlier run — so the two mechanisms
+    /// usually answer identically and the ordering is unobservable. They separate only where the
+    /// plan ORDER moved between runs: a new item sorting ahead of one that already holds a record
+    /// derives that record's path first, and the recorded item is pushed off its own file.
+    ///
+    /// **What is pinned, each row measured by planting that exact mutation rather than argued:**
+    ///
+    /// | the mutation | what reds |
+    /// |---|---|
+    /// | default the seed read in `memories_run::prepare` | `a_departed_items_recorded_output_is_reserved_through_the_run_composition`, driven through `memories_run::run` |
+    /// | default the seed read in `chat_run::prepare` | `a_conversation_that_outlives_its_neighbour_keeps_its_own_directory` (the directory half) AND `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name` (the item half), both through `chat_run::run` |
+    /// | move the resume sweep AHEAD of the chat seed read | `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name`, and nothing else — which is what separates "the seed is read" from "read in the right place" |
+    /// | move the resume sweep ahead of THIS leg's seed read | `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name` in `tests/memories_screen.rs`, the twin of the chat one |
+    /// | move either seed read ahead of the enrollment | **nothing.** That half of the window is unpinned on both legs |
+    ///
+    /// So both reads are pinned at the composition and so is each leg's position against its own
+    /// sweep. **One gap is left, and this is its own reason rather than a shared one**: nothing
+    /// pins either read against the ENROLLMENT. Separating that needs a row that went
+    /// `SourceMissing` and came back, since enrollment's `reset` is what clears a record and a row
+    /// that never parked has none to clear. That is unbuilt rather than unbuildable — three
+    /// `collect()` calls with a source removed and then restored, plus a newcomer to make the
+    /// adopted and derived answers differ, all of it with helpers both screen suites already have.
+    /// A cost, not a barrier.
+    ///
+    /// Three earlier drafts of this paragraph were wrong and all three are retracted here rather
+    /// than quietly dropped: the first claimed the ordering was what saved a rewrite; the second
+    /// claimed no test reached either run composition; the third gave the `SourceMissing` reason
+    /// above for TWO gaps when it fits only the enrollment one — the position gap was open because
+    /// no fixture had a newcomer sorting ahead of a recorded item, which is a different fact, and
+    /// it is now closed on both legs.
     #[must_use]
-    pub fn build(memories: &Memories, reconciliation: &Reconciliation, out_root: impl AsRef<Path>) -> Self {
+    pub fn build(memories: &Memories, reconciliation: &Reconciliation, out_root: impl AsRef<Path>, recorded: &RecordedOutputs) -> Self {
         let out_root = out_root.as_ref();
         let agreements = agreements(memories);
         let mut items = Vec::new();
         let mut deferred = Vec::new();
-        let mut taken: BTreeMap<String, u32> = BTreeMap::new();
+        let mut outputs = Outputs::new(out_root.to_path_buf(), recorded);
 
         for item in &reconciliation.items {
             let (Some(media), Some(memory)) = (item.media(), memories.saved_media.get(item.entry_index)) else {
@@ -614,15 +665,13 @@ impl Plan {
                 continue;
             };
 
-            // Keyed by the whole file name rather than the stem: two memories collide only when
-            // they would land on one path, and a video and an image on the same second do not. The
+            // Keyed by the whole PATH rather than the stem: two memories collide only when they
+            // would land on one file, and a video and an image on the same second do not. The
             // extension is the RESOLVED one, so a PNG kept as a PNG and a stamped JPEG on the same
             // second do not claim each other's suffix.
             let stem = capture.local.format("%Y%m%d_%H%M%S").to_string();
             let extension = output_extension(leg, &source);
-            let ordinal = taken.entry(format!("{stem}.{extension}")).or_default();
-            let output = output_path(out_root, capture.local, &stem, &extension, *ordinal);
-            *ordinal += 1;
+            let output = outputs.path(&item.source_id, &output_dir(out_root, capture.local), &stem, &extension);
 
             items.push(PlannedItem {
                 source_id: item.source_id.clone(),
@@ -756,8 +805,10 @@ pub(crate) fn needs_its_own_format(leg: Leg, media: &SourceMedia) -> bool {
 /// for what indexing it cost. **Normalized to lower case**, which is the load-bearing half of that: the
 /// membership test is ascii-case-insensitive, so a `.PNG` source is admitted, and answering with its
 /// own spelling would put `.PNG` in the output path while the same file spelled `.png` produced
-/// `.png`. Both planners key their collision map on this string, so a divergence there moves output
-/// paths rather than staying cosmetic. Pinned by
+/// `.png`. Both planners build the path [`Outputs`] claims out of this string, so a divergence there
+/// moves output paths rather than staying cosmetic. It would no longer let two spellings claim one
+/// file — that set folds ascii case since decision 52 — but it would still write `.PNG` into a tree
+/// whose every other name is lower case. Pinned by
 /// `a_shouted_extension_is_normalized_rather_than_carried_into_the_output_path`.
 #[must_use]
 pub(crate) fn output_extension(leg: Leg, media: &SourceMedia) -> Cow<'_, str> {
@@ -773,7 +824,9 @@ pub(crate) fn output_extension(leg: Leg, media: &SourceMedia) -> Cow<'_, str> {
     }
 }
 
-/// `<stem>.<ext>`, with `_2`, `_3` and so on for a name an earlier position in the plan claimed.
+/// `<stem>.<ext>`, with `_2`, `_3` and so on for a name something already claimed — an earlier
+/// position in this plan, or, since decision 52, a path a MANIFEST ROW records. [`Outputs`] is what
+/// decides which, and after that change the second is as ordinary a reason as the first.
 ///
 /// The suffix counts from two, so the first file of a colliding set keeps the plain name and nobody
 /// has to work out that `_1` means "the second one". Shared by both legs: they disagree about which
@@ -786,15 +839,264 @@ pub(crate) fn output_name(stem: &str, extension: &str, ordinal: u32) -> String {
     if ordinal == 0 { format!("{stem}.{extension}") } else { format!("{stem}_{}.{extension}", ordinal + 1) }
 }
 
-/// The memories tree: `<root>/YYYY/MM/YYYYMMDD_HHMMSS.<ext>`.
-fn output_path(root: &Path, local: NaiveDateTime, stem: &str, extension: &str, ordinal: u32) -> PathBuf {
-    root.join(local.format("%Y").to_string()).join(local.format("%m").to_string()).join(output_name(stem, extension, ordinal))
+/// The memories tree's directory for one capture: `<root>/YYYY/MM`.
+fn output_dir(root: &Path, local: NaiveDateTime) -> PathBuf {
+    root.join(local.format("%Y").to_string()).join(local.format("%m").to_string())
 }
 
 /// Ascii-case-insensitive membership, matching how the rest of the export layer reads an
 /// extension.
 fn matches(extension: &str, known: &[&str]) -> bool {
     known.iter().any(|candidate| extension.eq_ignore_ascii_case(candidate))
+}
+
+// ---- where the last run's outputs actually landed ----
+
+/// Where each item's output has actually been landing, read back out of the manifest.
+///
+/// [`Outputs`] mints one path per item and breaks a collision between two of them with an ordinal
+/// that is a position in this run's plan. That is stable against nothing: an item leaving the export
+/// takes its ordinal with it, so every later item on that name slides down one and a survivor is
+/// planned onto a path a FINISHED row still claims — measured run by run, the run then writes over a
+/// repaired file, the departed row is demoted and retired, and its output is gone. Decision 52
+/// closes it the way queue task 40 closed the same shape one layer up at the directory: the run
+/// keeps the path each row's own record already names rather than re-deriving one from this run's
+/// item list every time.
+///
+/// **One map, where the directory layer needs two, and the difference is the join.**
+/// [`super::chat_fix::RecordedDirs`] carries an attributed half and an unattributed one because a
+/// CONVERSATION is a join over rows: a row's directory says nothing about which conversation owns
+/// it, so the two questions ("what is this conversation's directory" and "what names does the tree
+/// already contain") need different sets. An item IS a row. The identity a plan looks a path up
+/// under is the identity the manifest stores it against, so adoption and reservation are two
+/// readings of one map: a record whose item this run plans is handed back, and a record whose item
+/// it does not plan is never looked up while its path stays claimed, which IS the reservation.
+///
+/// **Every row carrying an output record seeds, whatever status it carries**, for the reason
+/// [`super::chat_fix::RecordedDirs`] states at its own read: the manifest's output-record rule is
+/// that the three output columns survive a transition into a parked status and are cleared by the
+/// work ones, so `output_path.is_some()` already asks "a run finished this row and nothing has
+/// driven it back to work". Naming a status list here would be a second spelling of that rule, free
+/// to drift from it the next time a status is added.
+#[derive(Debug, Default)]
+pub struct RecordedOutputs {
+    /// The output path each row of one kind records, keyed by that row's own source id.
+    recorded: BTreeMap<String, PathBuf>,
+}
+
+impl RecordedOutputs {
+    /// Reads what `manifest` records for every row of `kind`.
+    ///
+    /// One whole-kind [`Manifest::items`] read rather than a point query per item, for the reason
+    /// [`super::chat_media::Reconciliation::enroll`] gives about its own: a real export would make
+    /// that 9001 point queries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] when the manifest read fails.
+    pub fn read(manifest: &Manifest, kind: ItemKind) -> Result<Self, ManifestError> {
+        Ok(Self::of(&manifest.items(kind)?))
+    }
+
+    /// [`Self::read`] over rows a caller has already read.
+    ///
+    /// The chat leg reads its whole kind once for [`super::chat_fix::RecordedDirs`] and builds this
+    /// from the same rows, so the two layers cost one query between them rather than one each.
+    pub(crate) fn of(rows: &[Item]) -> Self {
+        Self { recorded: rows.iter().filter_map(|row| Some((row.source_id.clone(), row.output_path.clone()?))).collect() }
+    }
+}
+
+mod claimed {
+    //! The append-only set the ordinal walk's soundness rests on, held by the compiler.
+    //!
+    //! Same property, same instrument and the same concession as `chat_fix`'s `issued` module one
+    //! layer up, whose doc states the argument in full and is the place to read it from:
+    //! [`super::Outputs::path`] starts its walk from a hint and climbs, which skips every candidate
+    //! below the hint, and that is sound only because a claimed path can never be released. What is
+    //! here is that shape over a whole path instead of over one directory name.
+
+    use std::collections::BTreeSet;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    /// Paths already handed out, compared ascii-case-insensitively.
+    ///
+    /// **Folded, for the reason the directory layer folds a name**: `20210304_143005.JPG` and
+    /// `20210304_143005.jpg` are one file on APFS and NTFS, and decision 11 is cross-platform. What
+    /// this build DERIVES cannot produce that pair on its own — a stem is digits and an underscore,
+    /// and [`super::output_extension`] lower-cases what it answers with — but half of what is
+    /// claimed here comes off the MANIFEST, which outlives the build that filled it: a row written
+    /// before task 45 carries the source file's own `.PNG` spelling, and an adopted conversation
+    /// directory keeps whatever case its key had. So the pair is reachable from the store, and a
+    /// case-sensitive set would hand a derived `.png` the path a recorded `.PNG` already names.
+    /// Folding costs a suffix where two spellings really are two files and prevents an overwrite
+    /// where they are one, which is the direction this whole type exists to fail in.
+    ///
+    /// The WHOLE path folds rather than its last component, because a filesystem that folds case
+    /// folds every component of a path and not only the leaf.
+    #[derive(Debug, Default)]
+    pub(super) struct ClaimedPaths(BTreeSet<OsString>);
+
+    impl ClaimedPaths {
+        /// Records `path` as taken, answering whether it was still free.
+        ///
+        /// The only method, deliberately: every operation this type does not expose is one the walk
+        /// cannot be broken by.
+        pub(super) fn claim(&mut self, path: &Path) -> bool {
+            self.0.insert(path.as_os_str().to_ascii_lowercase())
+        }
+    }
+}
+
+/// One output path per item: the one the manifest already records for it, or the first name in this
+/// plan nothing has claimed.
+///
+/// Both planners drive this. They disagree about which directory an item lands in and about how the
+/// stem is worked out, and not at all about what a collision is or how a broken one is spelled — the
+/// same split that already puts [`output_name`] here rather than in either of them.
+///
+/// **[`Self::adopt`] runs before a single path is derived**, which is the whole of what the ordering
+/// has to get right: a record is only worth keeping if nothing can be derived on top of it first.
+pub(crate) struct Outputs {
+    /// The root this run writes under. The whole of what makes a path off the manifest safe to hand
+    /// back — see [`under`].
+    root: PathBuf,
+    /// The next ordinal to try for a folded base path, so a long collision run costs one lookup
+    /// rather than a scan. Not decoration: the `_no-conversation` bucket puts 6413 items in one
+    /// directory and every one of them falling through to the filename day wants one name, so a
+    /// per-item scan of the claimed set is quadratic in exactly the case decision 52 is about.
+    next: BTreeMap<OsString, u32>,
+    /// Every path handed out. **The authority**, and not the same question as [`Self::next`]: a
+    /// recorded path can spell `<stem>_2.<ext>` verbatim, and only a set of the paths actually
+    /// issued can see that a derived `_2` would land on it. [`Self::next`] is a starting hint.
+    used: claimed::ClaimedPaths,
+    /// The path each item is handed back, keyed by source id.
+    assigned: BTreeMap<String, PathBuf>,
+}
+
+impl Outputs {
+    pub(crate) fn new(root: PathBuf, recorded: &RecordedOutputs) -> Self {
+        let mut outputs = Self { root, next: BTreeMap::new(), used: claimed::ClaimedPaths::default(), assigned: BTreeMap::new() };
+        outputs.adopt(recorded);
+        outputs
+    }
+
+    /// Takes back the path each row's own record names, and claims it either way.
+    ///
+    /// **Adoption and reservation are one pass here**, and that is a consequence of a row being an
+    /// item rather than a shortcut — see [`RecordedOutputs`] for why the directory layer needs two.
+    /// A record this run plans an item for is handed back; a record for an item this run does not
+    /// plan is claimed and never looked up, which is what keeps a departed item's finished file from
+    /// being planned over. Both come out of the one claim below.
+    ///
+    /// **A record that LOSES the claim is not adopted and needs no reservation of its own**: some
+    /// other row already holds that path, so it is reserved by whoever won it. Two rows recorded on
+    /// one path is not hypothetical — it is the state the defect this closes actually produces — and
+    /// the loser deriving a fresh name is the outcome that stops one of the two files being written
+    /// over on every run from then on. The winner is the lowest source id, which is a function of
+    /// the SET of rows rather than of which item the plan reaches first.
+    ///
+    /// **A record outside this run's root neither adopts nor reserves.** See [`under`].
+    fn adopt(&mut self, recorded: &RecordedOutputs) {
+        for (source_id, output) in &recorded.recorded {
+            if under(&self.root, output) && self.used.claim(output) {
+                self.assigned.insert(source_id.clone(), output.clone());
+            }
+        }
+    }
+
+    /// Where `source_id`'s output lands, given the directory and name its planner worked out.
+    ///
+    /// **An adopted path is only handed back inside the directory this run planned for the item**,
+    /// and that subordination is the whole of what keeps this layer from overruling the one above
+    /// it. A record whose parent has moved — a conversation that adopted a different directory, a
+    /// memory this run dates into another month — is left claimed and not returned, so the item
+    /// derives a fresh name where it now belongs. Two things would break without it: decision 44a's
+    /// grouping, since one conversation's items would sit in two folders; and decision 46c, since
+    /// [`Originals::dir`] is built from `dir` while the merged file would have come back from
+    /// somewhere else, splitting a pair the mode exists to keep together.
+    ///
+    /// The parent equality is also what makes the returned path containment-safe on its own: `dir`
+    /// is the planner's own join onto the output root, so a record equal to `dir` plus one component
+    /// cannot leave the tree. `child_name` states the same property one layer up.
+    pub(crate) fn path(&mut self, source_id: &str, dir: &Path, stem: &str, extension: &str) -> PathBuf {
+        if let Some(output) = self.assigned.get(source_id).filter(|output| output.parent() == Some(dir)) {
+            return output.clone();
+        }
+        let folded = dir.join(output_name(stem, extension, 0)).as_os_str().to_ascii_lowercase();
+        let mut ordinal = self.next.get(&folded).copied().unwrap_or_default();
+        // Terminates: every iteration raises the ordinal, the names it spells are all distinct, and
+        // `used` is finite, so a free one is reached in at most `used.len() + 1` steps.
+        let output = loop {
+            let candidate = dir.join(output_name(stem, extension, ordinal));
+            ordinal += 1;
+            if self.used.claim(&candidate) {
+                break candidate;
+            }
+        };
+        self.next.insert(folded, ordinal);
+        output
+    }
+}
+
+/// Whether `output` is a path under `root` that this run could have written itself.
+///
+/// What this gates is the RESERVATION: the claim set is meant to hold the paths this run could
+/// otherwise derive, and a record naming a file somewhere else is not one of them. Its ordinal is a
+/// suffix for a collision this root does not have, so claiming it would cost a real item a suffix
+/// for a name nothing here holds. `a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved`
+/// pins that, on the arm where refusing is right.
+///
+/// **It compares SPELLINGS, not directories, and that is a known hole rather than a property.** Any
+/// respelling of one directory between two runs makes the whole of decision 52 inert for the second
+/// one: every recorded path is refused here, so `adopt` assigns nothing and claims nothing, and an
+/// item leaving the export shifts a survivor onto a finished row's file exactly as it did before the
+/// decision existed. The failure is silent — nothing reports a seed that matched zero rows. Both
+/// spellings are user-typed, through `--out=<dir>` or through the source path
+/// [`default_out_root`] inherits, so this needs no hand-edited store to reach.
+///
+/// Measured, `rustc -O`, edition 2024:
+///
+/// | root | recorded output | `under` |
+/// |---|---|---|
+/// | `/out` | `/out/2021/01/a.jpg` | true |
+/// | `/out` | `/out2/2021/01/a.jpg` | false (component-wise, so this one is right) |
+/// | `/out/` | `/out/2021/01/a.jpg` | true (a trailing slash is the one thing it does normalize) |
+/// | `out` | `/home/u/a/out/2021/01/a.jpg` | **false** — relative against absolute, every filesystem |
+/// | `./out` | `out/2021/01/a.jpg` | **false** — every filesystem |
+/// | `/Out` | `/out/2021/01/a.jpg` | **false** — right on ext4, wrong on APFS and NTFS |
+///
+/// **Case is one instance of that class and not the class**, which is worth keeping straight because
+/// the fixture below builds the case pair. It builds that one because the claim set's own ascii fold
+/// is what makes the item layer's answer observable there — [`claimed::ClaimedPaths`] folds one
+/// function down, so on a folding filesystem these two decide the same question opposite ways. The
+/// relative-vs-absolute rows need no folding filesystem at all and are the wider half of the
+/// residual. `a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved` pins the arm
+/// where refusing is RIGHT and bounds none of this.
+///
+/// **Left standing deliberately, and it is not this function's call to make.**
+/// [`super::chat_fix`]'s `child_name` compares spellings the same way for the directory layer, so
+/// this matches task 40's behaviour rather than diverging from it, and closing it is one ruling for
+/// both layers. Recorded here so the next reader inherits the hole rather than the impression of a
+/// guarantee.
+///
+/// An empty root makes this true for every path on earth, and no shipped surface can produce one:
+/// `main.rs` rejects both a valueless `--out` and a bare `--out=` with a hard error
+/// (`an_empty_out_value_is_a_hard_error`), and every other producer is [`default_out_root`], which
+/// joins [`OUT_DIR`] onto the source and so is non-empty even for an empty source. A library caller
+/// is the only route, and it would be inert anyway: a derived path under an empty root is relative
+/// and can never fold onto an absolute record.
+///
+/// **This gates the claim set and nothing else.** Adoption is gated separately and more tightly, on
+/// the record's parent being the directory the planner worked out for that item
+/// ([`Outputs::path`]), and that is what makes a returned path containment-safe. So nothing here has
+/// to out-parse a hostile record: `Path::starts_with` is component-wise and admits `..`, and a
+/// `<root>/../elsewhere/x.jpg` a hand-edited store could hold names no file this run competes for
+/// and is never handed to anybody. Refusing it as well would be a check with no reachable effect,
+/// which this repo's own rules would rather not have than have.
+fn under(root: &Path, output: &Path) -> bool {
+    output.starts_with(root)
 }
 
 // ---- running it ----
@@ -1343,24 +1645,23 @@ mod tests {
 
     use chrono::NaiveDate;
 
-    use super::{Capture, Leg, TimeSource, VideoOptions, output_path};
+    use super::{Capture, Leg, Outputs, RecordedOutputs, TimeSource, VideoOptions, output_dir, output_name};
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> chrono::NaiveDateTime {
         NaiveDate::from_ymd_opt(year, month, day).unwrap().and_hms_opt(hour, minute, second).unwrap()
     }
 
+    /// The path the memories planner lands on, through the two functions it now builds one from.
+    fn output_path(root: &str, local: chrono::NaiveDateTime, stem: &str, extension: &str, ordinal: u32) -> std::path::PathBuf {
+        output_dir(Path::new(root), local).join(output_name(stem, extension, ordinal))
+    }
+
     #[test]
     fn an_output_path_is_year_month_and_the_local_wall_time() {
         let local = at(2021, 1, 15, 14, 30, 5);
-        assert_eq!(
-            output_path(Path::new("/out"), local, "20210115_143005", Leg::Image.extension(), 0),
-            Path::new("/out/2021/01/20210115_143005.jpg")
-        );
+        assert_eq!(output_path("/out", local, "20210115_143005", Leg::Image.extension(), 0), Path::new("/out/2021/01/20210115_143005.jpg"));
         // Same tree, same name, and the extension is the only thing the leg moves.
-        assert_eq!(
-            output_path(Path::new("/out"), local, "20210115_143005", Leg::Video.extension(), 0),
-            Path::new("/out/2021/01/20210115_143005.mp4")
-        );
+        assert_eq!(output_path("/out", local, "20210115_143005", Leg::Video.extension(), 0), Path::new("/out/2021/01/20210115_143005.mp4"));
     }
 
     #[test]
@@ -1368,13 +1669,120 @@ mod tests {
         let local = at(2021, 1, 15, 0, 0, 0);
         // The suffix counts from two, so the first file of a colliding set keeps the plain name and
         // nobody has to work out that `_1` means "the second one".
-        let named = |ordinal| output_path(Path::new("/out"), local, "20210115_000000", Leg::Image.extension(), ordinal);
+        let named = |ordinal| output_path("/out", local, "20210115_000000", Leg::Image.extension(), ordinal);
         assert_eq!(named(1), Path::new("/out/2021/01/20210115_000000_2.jpg"));
         assert_eq!(named(2), Path::new("/out/2021/01/20210115_000000_3.jpg"));
         assert_eq!(
-            output_path(Path::new("/out"), local, "20210115_000000", Leg::Video.extension(), 1),
+            output_path("/out", local, "20210115_000000", Leg::Video.extension(), 1),
             Path::new("/out/2021/01/20210115_000000_2.mp4")
         );
+    }
+
+    // ---- the claim set decision 52 put under both planners ----
+
+    /// What [`RecordedOutputs::read`] builds, without a manifest to build it out of.
+    fn recorded(rows: &[(&str, &str)]) -> RecordedOutputs {
+        RecordedOutputs { recorded: rows.iter().map(|(source_id, output)| ((*source_id).to_owned(), (*output).into())).collect() }
+    }
+
+    /// Where each of `source_ids` lands, planned into one directory on one second under whatever
+    /// `recorded` already holds — the collision the whole type is about.
+    fn planned(recorded: &RecordedOutputs, source_ids: &[&str]) -> Vec<std::path::PathBuf> {
+        let mut outputs = Outputs::new("/out".into(), recorded);
+        source_ids.iter().map(|source_id| outputs.path(source_id, Path::new("/out/2021/01"), "20210115_000000", "jpg")).collect()
+    }
+
+    #[test]
+    fn a_first_run_hands_out_positions_in_the_plan() {
+        assert_eq!(
+            planned(&RecordedOutputs::default(), &["a", "b", "c"]),
+            [
+                Path::new("/out/2021/01/20210115_000000.jpg"),
+                Path::new("/out/2021/01/20210115_000000_2.jpg"),
+                Path::new("/out/2021/01/20210115_000000_3.jpg"),
+            ]
+        );
+    }
+
+    /// The adoption half: a row that still records a path gets that exact path back, whatever
+    /// position it now holds in the plan.
+    ///
+    /// The fixture puts the second item's record on the suffixed name and drops the first item from
+    /// the plan entirely, which is the departure that used to shift it. All three rules answer
+    /// differently on this one input — re-deriving gives the plain name, reserving without adopting
+    /// gives `_3` because the row's own record is claimed too, and adopting gives `_2`.
+    #[test]
+    fn a_recorded_path_is_handed_back_to_the_item_that_recorded_it() {
+        let kept = recorded(&[("a", "/out/2021/01/20210115_000000.jpg"), ("b", "/out/2021/01/20210115_000000_2.jpg")]);
+        assert_eq!(planned(&kept, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+    }
+
+    /// The reservation half, and the one the measured defect actually turns on: the survivor was
+    /// driven back to work, which per decision 50 CLEARED its record, so adoption has nothing to
+    /// give it and only the departed row's reservation keeps it off that row's file.
+    #[test]
+    fn a_departed_items_recorded_path_is_not_handed_to_another_item() {
+        let left_behind = recorded(&[("a", "/out/2021/01/20210115_000000.jpg")]);
+        assert_eq!(planned(&left_behind, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+    }
+
+    /// Two rows recorded on one path is the state the defect this closes actually produces, so it is
+    /// not a forged fixture: the second of them has to derive a fresh name rather than be handed a
+    /// file the first one already claims.
+    #[test]
+    fn two_rows_recorded_on_one_path_do_not_both_adopt_it() {
+        let doubled = recorded(&[("a", "/out/2021/01/20210115_000000.jpg"), ("b", "/out/2021/01/20210115_000000.jpg")]);
+        assert_eq!(
+            planned(&doubled, &["a", "b"]),
+            [Path::new("/out/2021/01/20210115_000000.jpg"), Path::new("/out/2021/01/20210115_000000_2.jpg")]
+        );
+    }
+
+    /// A record under another out root names a file this run is not writing, so its ordinal is a
+    /// suffix for a collision this root does not have.
+    ///
+    /// **The fixture spells the other root as a case variant of this one on purpose.** The claim set
+    /// folds ascii case, so an unfiltered reservation would treat `/OUT/...` as the path `/out/...`
+    /// this run is about to derive and cost the item a suffix for a file that, on a case-sensitive
+    /// filesystem, is a different tree.
+    ///
+    /// **That is the arm where refusing is RIGHT, and it is the only arm this pins.** Swap which
+    /// side is shouted and the same shape is a hole on a filesystem that folds; respell the root
+    /// relative-against-absolute and it is a hole on every filesystem. [`under`]'s own doc carries
+    /// the measured table. Nothing here bounds any of that, and reading this test as though it did
+    /// is the mistake its previous wording invited.
+    ///
+    /// The second half is the control — without it, a seed that reserved nothing at all reads green.
+    #[test]
+    fn a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved() {
+        let elsewhere = recorded(&[("a", "/OUT/2021/01/20210115_000000.jpg")]);
+        assert_eq!(planned(&elsewhere, &["b"]), [Path::new("/out/2021/01/20210115_000000.jpg")]);
+        let here = recorded(&[("a", "/out/2021/01/20210115_000000.jpg")]);
+        assert_eq!(planned(&here, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+    }
+
+    /// A record whose parent is not the directory this run planned for the item is left claimed and
+    /// not handed back, so the item derives where it now belongs.
+    ///
+    /// This is what keeps the item layer under the one above it: `chat_fix` decides a conversation's
+    /// directory off the manifest too, and an item returning a path in the directory that run
+    /// DIDN'T pick would split one conversation across two folders and put decision 46c's
+    /// `originals/` beside a file that is not there. The old path stays claimed, because the file it
+    /// names is still on disk.
+    #[test]
+    fn a_record_in_a_directory_this_run_did_not_plan_is_not_handed_back() {
+        let moved = recorded(&[("a", "/out/2020/12/20210115_000000.jpg")]);
+        assert_eq!(planned(&moved, &["a"]), [Path::new("/out/2021/01/20210115_000000.jpg")]);
+    }
+
+    /// Case-sensitivity is a property of the filesystem, not of the string: a recorded `.JPG` and a
+    /// derived `.jpg` are one file on APFS and NTFS, and decision 11 is cross-platform. The recorded
+    /// spelling is reachable from the STORE rather than from this build, which is why the fixture is
+    /// a record and not a second derived name.
+    #[test]
+    fn a_recorded_path_differing_only_in_case_still_reserves_its_file() {
+        let shouted = recorded(&[("a", "/out/2021/01/20210115_000000.JPG")]);
+        assert_eq!(planned(&shouted, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
     }
 
     #[test]
