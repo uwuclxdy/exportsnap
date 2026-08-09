@@ -9,9 +9,10 @@
 //! **The metadata assertions read the output back through `exiftool` and `ffprobe`, not through
 //! `little_exif` or `mp4ameta`.** A crate reading its own write can agree with itself about a wrong
 //! encoding, which is exactly what an independent reader is for. Neither tool is a build
-//! dependency, so those tests print a skip notice and pass when one is absent — the box this repo
-//! is gated on has them, and the phase-5 CI leg has to install them or the coverage silently
-//! disappears. Everything a byte-level assertion can cover is asserted unconditionally instead.
+//! dependency, so a test needing one asks `tests/common`'s shared gate up front and prints a skip
+//! notice when it is not usable — the box this repo is gated on has them, and the phase-5 CI leg
+//! has to install them or the coverage silently disappears. Everything a byte-level assertion can
+//! cover is asserted unconditionally instead.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -22,6 +23,7 @@ use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::NaiveDate;
+use common::Tool;
 use exportsnap::export::exif::{Jpeg, Stamp};
 use exportsnap::export::local_fix::{self, DeferralReason, Leg, Notice, Plan, RecordedOutputs, TimeSource, TranscodeSkip, VideoOptions};
 use exportsnap::export::manifest::{Checksum, DemotionReason, ExportId, ItemKind, ItemStatus, Manifest};
@@ -30,6 +32,8 @@ use exportsnap::export::model::{Field, LocationPoint, Memories};
 use exportsnap::export::schema;
 use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
 use tempfile::TempDir;
+
+mod common;
 
 /// The 13-digit id shape the one observed export used.
 const EXPORT_ID: &str = "1784667002819";
@@ -230,8 +234,10 @@ fn write_raw(dir: &Path, name: &str, bytes: &[u8]) -> MemoryFile {
 ///
 /// `hvc1` on purpose: it is what the export ships and what the transcode exists to move away from,
 /// so a leg that quietly skipped the re-encode would pass against a fixture in anything else.
-/// `None` when ffmpeg is absent, which is the one thing the fixture cannot fake.
-fn write_video(dir: &Path, day: &str, seed: u32) -> Option<MemoryFile> {
+///
+/// Every caller runs past a `common::usable` gate that claimed [`Tool::FfmpegFixtures`], so a
+/// failure here is a genuine red rather than an absence, and this reports none.
+fn write_video(dir: &Path, day: &str, seed: u32) -> MemoryFile {
     let path = memories_dir(dir).join(format!("{day}_{}-main.mp4", uuid(seed)));
     let built = Command::new("ffmpeg")
         .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
@@ -240,9 +246,9 @@ fn write_video(dir: &Path, day: &str, seed: u32) -> Option<MemoryFile> {
         .args(["-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "0.5"])
         .arg(&path)
         .output()
-        .ok()?;
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(built.status.success(), "ffmpeg could not build the fixture: {}", String::from_utf8_lossy(&built.stderr));
-    Some(MemoryFile::parse(path).unwrap())
+    MemoryFile::parse(path).unwrap()
 }
 
 /// A minimal but structurally real MP4, built in pure Rust, named like a memory's main file.
@@ -334,51 +340,24 @@ fn outputs(plan: &Plan, out: &Path) -> Vec<String> {
 /// `-All` is needed alongside `-validate`, because naming any tag turns the run into a request for
 /// only the tags named. `-a` keeps duplicate rows, `-s` gives the short tag id, and `-G0:1` puts
 /// the group in front of it so `[EXIF:GPS] GPSLatitude` and `[Composite] GPSLatitude` are
-/// distinguishable in the raw output. `None` means `exiftool` is not installed.
-fn exiftool(path: &Path) -> Option<BTreeMap<String, String>> {
-    let output = Command::new("exiftool").args(["-s", "-a", "-G0:1", "-validate", "-All"]).arg(path).output().ok()?;
+/// distinguishable in the raw output.
+fn exiftool(path: &Path) -> BTreeMap<String, String> {
+    let output = Command::new("exiftool")
+        .args(["-s", "-a", "-G0:1", "-validate", "-All"])
+        .arg(path)
+        .output()
+        .expect("the gate at the top of this test proved exiftool runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    Some(
-        text.lines()
-            // `": "` rather than `':'`: the group prefix and every date value hold a colon, and
-            // only the separator is followed by a space.
-            .filter_map(|line| line.split_once(": "))
-            .map(|(key, value)| {
-                // `[EXIF:ExifIFD]  DateTimeOriginal` -> `DateTimeOriginal`.
-                let name = key.rsplit(']').next().unwrap_or(key).trim().to_owned();
-                (name, value.trim().to_owned())
-            })
-            .collect(),
-    )
-}
-
-/// Set this and a missing `exiftool` fails the run instead of quietly covering nothing.
-///
-/// The notice below cannot be relied on: nextest captures a passing test's output, so on a box
-/// without `exiftool` the suite prints nothing at all and reads as fully green. That is fine while
-/// the only box this repo is gated on has 13.55 installed, and it is exactly wrong for a CI runner,
-/// where these four tests are the sole independent-reader coverage of the EXIF, GPS and offset
-/// encodings. CI sets this variable, so a runner missing the tool reds rather than skipping.
-const REQUIRE_EXIFTOOL: &str = "EXPORTSNAP_REQUIRE_EXIFTOOL";
-
-/// The same for ffmpeg, which every video test needs before it has a fixture at all.
-///
-/// A separate variable from the one above because the two tools cover different things and a
-/// runner that has one and not the other should be told which is missing.
-const REQUIRE_FFMPEG: &str = "EXPORTSNAP_REQUIRE_FFMPEG";
-
-/// Records why a check did not run. Loud where the caller asked for loud.
-fn skipped(test: &str) {
-    skipped_for(test, "exiftool", REQUIRE_EXIFTOOL);
-}
-
-fn skipped_for(test: &str, tool: &str, variable: &str) {
-    assert!(
-        std::env::var_os(variable).is_none(),
-        "{test}: {variable} is set and {tool} is not on PATH, so the assertions that need it would have been \
-         skipped; install {tool} on this runner or unset the variable"
-    );
-    println!("SKIPPED {test}: {tool} is not on PATH, so its assertions did not run");
+    text.lines()
+        // `": "` rather than `':'`: the group prefix and every date value hold a colon, and only
+        // the separator is followed by a space.
+        .filter_map(|line| line.split_once(": "))
+        .map(|(key, value)| {
+            // `[EXIF:ExifIFD]  DateTimeOriginal` -> `DateTimeOriginal`.
+            let name = key.rsplit(']').next().unwrap_or(key).trim().to_owned();
+            (name, value.trim().to_owned())
+        })
+        .collect()
 }
 
 /// Transcoding on with a real ffmpeg, which is what [`VideoOptions::probe`] resolves to on the box
@@ -393,16 +372,23 @@ fn copying() -> VideoOptions {
 }
 
 /// The codec and pixel dimensions of a video's first stream, through `ffprobe`.
-fn probe_video(path: &Path) -> Option<(String, u32, u32)> {
+///
+/// A stream `ffprobe` cannot describe is a failure of the thing under test, not an absent tool, so
+/// this asserts its way through the parse rather than reporting a `None` a caller could read as
+/// "not installed".
+fn probe_video(path: &Path) -> (String, u32, u32) {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height", "-of", "default=nw=1:nk=1"])
         .arg(path)
         .output()
-        .ok()?;
+        .expect("the gate at the top of this test proved ffprobe runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines();
-    let codec = lines.next()?.trim().to_owned();
-    Some((codec, lines.next()?.trim().parse().ok()?, lines.next()?.trim().parse().ok()?))
+    let mut lines = text.lines().map(str::trim);
+    let described = format!("ffprobe did not describe the first video stream of {}: {text:?}", path.display());
+    let codec = lines.next().expect(&described).to_owned();
+    let width = lines.next().and_then(|line| line.parse().ok()).expect(&described);
+    let height = lines.next().and_then(|line| line.parse().ok()).expect(&described);
+    (codec, width, height)
 }
 
 /// The colour of one pixel of a video's first frame.
@@ -415,7 +401,7 @@ fn first_frame_pixel(path: &Path, x: u32, y: u32, width: u32) -> [u8; 3] {
         .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24"])
         .arg(&raw)
         .output()
-        .unwrap();
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
     let bytes = fs::read(&raw).unwrap();
     let at = ((y * width + x) * 3) as usize;
@@ -1306,6 +1292,9 @@ fn a_main_whose_marker_chain_is_truncated_is_refused_with_its_own_message() {
 
 #[test]
 fn the_stamped_output_reads_back_correctly_through_an_independent_reader() {
+    if !common::usable("the_stamped_output_reads_back_correctly_through_an_independent_reader", &[Tool::Exiftool]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
     let files = vec![write_main(dir.path(), "2021-01-15", 1), write_overlay(dir.path(), "2021-01-15", 1)];
@@ -1316,10 +1305,7 @@ fn the_stamped_output_reads_back_correctly_through_an_independent_reader() {
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
 
-    let Some(tags) = exiftool(&plan.items[0].output) else {
-        skipped("the_stamped_output_reads_back_correctly_through_an_independent_reader");
-        return;
-    };
+    let tags = exiftool(&plan.items[0].output);
 
     assert_eq!(tags.get("Validate").map(String::as_str), Some("OK"), "{tags:#?}");
     assert_eq!(tags.get("DateTimeOriginal").map(String::as_str), Some("2021:01:15 14:30:05"));
@@ -1337,6 +1323,9 @@ fn the_stamped_output_reads_back_correctly_through_an_independent_reader() {
 
 #[test]
 fn a_southern_and_western_coordinate_reads_back_with_the_right_hemispheres() {
+    if !common::usable("a_southern_and_western_coordinate_reads_back_with_the_right_hemispheres", &[Tool::Exiftool]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", RIO)]);
     let reconciliation = reconciled(&memories, vec![write_main(dir.path(), "2021-01-15", 1)]);
@@ -1346,10 +1335,7 @@ fn a_southern_and_western_coordinate_reads_back_with_the_right_hemispheres() {
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
 
-    let Some(tags) = exiftool(&plan.items[0].output) else {
-        skipped("a_southern_and_western_coordinate_reads_back_with_the_right_hemispheres");
-        return;
-    };
+    let tags = exiftool(&plan.items[0].output);
 
     assert_eq!(tags.get("Validate").map(String::as_str), Some("OK"), "{tags:#?}");
     assert_eq!(tags.get("GPSLatitudeRef").map(String::as_str), Some("South"));
@@ -1361,6 +1347,9 @@ fn a_southern_and_western_coordinate_reads_back_with_the_right_hemispheres() {
 
 #[test]
 fn an_ambiguous_buckets_gps_verdict_survives_all_the_way_into_the_written_file() {
+    if !common::usable("an_ambiguous_buckets_gps_verdict_survives_all_the_way_into_the_written_file", &[Tool::Exiftool]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[
         (&at("2021-01-15", "01:00:00"), "Image", PARIS),
@@ -1376,11 +1365,8 @@ fn an_ambiguous_buckets_gps_verdict_survives_all_the_way_into_the_written_file()
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 4);
 
-    let Some(agreeing) = exiftool(&plan.items[0].output) else {
-        skipped("an_ambiguous_buckets_gps_verdict_survives_all_the_way_into_the_written_file");
-        return;
-    };
-    let disagreeing = exiftool(&plan.items[2].output).unwrap();
+    let agreeing = exiftool(&plan.items[0].output);
+    let disagreeing = exiftool(&plan.items[2].output);
 
     assert_eq!(agreeing.get("Validate").map(String::as_str), Some("OK"), "{agreeing:#?}");
     assert!(agreeing.contains_key("GPSLatitude"), "the agreeing bucket's file carries a coordinate: {agreeing:#?}");
@@ -1391,21 +1377,20 @@ fn an_ambiguous_buckets_gps_verdict_survives_all_the_way_into_the_written_file()
 
 #[test]
 fn metadata_the_source_already_carried_survives_the_stamp() {
+    if !common::usable("metadata_the_source_already_carried_survives_the_stamp", &[Tool::Exiftool]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
     let main = write_main(dir.path(), "2021-01-15", 1);
 
-    let Some(exiftool_path) = which_exiftool() else {
-        skipped("metadata_the_source_already_carried_survives_the_stamp");
-        return;
-    };
     // A foreign tag this build never writes, put there by the independent tool rather than by the
     // crate under test, so its survival is not the crate agreeing with itself.
-    let status = Command::new(exiftool_path)
+    let status = Command::new("exiftool")
         .args(["-overwrite_original", "-Artist=A Foreign Writer", "-Make=SomeCamera"])
         .arg(&main.path)
         .status()
-        .unwrap();
+        .expect("the gate at the top of this test proved exiftool runs here");
     assert!(status.success());
 
     let reconciliation = reconciled(&memories, vec![main]);
@@ -1414,26 +1399,25 @@ fn metadata_the_source_already_carried_survives_the_stamp() {
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1);
 
-    let tags = exiftool(&plan.items[0].output).unwrap();
+    let tags = exiftool(&plan.items[0].output);
     assert_eq!(tags.get("Artist").map(String::as_str), Some("A Foreign Writer"), "{tags:#?}");
     assert_eq!(tags.get("Make").map(String::as_str), Some("SomeCamera"), "{tags:#?}");
     assert_eq!(tags.get("DateTimeOriginal").map(String::as_str), Some("2021:01:15 14:30:05"));
-}
-
-fn which_exiftool() -> Option<&'static str> {
-    Command::new("exiftool").arg("-ver").output().ok().filter(|output| output.status.success()).map(|_| "exiftool")
 }
 
 // ---- the video leg ----
 
 #[test]
 fn a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it() {
+    if !common::usable(
+        "a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it",
+        &[Tool::FfmpegFixtures, Tool::FfmpegTranscode, Tool::Ffprobe],
+    ) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Video", PARIS)]);
-    let Some(video) = write_video(dir.path(), "2021-01-15", 1) else {
-        skipped_for("a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let video = write_video(dir.path(), "2021-01-15", 1);
     let source = fs::read(&video.path).unwrap();
     let reconciliation = reconciled(&memories, vec![video]);
     let mut manifest = manifest(&dir, &reconciliation);
@@ -1448,7 +1432,7 @@ fn a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it() {
     let written = out.join("2021/01/20210115_143005.mp4");
     assert!(written.is_file(), "the year and month directories are the rename, and video keeps its own extension");
     // The whole reason the transcode is on by default: `hvc1` in, something Windows plays out.
-    assert_eq!(probe_video(&written), Some(("h264".to_owned(), WIDTH, HEIGHT)));
+    assert_eq!(probe_video(&written), ("h264".to_owned(), WIDTH, HEIGHT));
     assert_ne!(fs::read(&written).unwrap(), source, "the pixels were re-encoded, so the bytes cannot match");
     // The source is read-only to this pass, transcode or not.
     assert_eq!(fs::read(&plan.items[0].media.main).unwrap(), source);
@@ -1469,12 +1453,17 @@ fn a_transcoding_run_re_encodes_a_memory_video_to_h264_and_dates_it() {
 
 #[test]
 fn a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata() {
+    // No transcode encoder claimed: this run copies pixels, and a gate asking for one it never
+    // reaches would skip on a box that can run every assertion here.
+    if !common::usable(
+        "a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata",
+        &[Tool::FfmpegFixtures, Tool::Ffprobe],
+    ) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Video", PARIS)]);
-    let Some(video) = write_video(dir.path(), "2021-01-15", 1) else {
-        skipped_for("a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let video = write_video(dir.path(), "2021-01-15", 1);
     let reconciliation = reconciled(&memories, vec![video]);
     let mut manifest = manifest(&dir, &reconciliation);
 
@@ -1485,7 +1474,7 @@ fn a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
     let written = &plan.items[0].output;
     // Still HEVC: nothing re-encoded a frame. That is the whole contract of the opt-out.
-    assert_eq!(probe_video(written), Some(("hevc".to_owned(), WIDTH, HEIGHT)));
+    assert_eq!(probe_video(written), ("hevc".to_owned(), WIDTH, HEIGHT));
     // And the run says so rather than leaving the user to notice.
     assert_eq!(
         report.notices.iter().map(|one| one.notice).collect::<Vec<_>>(),
@@ -1496,7 +1485,7 @@ fn a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata
     assert_eq!(report.notices[0].source_id, plan.items[0].source_id);
 
     // The metadata still landed, because metadata never goes through ffmpeg on either route.
-    let probed = ffprobe_format(written).unwrap();
+    let probed = ffprobe_format(written);
     assert_eq!(probed.get("creation_time").map(String::as_str), Some("2021-01-15T13:30:05.000000Z"));
     assert_eq!(probed.get("date").map(String::as_str), Some("2021-01-15T14:30:05+01:00"), "Paris is UTC+1 in January");
     assert_eq!(probed.get("location").map(String::as_str), Some("+48.858844+002.294351/"));
@@ -1504,12 +1493,15 @@ fn a_run_that_is_not_transcoding_copies_the_pixels_and_still_writes_the_metadata
 
 #[test]
 fn an_overlay_is_burned_in_only_by_a_transcode_and_the_run_says_when_it_was_not() {
+    if !common::usable(
+        "an_overlay_is_burned_in_only_by_a_transcode_and_the_run_says_when_it_was_not",
+        &[Tool::FfmpegFixtures, Tool::FfmpegTranscode],
+    ) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Video", PARIS)]);
-    let Some(video) = write_video(dir.path(), "2021-01-15", 1) else {
-        skipped_for("an_overlay_is_burned_in_only_by_a_transcode_and_the_run_says_when_it_was_not", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let video = write_video(dir.path(), "2021-01-15", 1);
     // Half the size of the frame, so the scaling leg is exercised rather than skipped: a memory's
     // overlay is normally full-frame and a burn that could not scale would still pass without this.
     let mut pixels = RgbaImage::new(WIDTH / 2, HEIGHT / 2);
@@ -1578,14 +1570,16 @@ fn a_run_with_no_ffmpeg_finishes_every_video_and_reports_what_it_could_not_do() 
 
 #[test]
 fn a_video_whose_date_cannot_be_stored_leaves_the_output_path_alone() {
+    // The transcode encoder is claimed even though this item ends refused: `fix_video` re-encodes
+    // BEFORE it stamps, so the run reaches libx264 on its way to the refusal.
+    if !common::usable("a_video_whose_date_cannot_be_stored_leaves_the_output_path_alone", &[Tool::FfmpegFixtures, Tool::FfmpegTranscode]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     // 1965: a legal raw value against MP4's 1904 epoch, and one both readers show as a date in the
     // 2030s, so it is refused rather than written. Reachable from an entry date alone.
     let memories = entries(&[(&at("1965-06-01", "12:00:00"), "Video", PARIS)]);
-    let Some(video) = write_video(dir.path(), "1965-06-01", 1) else {
-        skipped_for("a_video_whose_date_cannot_be_stored_leaves_the_output_path_alone", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let video = write_video(dir.path(), "1965-06-01", 1);
     let reconciliation = reconciled(&memories, vec![video]);
     let mut manifest = manifest(&dir, &reconciliation);
 
@@ -1611,12 +1605,12 @@ fn a_video_whose_date_cannot_be_stored_leaves_the_output_path_alone() {
 
 #[test]
 fn a_video_that_is_not_one_is_recorded_against_its_own_row_and_the_run_carries_on() {
+    if !common::usable("a_video_that_is_not_one_is_recorded_against_its_own_row_and_the_run_carries_on", &[Tool::FfmpegFixtures]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "01:00:00"), "Video", PARIS), (&at("2021-01-15", "23:00:00"), "Video", PARIS)]);
-    let Some(healthy) = write_video(dir.path(), "2021-01-15", 2) else {
-        skipped_for("a_video_that_is_not_one_is_recorded_against_its_own_row_and_the_run_carries_on", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let healthy = write_video(dir.path(), "2021-01-15", 2);
     // A `.mp4` that is a JPEG underneath. Nothing re-encodes it, so the guard is what stops it.
     let liar = write_raw(dir.path(), &format!("2021-01-15_{}-main.mp4", uuid(1)), &[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
     let reconciliation = reconciled(&memories, vec![liar, healthy]);
@@ -1638,12 +1632,15 @@ fn a_video_that_is_not_one_is_recorded_against_its_own_row_and_the_run_carries_o
 
 #[test]
 fn a_video_ffmpeg_cannot_decode_fails_that_item_alone_and_keeps_its_message() {
+    if !common::usable(
+        "a_video_ffmpeg_cannot_decode_fails_that_item_alone_and_keeps_its_message",
+        &[Tool::FfmpegFixtures, Tool::FfmpegTranscode],
+    ) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "01:00:00"), "Video", PARIS), (&at("2021-01-15", "23:00:00"), "Video", PARIS)]);
-    let Some(healthy) = write_video(dir.path(), "2021-01-15", 2) else {
-        skipped_for("a_video_ffmpeg_cannot_decode_fails_that_item_alone_and_keeps_its_message", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let healthy = write_video(dir.path(), "2021-01-15", 2);
     let liar = write_raw(dir.path(), &format!("2021-01-15_{}-main.mp4", uuid(1)), b"not really an mp4 at all");
     let reconciliation = reconciled(&memories, vec![liar, healthy]);
     let mut manifest = manifest(&dir, &reconciliation);
@@ -1666,15 +1663,15 @@ fn a_video_ffmpeg_cannot_decode_fails_that_item_alone_and_keeps_its_message() {
 
 #[test]
 fn a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename() {
+    if !common::usable("a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename", &[Tool::FfmpegFixtures]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     // Two ambiguous entries on one day: neither may take its time from an entry, so the only thing
     // that can move one off midnight is the file's own header.
     let memories = entries(&[(&at("2021-01-15", "01:00:00"), "Video", PARIS), (&at("2021-01-15", "23:00:00"), "Video", PARIS)]);
-    let Some(dated) = write_video(dir.path(), "2021-01-15", 1) else {
-        skipped_for("a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
-    let undated = write_video(dir.path(), "2021-01-15", 2).unwrap();
+    let dated = write_video(dir.path(), "2021-01-15", 1);
+    let undated = write_video(dir.path(), "2021-01-15", 2);
 
     // Give the first one a header time of its own, through this crate's own writer, since ffmpeg
     // leaves those fields zeroed unless told otherwise.
@@ -1703,12 +1700,12 @@ fn a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename(
 
 #[test]
 fn a_finished_video_is_not_transcoded_again_on_a_resume() {
+    if !common::usable("a_finished_video_is_not_transcoded_again_on_a_resume", &[Tool::FfmpegFixtures, Tool::FfmpegTranscode]) {
+        return;
+    }
     let dir = TempDir::new().unwrap();
     let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Video", PARIS)]);
-    let Some(video) = write_video(dir.path(), "2021-01-15", 1) else {
-        skipped_for("a_finished_video_is_not_transcoded_again_on_a_resume", "ffmpeg", REQUIRE_FFMPEG);
-        return;
-    };
+    let video = write_video(dir.path(), "2021-01-15", 1);
     let reconciliation = reconciled(&memories, vec![video]);
     let mut manifest = manifest(&dir, &reconciliation);
 
@@ -1727,15 +1724,16 @@ fn a_finished_video_is_not_transcoded_again_on_a_resume() {
 }
 
 /// The container-level tags `ffprobe` reports, keyed by name.
-fn ffprobe_format(path: &Path) -> Option<BTreeMap<String, String>> {
-    let output =
-        Command::new("ffprobe").args(["-v", "error", "-show_entries", "format_tags", "-of", "default=nw=1"]).arg(path).output().ok()?;
+fn ffprobe_format(path: &Path) -> BTreeMap<String, String> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "default=nw=1"])
+        .arg(path)
+        .output()
+        .expect("the gate at the top of this test proved ffprobe runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    Some(
-        text.lines()
-            .filter_map(|line| line.strip_prefix("TAG:"))
-            .filter_map(|line| line.split_once('='))
-            .map(|(key, value)| (key.to_owned(), value.to_owned()))
-            .collect(),
-    )
+    text.lines()
+        .filter_map(|line| line.strip_prefix("TAG:"))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
 }

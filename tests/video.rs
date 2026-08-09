@@ -6,9 +6,10 @@
 //!
 //! **The metadata assertions read the output back through `exiftool` and `ffprobe`, not through
 //! `mp4ameta`.** A crate reading its own write can agree with itself about a wrong encoding, which
-//! is exactly what an independent reader is for. Neither tool is a build dependency, so those tests
-//! print a skip notice and pass when one is absent — see [`REQUIRE_FFMPEG`] for the env var that
-//! turns absence into a failure on a runner.
+//! is exactly what an independent reader is for. Neither tool is a build dependency, so a test
+//! needing one asks `tests/common`'s shared gate up front and prints a skip notice when it is not
+//! usable — see that module for what "usable" means and for the env vars that turn absence into a
+//! failure naming the runner.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -18,43 +19,30 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime};
+use common::Tool;
 use exportsnap::export::model::{Attribution, ConversationId, Field, LocationPoint, Username};
 use exportsnap::export::video::{LocationAtom, Mp4, NotMp4, VideoError, VideoStamp, header_time};
 use tempfile::TempDir;
+
+mod common;
 
 /// Paris, with non-zero degrees, minutes and seconds so a dropped component shows in a round trip.
 const PARIS: &str = "Latitude, Longitude: 48.858844, 2.294351";
 /// Southern and western, and far enough away that no rounding confuses the two.
 const RIO: &str = "Latitude, Longitude: -22.951916, -43.210487";
 
-/// Set any of these and a missing tool fails the run instead of quietly covering nothing.
-///
-/// The skip notices below cannot be relied on: nextest captures a passing test's output, so on a
-/// box without the tools the suite prints nothing at all and reads as fully green. That is fine
-/// while the box this repo is gated on has ffmpeg n8.1.2, ffprobe and exiftool 13.55 installed, and
-/// it is exactly wrong for a CI runner, where these tests are the only independent-reader coverage
-/// of the header-time encoding and the coordinate form.
-const REQUIRE_FFMPEG: &str = "EXPORTSNAP_REQUIRE_FFMPEG";
-const REQUIRE_EXIFTOOL: &str = "EXPORTSNAP_REQUIRE_EXIFTOOL";
-
-/// Records why a check did not run. Loud where the caller asked for loud.
-fn skipped(test: &str, tool: &str, variable: &str) {
-    assert!(
-        std::env::var_os(variable).is_none(),
-        "{test}: {variable} is set and {tool} is not on PATH, so the assertions that need it would have been \
-         skipped; install {tool} on this runner or unset the variable"
-    );
-    println!("SKIPPED {test}: {tool} is not on PATH, so its assertions did not run");
-}
-
 // ---- fixtures ----
+//
+// Every builder and reader below runs past a `common::usable` gate its caller opened, so each one
+// asserts on a failed spawn rather than reporting one as an absence. A second thing here able to
+// say "not installed" is exactly what queue task 50 removed.
 
 /// A half-second HEVC video with an audio track, which is the shape every memory video has.
 ///
 /// HEVC on purpose rather than for speed: `hvc1` is what the export ships and what the transcode
 /// exists to move away from, so a fixture in anything else would let a leg that quietly skipped the
 /// re-encode pass.
-fn hevc(dir: &Path, name: &str) -> Option<PathBuf> {
+fn hevc(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let built = Command::new("ffmpeg")
         .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
@@ -63,17 +51,17 @@ fn hevc(dir: &Path, name: &str) -> Option<PathBuf> {
         .args(["-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "0.5"])
         .arg(&path)
         .output()
-        .ok()?;
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(built.status.success(), "ffmpeg could not build the fixture: {}", String::from_utf8_lossy(&built.stderr));
-    Some(path)
+    path
 }
 
 /// The same, with the movie box moved in front of the media data.
 ///
 /// Worth having as its own fixture: `header_time` seeks over the top-level boxes, and the two
 /// layouts put `moov` on opposite sides of a multi-megabyte `mdat` on a real file.
-fn faststart(dir: &Path, name: &str) -> Option<PathBuf> {
-    let source = hevc(dir, "source-for-faststart.mp4")?;
+fn faststart(dir: &Path, name: &str) -> PathBuf {
+    let source = hevc(dir, "source-for-faststart.mp4");
     let path = dir.join(name);
     let built = Command::new("ffmpeg")
         .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
@@ -81,9 +69,9 @@ fn faststart(dir: &Path, name: &str) -> Option<PathBuf> {
         .args(["-c", "copy", "-movflags", "+faststart"])
         .arg(&path)
         .output()
-        .ok()?;
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-    Some(path)
+    path
 }
 
 /// Replaces the file's `moov/udta` with one holding exactly `child`, which is how a real memory
@@ -267,32 +255,35 @@ fn child(bytes: &[u8], at: usize, size: usize, fourcc: &[u8; 4]) -> (usize, usiz
 ///
 /// `-a` keeps duplicate rows (the five header date fields print as three without it), `-u` surfaces
 /// a `udta` child that is neither table-known nor `©`-prefixed, `-s` gives the short tag id, and
-/// `-G1` puts the group in front of it. `None` means `exiftool` is not installed.
-fn exiftool(path: &Path) -> Option<BTreeMap<String, String>> {
-    let output = Command::new("exiftool").args(["-s", "-a", "-u", "-G1"]).arg(path).output().ok()?;
+/// `-G1` puts the group in front of it.
+fn exiftool(path: &Path) -> BTreeMap<String, String> {
+    let output = Command::new("exiftool")
+        .args(["-s", "-a", "-u", "-G1"])
+        .arg(path)
+        .output()
+        .expect("the gate at the top of this test proved exiftool runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    Some(
-        text.lines()
-            // `": "` rather than `':'`: the group prefix and every date value hold a colon, and
-            // only the separator is followed by a space.
-            .filter_map(|line| line.split_once(": "))
-            .map(|(key, value)| (key.rsplit(']').next().unwrap_or(key).trim().to_owned(), value.trim().to_owned()))
-            .collect(),
-    )
+    text.lines()
+        // `": "` rather than `':'`: the group prefix and every date value hold a colon, and only
+        // the separator is followed by a space.
+        .filter_map(|line| line.split_once(": "))
+        .map(|(key, value)| (key.rsplit(']').next().unwrap_or(key).trim().to_owned(), value.trim().to_owned()))
+        .collect()
 }
 
 /// The container-level tags `ffprobe` reports, keyed by name.
-fn ffprobe(path: &Path) -> Option<BTreeMap<String, String>> {
-    let output =
-        Command::new("ffprobe").args(["-v", "error", "-show_entries", "format_tags", "-of", "default=nw=1"]).arg(path).output().ok()?;
+fn ffprobe(path: &Path) -> BTreeMap<String, String> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "format_tags", "-of", "default=nw=1"])
+        .arg(path)
+        .output()
+        .expect("the gate at the top of this test proved ffprobe runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    Some(
-        text.lines()
-            .filter_map(|line| line.strip_prefix("TAG:"))
-            .filter_map(|line| line.split_once('='))
-            .map(|(key, value)| (key.to_owned(), value.to_owned()))
-            .collect(),
-    )
+    text.lines()
+        .filter_map(|line| line.strip_prefix("TAG:"))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
 }
 
 // ---- what the guard refuses ----
@@ -351,11 +342,11 @@ fn the_seeking_probe_refuses_a_64_bit_box_size_that_wraps_its_cursor() {
 
 #[test]
 fn a_real_encoders_output_is_accepted_and_its_header_time_survives_a_round_trip() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_real_encoders_output_is_accepted_and_its_header_time_survives_a_round_trip", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_real_encoders_output_is_accepted_and_its_header_time_survives_a_round_trip", &[Tool::FfmpegFixtures]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
 
     let mut video = Mp4::read(&source).unwrap();
     // ffmpeg writes zeros into the header dates unless told a creation time, which is the same
@@ -377,12 +368,12 @@ fn a_real_encoders_output_is_accepted_and_its_header_time_survives_a_round_trip(
 
 #[test]
 fn the_seeking_probe_finds_the_movie_box_on_either_side_of_the_media_data() {
-    let dir = TempDir::new().unwrap();
-    let Some(plain) = hevc(dir.path(), "mdat-first.mp4") else {
-        skipped("the_seeking_probe_finds_the_movie_box_on_either_side_of_the_media_data", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("the_seeking_probe_finds_the_movie_box_on_either_side_of_the_media_data", &[Tool::FfmpegFixtures]) {
         return;
-    };
-    let faststarted = faststart(dir.path(), "moov-first.mp4").unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let plain = hevc(dir.path(), "mdat-first.mp4");
+    let faststarted = faststart(dir.path(), "moov-first.mp4");
 
     // The two layouts differ, or the test proves nothing about seeking past `mdat`.
     let order = |path: &Path| {
@@ -407,11 +398,11 @@ fn the_seeking_probe_finds_the_movie_box_on_either_side_of_the_media_data() {
 
 #[test]
 fn a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path", &[Tool::FfmpegFixtures]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
     let written = dir.path().join("out.mp4");
 
     const MARKER: &[u8] = b"PREVIOUS-PAYLOAD-THAT-MUST-NOT-SURVIVE";
@@ -431,11 +422,13 @@ fn a_write_that_shrinks_leaves_no_tail_of_whatever_was_at_the_output_path() {
 
 #[test]
 fn the_media_data_comes_through_a_stamp_byte_for_byte() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("the_media_data_comes_through_a_stamp_byte_for_byte", "ffmpeg", REQUIRE_FFMPEG);
+    // The decode at the end needs nothing beyond ffmpeg itself, which building the fixture already
+    // proved, so the one claim covers both.
+    if !common::usable("the_media_data_comes_through_a_stamp_byte_for_byte", &[Tool::FfmpegFixtures]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
     let before = fs::read(&source).unwrap();
 
     let mut video = Mp4::read(&source).unwrap();
@@ -455,7 +448,7 @@ fn the_media_data_comes_through_a_stamp_byte_for_byte() {
         .arg(&written)
         .args(["-f", "null", "-"])
         .output()
-        .unwrap();
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
     assert!(decoded.stderr.is_empty(), "ffmpeg complained about the stamped file: {}", String::from_utf8_lossy(&decoded.stderr));
 }
@@ -464,11 +457,11 @@ fn the_media_data_comes_through_a_stamp_byte_for_byte() {
 
 #[test]
 fn the_sender_and_the_conversation_land_in_the_artist_and_album_tags() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "chat.mp4") else {
-        skipped("the_sender_and_the_conversation_land_in_the_artist_and_album_tags", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("the_sender_and_the_conversation_land_in_the_artist_and_album_tags", &[Tool::FfmpegFixtures, Tool::Exiftool]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "chat.mp4");
     let attribution = Attribution {
         sender: Username::new("sender-handle"),
         conversation: Some(ConversationId::new("3f2e1d0c-b9a8-4756-8433-2211aabbccdd")),
@@ -478,10 +471,7 @@ fn the_sender_and_the_conversation_land_in_the_artist_and_album_tags() {
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("the_sender_and_the_conversation_land_in_the_artist_and_album_tags", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
     // Read back through an independent reader, and under the names a reader shows: `©ART` renders
     // as `Artist`, which is the image leg's own tag name, and `©alb` as `Album`, which is the
     // grouping a per-conversation folder is.
@@ -502,11 +492,11 @@ fn the_sender_and_the_conversation_land_in_the_artist_and_album_tags() {
 /// than merely present in the file.
 #[test]
 fn a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "chat.mp4") else {
-        skipped("a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole", &[Tool::FfmpegFixtures, Tool::Exiftool]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "chat.mp4");
     // Past the JPEG ceiling by an order of magnitude, so a cap borrowed from that leg cannot survive
     // this assertion whatever value it was given.
     let key = "z".repeat(70_000);
@@ -520,10 +510,7 @@ fn a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole() {
     let bytes = fs::read(&written).unwrap();
     assert!(bytes.windows(key.len()).any(|window| window == key.as_bytes()), "the key was shortened on its way into the atom");
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
     assert_eq!(tags.get("Album").map(String::len), Some(key.len()), "the atom is present but does not read back as a whole tag");
     // The date still reads back, so the oversized tag did not cost the metadata around it either.
     assert_eq!(tags.get("ContentCreateDate").map(String::as_str), Some("2021:03:04 14:30:05"), "{:?}", tags.get("ContentCreateDate"));
@@ -531,21 +518,18 @@ fn a_conversation_key_too_long_for_a_jpeg_still_reads_back_whole() {
 
 #[test]
 fn a_stamp_with_no_attribution_writes_neither_tag() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_stamp_with_no_attribution_writes_neither_tag", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_stamp_with_no_attribution_writes_neither_tag", &[Tool::FfmpegFixtures, Tool::Exiftool]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
     // The memories leg passes `None`, and it must stay a leg that writes no artist and no album.
     let mut video = Mp4::read(&source).unwrap();
     video.stamp(&VideoStamp { local: at(2021, 3, 4, 14, 30, 5), offset: None, location: None, attribution: None }).unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("a_stamp_with_no_attribution_writes_neither_tag", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
     assert_eq!(tags.get("Artist"), None, "{tags:#?}");
     assert_eq!(tags.get("Album"), None, "{tags:#?}");
 }
@@ -554,11 +538,11 @@ fn a_stamp_with_no_attribution_writes_neither_tag() {
 
 #[test]
 fn the_sentinel_real_memory_videos_carry_does_not_block_the_coordinate() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("the_sentinel_real_memory_videos_carry_does_not_block_the_coordinate", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("the_sentinel_real_memory_videos_carry_does_not_block_the_coordinate", &[Tool::FfmpegFixtures, Tool::Exiftool]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
     // The real export's shape: a `udta/©eng` holding an invalid-latitude sentinel, and no `meta`
     // at all, so the tag write has to create that structure rather than splice into one.
     let sentinel = b"-180.00-180.000/";
@@ -579,21 +563,18 @@ fn the_sentinel_real_memory_videos_carry_does_not_block_the_coordinate() {
     let carried = [b"\xa9eng".to_vec(), payload.clone()].concat();
     assert!(out.windows(carried.len()).any(|window| window == carried), "the existing udta child did not survive the write");
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("the_sentinel_real_memory_videos_carry_does_not_block_the_coordinate", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
     // The composite resolves to OUR coordinate, which is the whole verdict: the sentinel loses.
     assert!(tags.get("GPSPosition").is_some_and(|value| value.starts_with("48 deg 51")), "{tags:#?}");
 }
 
 #[test]
 fn a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate", &[Tool::FfmpegFixtures, Tool::Exiftool]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
     // ffmpeg's own spelling: version+flags, language, an empty name, role, then longitude,
     // latitude and altitude as 16.16 fixed point.
     let mut loci = vec![0, 0, 0, 0, 0x15, 0xc7, 0, 0];
@@ -620,10 +601,7 @@ fn a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate() {
     // The date still landed, so the skip is the coordinate alone and not the whole stamp.
     assert_eq!(Mp4::read(&written).unwrap().embedded_time().map(|at| at.to_rfc3339()), Some("2021-01-15T14:30:05+00:00".to_owned()));
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
     // Still resolves to the atom that was already there, and to nothing of ours.
     assert!(tags.get("GPSPosition").is_some_and(|value| value.starts_with("48 deg 51")), "{tags:#?}");
     assert!(!tags.contains_key("GPSCoordinates"), "{tags:#?}");
@@ -633,11 +611,18 @@ fn a_video_already_carrying_a_location_atom_gets_no_shadowed_duplicate() {
 
 #[test]
 fn every_header_date_and_both_tags_read_back_correctly_through_two_independent_readers() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("every_header_date_and_both_tags_read_back_correctly_through_two_independent_readers", "ffmpeg", REQUIRE_FFMPEG);
+    // Both readers are claimed here, which is the whole point of the up-front gate. At `277feac` an
+    // `ffprobe` missing beside a working `ffmpeg` reached the `ffprobe(&written).unwrap()` below and
+    // died on THAT unwrap: the reader returned a `None` and this body unwrapped it, so the panic
+    // named an `Option` rather than the tool that was not installed.
+    if !common::usable(
+        "every_header_date_and_both_tags_read_back_correctly_through_two_independent_readers",
+        &[Tool::FfmpegFixtures, Tool::Exiftool, Tool::Ffprobe],
+    ) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
 
     let mut video = Mp4::read(&source).unwrap();
     let paris = FixedOffset::east_opt(3600).unwrap();
@@ -647,10 +632,7 @@ fn every_header_date_and_both_tags_read_back_correctly_through_two_independent_r
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("every_header_date_and_both_tags_read_back_correctly_through_two_independent_readers", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
 
     // The header fields are UTC by definition and exiftool renders them verbatim, so the wall time
     // it prints is the instant, an hour behind the Paris local time that went in.
@@ -662,7 +644,7 @@ fn every_header_date_and_both_tags_read_back_correctly_through_two_independent_r
     assert!(tags.get("GPSCoordinates").is_some_and(|value| value.starts_with("48 deg 51")), "{tags:#?}");
     assert!(tags.get("GPSPosition").is_some_and(|value| value.starts_with("48 deg 51")), "{tags:#?}");
 
-    let probed = ffprobe(&written).unwrap();
+    let probed = ffprobe(&written);
     assert_eq!(probed.get("creation_time").map(String::as_str), Some("2021-01-15T13:30:05.000000Z"));
     assert_eq!(probed.get("date").map(String::as_str), Some("2021-01-15T14:30:05+01:00"));
     // ffprobe emits both `location` and `location-eng` on a `loci` file, so the bare key alone
@@ -672,11 +654,11 @@ fn every_header_date_and_both_tags_read_back_correctly_through_two_independent_r
 
 #[test]
 fn a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres", &[Tool::FfmpegFixtures, Tool::Exiftool]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
 
     let mut video = Mp4::read(&source).unwrap();
     let rio = FixedOffset::west_opt(3 * 3600).unwrap();
@@ -686,10 +668,7 @@ fn a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres() {
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
-    let Some(tags) = exiftool(&written) else {
-        skipped("a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres", "exiftool", REQUIRE_EXIFTOOL);
-        return;
-    };
+    let tags = exiftool(&written);
     // A dropped sign is the whole error here, and it shows as a northern hemisphere reading.
     assert!(tags.get("GPSPosition").is_some_and(|value| value.contains('S') && value.contains('W')), "{tags:#?}");
     assert_eq!(tags.get("CreateDate").map(String::as_str), Some("2021:01:15 13:30:05"), "the instant, not the Rio wall time");
@@ -698,25 +677,25 @@ fn a_southern_and_western_coordinate_reads_back_in_the_right_hemispheres() {
 
 #[test]
 fn an_unknown_offset_writes_no_zone_rather_than_claiming_utc() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("an_unknown_offset_writes_no_zone_rather_than_claiming_utc", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("an_unknown_offset_writes_no_zone_rather_than_claiming_utc", &[Tool::FfmpegFixtures, Tool::Ffprobe]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
 
     let mut video = Mp4::read(&source).unwrap();
     video.stamp(&VideoStamp { local: at(2021, 1, 15, 0, 0, 0), offset: None, location: None, attribution: None }).unwrap();
     let written = dir.path().join("out.mp4");
     video.write(&written).unwrap();
 
-    let probed = ffprobe(&written).unwrap_or_default();
-    let Some(date) = probed.get("date") else {
-        skipped("an_unknown_offset_writes_no_zone_rather_than_claiming_utc", "ffprobe", REQUIRE_FFMPEG);
-        return;
-    };
+    let probed = ffprobe(&written);
     // A filename's midnight is in no stated zone at all, and `+00:00` there would upgrade
     // "unknown" to "UTC" for free — the same call the image leg makes about its offset tags.
-    assert_eq!(date, "2021-01-15T00:00:00");
+    //
+    // A missing key here is a real failure now, not a missing tool. It used to be read as the
+    // second and skip the rest, which is why this assertion could never have caught a stamp that
+    // wrote no date at all.
+    assert_eq!(probed.get("date").map(String::as_str), Some("2021-01-15T00:00:00"), "{probed:#?}");
     assert!(!probed.contains_key("location"), "no coordinate was asked for, so none is written: {probed:#?}");
 }
 
@@ -724,11 +703,11 @@ fn an_unknown_offset_writes_no_zone_rather_than_claiming_utc() {
 
 #[test]
 fn a_capture_before_1970_is_refused_and_changes_nothing() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_capture_before_1970_is_refused_and_changes_nothing", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_capture_before_1970_is_refused_and_changes_nothing", &[Tool::FfmpegFixtures]) {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
     let before = fs::read(&source).unwrap();
 
     let mut video = Mp4::read(&source).unwrap();
@@ -743,11 +722,12 @@ fn a_capture_before_1970_is_refused_and_changes_nothing() {
 
 #[test]
 fn a_video_whose_movie_header_gives_it_no_timescale_is_refused_rather_than_crashing_the_run() {
-    let dir = TempDir::new().unwrap();
-    let Some(source) = hevc(dir.path(), "memory.mp4") else {
-        skipped("a_video_whose_movie_header_gives_it_no_timescale_is_refused_rather_than_crashing_the_run", "ffmpeg", REQUIRE_FFMPEG);
+    if !common::usable("a_video_whose_movie_header_gives_it_no_timescale_is_refused_rather_than_crashing_the_run", &[Tool::FfmpegFixtures])
+    {
         return;
-    };
+    }
+    let dir = TempDir::new().unwrap();
+    let source = hevc(dir.path(), "memory.mp4");
 
     // `mp4ameta 0.13.0` computes `duration / timescale` on every read before it looks at a single
     // config flag, so a zero here PANICS the process rather than failing one row. Reproduced on a

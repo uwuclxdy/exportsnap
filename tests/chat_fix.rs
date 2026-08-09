@@ -19,10 +19,10 @@
 //!
 //! **That one test is this crate's only external-tool dependency besides the `exiftool` read-back.**
 //! It builds its fixture with ffmpeg, drives all three modes transcoding, and reads the output's
-//! frames back through ffmpeg's own decoder; with ffmpeg absent it prints a skip notice and passes,
-//! and `EXPORTSNAP_REQUIRE_FFMPEG` turns that skip into a failure naming the runner. The `exiftool`
-//! read-back skips itself the same way under `EXPORTSNAP_REQUIRE_EXIFTOOL`; everything else here runs
-//! on a bare box.
+//! frames back through ffmpeg's own decoder. Both it and the `exiftool` read-back ask
+//! `tests/common`'s shared gate up front for everything they will reach, print a skip notice when
+//! one is not usable, and red naming the runner when it demanded the tool; everything else here
+//! runs on a bare box.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use common::Tool;
 use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs, dir_name};
 use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Reconciliation, Token, discover, reconcile};
 use exportsnap::export::exif::{Jpeg, Stamp};
@@ -41,6 +42,8 @@ use exportsnap::export::model::ChatHistory;
 use exportsnap::export::schema;
 use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
 use tempfile::TempDir;
+
+mod common;
 
 /// The 13-digit id shape the one observed export used.
 const EXPORT_ID: &str = "1784667002819";
@@ -55,16 +58,6 @@ const GROUP_KEY: &str = "3f2e1d0c-b9a8-4756-8433-2211aabbccdd";
 const DAY: &str = "2021-03-04";
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
-
-/// Set this and a missing exiftool fails the run instead of quietly covering nothing.
-const REQUIRE_EXIFTOOL: &str = "EXPORTSNAP_REQUIRE_EXIFTOOL";
-
-/// The same for ffmpeg, which the video-leg overlay-mode test needs before it has a fixture at all.
-///
-/// A separate variable from the one above, and the same pair `tests/local_fix.rs` and `tests/video.rs`
-/// use: the two tools cover different things and a runner that has one and not the other should be
-/// told which is missing.
-const REQUIRE_FFMPEG: &str = "EXPORTSNAP_REQUIRE_FFMPEG";
 
 // ---- fixtures ----
 
@@ -224,7 +217,10 @@ fn zip_pair(root: &Path, seed: u32) -> String {
 /// `ffmpeg::transcode` scales the layer to fit and centres it, so at equal dimensions that chain is
 /// an identity and the opaque half really is the left half of the output. Size the two apart and
 /// every coordinate below moves.
-fn zip_video_pair(root: &Path, seed: u32) -> Option<String> {
+///
+/// The one caller runs past a `common::usable` gate that claimed [`Tool::FfmpegFixtures`], so a
+/// failure here is a genuine red rather than an absence, and this reports none.
+fn zip_video_pair(root: &Path, seed: u32) -> String {
     let mid = format!("{ZIP_WORD}-{seed:07}");
     let dir = chat_media_dir(root);
     let built = Command::new("ffmpeg")
@@ -234,10 +230,10 @@ fn zip_video_pair(root: &Path, seed: u32) -> Option<String> {
         .args(["-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "0.5"])
         .arg(dir.join(format!("{DAY}_media~{mid}.zip.a1b2c3d.mp4")))
         .output()
-        .ok()?;
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(built.status.success(), "ffmpeg could not build the fixture: {}", String::from_utf8_lossy(&built.stderr));
     paint_overlay(&dir.join(format!("{DAY}_overlay~{mid}.zip.a1b2c3d.png")));
-    Some(format!("{DAY}_{mid}.zip.a1b2c3d"))
+    format!("{DAY}_{mid}.zip.a1b2c3d")
 }
 
 /// One message naming whatever `media_ids` spells, sent by `from` at `created`.
@@ -433,38 +429,45 @@ fn modified(path: &Path) -> SystemTime {
     fs::metadata(path).unwrap().modified().unwrap()
 }
 
-/// exiftool's view of a file, keyed by tag name, or `None` when it is not installed.
+/// exiftool's view of a file, keyed by tag name.
 ///
 /// The same shape `tests/local_fix.rs` reads its outputs with, down to the `": "` split: the group
 /// prefix and every date value hold a colon, and only the separator is followed by a space.
-fn exiftool(path: &Path) -> Option<BTreeMap<String, String>> {
-    let output = Command::new("exiftool").args(["-s", "-a", "-G0:1", "-All"]).arg(path).output().ok()?;
+fn exiftool(path: &Path) -> BTreeMap<String, String> {
+    let output = Command::new("exiftool")
+        .args(["-s", "-a", "-G0:1", "-All"])
+        .arg(path)
+        .output()
+        .expect("the gate at the top of this test proved exiftool runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    Some(
-        text.lines()
-            .filter_map(|line| line.split_once(": "))
-            .map(|(key, value)| {
-                // `[EXIF:IFD0]  Artist` -> `Artist`.
-                (key.rsplit(']').next().unwrap_or(key).trim().to_owned(), value.trim().to_owned())
-            })
-            .collect(),
-    )
+    text.lines()
+        .filter_map(|line| line.split_once(": "))
+        .map(|(key, value)| {
+            // `[EXIF:IFD0]  Artist` -> `Artist`.
+            (key.rsplit(']').next().unwrap_or(key).trim().to_owned(), value.trim().to_owned())
+        })
+        .collect()
 }
 
 /// The codec and pixel dimensions of a video's first stream, through `ffprobe`.
 ///
 /// Read back with a tool that is not this crate, the same reason `tests/local_fix.rs` does: a writer
-/// agreeing with its own reader about a wrong encoding is what an independent one is for.
-fn probe_video(path: &Path) -> Option<(String, u32, u32)> {
+/// agreeing with its own reader about a wrong encoding is what an independent one is for. A stream
+/// `ffprobe` cannot describe is a failure of the thing under test rather than an absent tool, so
+/// this asserts its way through the parse.
+fn probe_video(path: &Path) -> (String, u32, u32) {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height", "-of", "default=nw=1:nk=1"])
         .arg(path)
         .output()
-        .ok()?;
+        .expect("the gate at the top of this test proved ffprobe runs here");
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines();
-    let codec = lines.next()?.trim().to_owned();
-    Some((codec, lines.next()?.trim().parse().ok()?, lines.next()?.trim().parse().ok()?))
+    let mut lines = text.lines().map(str::trim);
+    let described = format!("ffprobe did not describe the first video stream of {}: {text:?}", path.display());
+    let codec = lines.next().expect(&described).to_owned();
+    let width = lines.next().and_then(|line| line.parse().ok()).expect(&described);
+    let height = lines.next().and_then(|line| line.parse().ok()).expect(&described);
+    (codec, width, height)
 }
 
 /// The colour of one pixel of a video's first frame, decoded into `raw`.
@@ -478,29 +481,11 @@ fn first_frame_pixel(path: &Path, raw: &Path, x: u32, y: u32) -> [u8; 3] {
         .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24"])
         .arg(raw)
         .output()
-        .unwrap();
+        .expect("the gate at the top of this test proved ffmpeg runs here");
     assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
     let bytes = fs::read(raw).unwrap();
     let at = ((y * WIDTH + x) * 3) as usize;
     [bytes[at], bytes[at + 1], bytes[at + 2]]
-}
-
-fn skipped(test: &str) {
-    skipped_for(test, "exiftool", REQUIRE_EXIFTOOL);
-}
-
-/// Records why a check did not run. Loud where the caller asked for loud.
-///
-/// The notice cannot be relied on by itself: nextest captures a passing test's output, so on a box
-/// without the tool the suite prints nothing at all and reads as fully green. `variable` is what
-/// makes a runner missing the tool red instead.
-fn skipped_for(test: &str, tool: &str, variable: &str) {
-    assert!(
-        std::env::var_os(variable).is_none(),
-        "{test}: {variable} is set and {tool} is not on PATH, so the assertions that need it would have been \
-         skipped; install {tool} on this runner or unset the variable"
-    );
-    println!("SKIPPED {test}: {tool} is not on PATH, so its assertions did not run");
 }
 
 // ---- decision 46a and 46b: the tree ----
@@ -680,14 +665,19 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says() {
 /// three thresholds 53, 60 and 104 clear of the values they must reject.
 #[test]
 fn each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg() {
+    // Asked once for the whole loop, and for all three of what it reaches: the fixture's encoders,
+    // the transcode's own encoder, and the reader that reads the codec back.
+    if !common::usable(
+        "each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg",
+        &[Tool::FfmpegFixtures, Tool::FfmpegTranscode, Tool::Ffprobe],
+    ) {
+        return;
+    }
     for (mode, keeps_originals, composites) in
         [(OverlayMode::Merged, false, true), (OverlayMode::Both, true, true), (OverlayMode::Originals, true, false)]
     {
         let work = Workspace::new();
-        let Some(id) = zip_video_pair(&work.source(), 4) else {
-            skipped_for("each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg", "ffmpeg", REQUIRE_FFMPEG);
-            return;
-        };
+        let id = zip_video_pair(&work.source(), 4);
         let run = work.run_with(&no_history(), mode, &transcoding());
         assert_eq!(run.report.fixed, 1, "{mode}: {:?}", run.report.failed);
 
@@ -704,7 +694,7 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg() {
         // list fails to exclude is a regression that copies the bytes THROUGH the transcode chain
         // and reports nothing, and the codec is the only thing that separates those two.
         assert!(run.report.notices.is_empty(), "{mode}: {:?}", run.report.notices);
-        assert_eq!(probe_video(&output), Some(("h264".to_owned(), WIDTH, HEIGHT)), "{mode}: the re-encode ran in this arm");
+        assert_eq!(probe_video(&output), ("h264".to_owned(), WIDTH, HEIGHT), "{mode}: the re-encode ran in this arm");
 
         let kept: Vec<String> = tree(&work.out()).into_iter().filter(|path| path.contains("/originals/")).collect();
         if keeps_originals {
@@ -1602,6 +1592,9 @@ fn no_chat_media_item_ever_carries_a_coordinate() {
 
 #[test]
 fn the_sender_and_the_conversation_reach_the_outputs_metadata() {
+    if !common::usable("the_sender_and_the_conversation_reach_the_outputs_metadata", &[Tool::Exiftool]) {
+        return;
+    }
     let work = Workspace::new();
     let named = plain(&work.source(), Token::B, 1);
     let run = work.run(&history(vec![(GROUP_KEY, vec![message("sender-handle", "2021-03-04 14:30:05 UTC", &named)])]));
@@ -1612,10 +1605,7 @@ fn the_sender_and_the_conversation_reach_the_outputs_metadata() {
     assert_eq!(attribution.conversation.as_ref().map(|key| key.as_str()), Some(GROUP_KEY));
 
     let output = work.out().join(format!("chat/{GROUP_KEY}/20210304_143005.jpg"));
-    let Some(tags) = exiftool(&output) else {
-        skipped("the_sender_and_the_conversation_reach_the_outputs_metadata");
-        return;
-    };
+    let tags = exiftool(&output);
     // Read back through an independent reader, not through `little_exif`: a crate reading its own
     // write can agree with itself about a wrong encoding.
     assert_eq!(tags.get("Artist").map(String::as_str), Some("sender-handle"), "{tags:?}");
