@@ -617,25 +617,79 @@ impl Plan {
     /// | default the seed read in `chat_run::prepare` | `a_conversation_that_outlives_its_neighbour_keeps_its_own_directory` (the directory half) AND `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name` (the item half), both through `chat_run::run` |
     /// | move the resume sweep AHEAD of the chat seed read | `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name`, and nothing else — which is what separates "the seed is read" from "read in the right place" |
     /// | move the resume sweep ahead of THIS leg's seed read | `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name` in `tests/memories_screen.rs`, the twin of the chat one |
-    /// | move either seed read ahead of the enrollment | **nothing.** That half of the window is unpinned on both legs |
+    /// | move the chat seed read ahead of the enrollment | `a_returning_chat_file_has_its_record_cleared_before_the_seed_is_read` in `tests/chat_media_screen.rs`, and nothing else — the sweep row above stays GREEN under it, which is what holds the window's two edges apart |
+    /// | move THIS leg's seed read ahead of the enrollment | **nothing, and nothing THIS BUILD can produce.** Not an untested branch: an invariant below closes it, and names the two one-line changes that would reopen it |
     ///
-    /// So both reads are pinned at the composition and so is each leg's position against its own
-    /// sweep. **One gap is left, and this is its own reason rather than a shared one**: nothing
-    /// pins either read against the ENROLLMENT. Separating that needs a row that PARKED and came
-    /// back — `SourceMissing` or `Retired`, since both legs reset on the pair
-    /// (`memories.rs`'s `matches!` on the item's status, `chat_media.rs`'s `parked` set) — because
-    /// enrollment's `reset` is what clears a record and a row that never parked has none to clear. That is unbuilt rather than unbuildable — three
-    /// `collect()` calls with a source removed and then restored, plus a newcomer to make the
-    /// adopted and derived answers differ, all of it with helpers both screen suites already have.
-    /// A cost, not a barrier.
+    /// So both reads are pinned at the composition, so is each leg's position against its own sweep,
+    /// and so is the chat read's position against its enrollment. **What is left is a property of
+    /// this leg rather than a missing test.**
     ///
-    /// Three earlier drafts of this paragraph were wrong and all three are retracted here rather
-    /// than quietly dropped: the first claimed the ordering was what saved a rewrite; the second
-    /// claimed no test reached either run composition; the third gave the parked-row reason above
-    /// for TWO gaps when it fits only the enrollment one, and named `SourceMissing` alone where both
-    /// legs reset on `SourceMissing` or `Retired` — the position gap was open because
-    /// no fixture had a newcomer sorting ahead of a recorded item, which is a different fact, and
-    /// it is now closed on both legs.
+    /// Separating the enrollment ordering needs a row that PARKED and came back — `SourceMissing` or
+    /// `Retired`, since both legs reset on the pair (`memories.rs`'s `matches!` on the item's status,
+    /// `chat_media.rs`'s `parked` set) — AND carried an output record, because `reset` is what clears
+    /// a record and a row with none to clear leaves the read's position unobservable. The chat leg
+    /// reaches that through the composition alone: a `b~` token and its file share one `source_id`, so
+    /// the file vanishing parks the row it already finished (queue task 39's decision 50 keeps the
+    /// record across that transition) and the file returning resets it, both under the same row.
+    ///
+    /// **This leg cannot, and the argument is an invariant closed over the id spaces rather than a
+    /// list of cases anyone thought of.** The invariant is `output_path IS NOT NULL` implies
+    /// [`crate::export::manifest::ItemStatus::Done`], over [`ItemKind::Memory`], at every instant.
+    /// Eight statements write a status or one of the three output columns:
+    ///
+    /// - **Sets a record:** [`Manifest::mark_done`] alone, and the same UPDATE sets `Done`. The base
+    ///   case, so a record can arrive from nowhere else.
+    /// - **Clears one**, leaving the invariant vacuously true: [`Manifest::mark_failed`],
+    ///   [`Manifest::reset`], and [`Manifest::resume`]'s demotion.
+    /// - **Writes a status without touching the output columns**, which is the only shape that can
+    ///   break it: [`Manifest::enroll`] inserts at
+    ///   [`crate::export::manifest::ItemStatus::Pending`] with no record and its `ON CONFLICT` arm
+    ///   updates the url alone; [`Manifest::mark_source_missing`] is reachable for this kind only at
+    ///   [`super::memories::Reconciliation::enroll`]'s [`Pairing::Missing`] arm, whose id is
+    ///   `synthetic_source_id` (`unpaired-entry-N`) where a paired row's is the media uuid — disjoint
+    ///   by construction and pinned by `memories`' own `no_synthetic_source_id_is_uuid_shaped`, so it
+    ///   can never name a row that reached `mark_done`; [`Manifest::exclude`] KEEPS a record but has
+    ///   one call site, fed [`Self::excluded`], which this function hardcodes empty;
+    ///   [`Manifest::retire_absent`] KEEPS one but selects on `!matches!(status, Done | Retired)`, so
+    ///   it cannot carry a record-carrying row out of `Done`.
+    ///
+    /// Closed over the producers, not merely over the statements: `ItemKind::Memory` reaches the
+    /// manifest from `memories.rs` alone. Enroll's reset arm is
+    /// `matches!(status, Some(SourceMissing | Retired))`, disjoint from `{Done}` — so no
+    /// record-carrying row reaches it, `reset` never changes what [`RecordedOutputs::read`] returns,
+    /// and the two orderings produce identical seeds. Measured as well as derived: running a memory's
+    /// source out of the export and back leaves the uuid row `Done` with its record throughout, and
+    /// the only row that parks is the synthetic unpaired one, which has none.
+    ///
+    /// **Two producers would open it, and both are conventions rather than guarantees** — this builds,
+    /// so the compiler rejects no counterexample. One is a producer marking a PAIRED memories row
+    /// source-missing, the not-yet-existing downloader that
+    /// [`super::memories::Reconciliation::enroll`] says its `SourceMissing` arm is there to serve. The
+    /// other needs no new producer at all: give this leg a non-empty [`Self::excluded`] and
+    /// [`Manifest::exclude`] carries a `Done` row to `Excluded` WITH its record,
+    /// [`Manifest::retire_absent`] exempts only `Done | Retired` so it carries that row on to
+    /// `Retired` with the record still on it, and `Retired` IS in the reset arm. One hardcoded
+    /// `Vec::new()` in this function is the whole of what holds that shut, which is why the
+    /// `move THIS leg's seed read ahead of the enrollment` row above reads as a fact about THIS build
+    /// rather than about the type. The comment at the read in
+    /// `memories_run::prepare` carries the same warning, that being the line someone moving it is
+    /// looking at.
+    ///
+    /// Five earlier drafts of this paragraph were wrong and all five are retracted here rather than
+    /// quietly dropped: the first claimed the ordering was what saved a rewrite; the second claimed no
+    /// test reached either run composition; the third gave the parked-row reason above for TWO gaps
+    /// when it fits only the enrollment one, and named `SourceMissing` alone where both legs reset on
+    /// `SourceMissing` or `Retired` — the position gap was open because no fixture had a newcomer
+    /// sorting ahead of a recorded item, which is a different fact, and it is now closed on both legs.
+    /// The fourth called the enrollment half "unbuilt rather than unbuildable" on BOTH legs and priced
+    /// it at three `collect()` calls each: that is the chat leg's price, and this leg has no fixture
+    /// to buy. The fifth claimed its enumeration ran over the writers rather than over cases anyone
+    /// thought of, and then named six of the eight — omitting [`Manifest::mark_done`], which is the
+    /// base case the whole argument rests on, and [`Manifest::exclude`], which keeps a record and is
+    /// therefore the one shape that breaks the invariant. Six writers establish only that none of
+    /// those six makes a record-carrying non-`Done` row; they do not exclude the record arriving from
+    /// somewhere unnamed, so what read as a proof was an assertion. That draft also called this leg
+    /// absolutely unreachable where one hardcoded `Vec::new()` is what holds it shut.
     #[must_use]
     pub fn build(memories: &Memories, reconciliation: &Reconciliation, out_root: impl AsRef<Path>, recorded: &RecordedOutputs) -> Self {
         let out_root = out_root.as_ref();

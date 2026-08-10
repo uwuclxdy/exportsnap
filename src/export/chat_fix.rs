@@ -632,8 +632,10 @@ impl Conversations {
 ///
 /// `recorded` is where this export's conversations have been landing so far, and a caller with no
 /// manifest to read one out of passes [`RecordedDirs::default`] to get a first run's answer. It is
-/// read BEFORE [`super::local_fix::run`]'s resume sweep rather than after: the sweep clears the
-/// record of an output the user deleted, and a cleared record names no directory at all.
+/// read in a window with an edge on each side and [`Plan::build`] states both: AFTER
+/// [`Reconciliation::enroll`], whose `reset` clears the record of a row whose file came back, and
+/// BEFORE [`super::local_fix::run`]'s resume sweep, which clears the record of an output the user
+/// deleted. A cleared record names no directory at all, either way.
 ///
 /// **What that ordering is worth is smaller than the sentence above used to claim**, and the reason
 /// is the same one [`Plan::build`] gives at its own seed. A conversation whose record is cleared
@@ -643,9 +645,10 @@ impl Conversations {
 /// derivation would produce. What IS pinned is the read itself:
 /// `a_conversation_that_outlives_its_neighbour_keeps_its_own_directory` in
 /// `tests/chat_media_screen.rs` drives [`super::chat_run::run`] and reds when this seed is
-/// defaulted. The read's POSITION against the sweep is pinned by nothing. Corrected here rather
-/// than left standing, because this file states the sharper rule two paragraphs up and a reader
-/// meeting both takes the looser one as current.
+/// defaulted. THIS layer's position against either edge is pinned by nothing: both edge pins live one
+/// component down on the item ordinal, where a collision is ordinary rather than merely possible.
+/// Corrected here rather than left standing, because this file states the sharper rule two paragraphs
+/// up and a reader meeting both takes the looser one as current.
 ///
 /// **A mode no longer moves an output PATH, and that is a change rather than a fact that was always
 /// true.** It used to: `local_fix`'s pass-through predicate folded in `SourceMedia::overlay`, which

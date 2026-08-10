@@ -242,10 +242,23 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     reconciliation.enroll(&mut manifest).map_err(RunError::Manifest)?;
 
     // Read after the enrollment and before the plan, which is the only window where it is the state
-    // the run will actually work from — the same ordering `chat_run::prepare` takes for its own
-    // seed, and for the same reason: the resume sweep inside `local_fix::run` is what drops the
-    // record of an output the user deleted, and it has to land AFTER this so the rewrite goes back
-    // to the path it was written at instead of shifting onto a neighbour's.
+    // the run will actually work from — the same ordering `chat_run::prepare` takes for its own seed.
+    // The LATE edge is the one a test holds: the resume sweep inside `local_fix::run` drops the record
+    // of an output the user deleted, so it has to land AFTER this or the rewrite shifts onto a
+    // neighbour's path. `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name` in
+    // `tests/memories_screen.rs` reds when it does.
+    //
+    // **The early edge holds by convention here and nothing reds if it moves.** Enroll's `reset`
+    // clears the record of a row whose source came back, but under THIS build no memories row
+    // carrying a record ever reaches that arm, so moving this line above the enrollment is an
+    // equivalent mutant on this leg while being a real defect on the chat one — `Plan::build`'s
+    // rustdoc carries the invariant, its proof and the measurement.
+    //
+    // Two changes reopen it and neither is exotic: a producer that parks a PAIRED row (the downloader
+    // `memories::Reconciliation::enroll` says its `SourceMissing` arm exists for), or a non-empty
+    // `Plan::excluded` on this leg, since `Manifest::exclude` keeps a record and `retire_absent`
+    // carries an `Excluded` row on to `Retired` still holding it. Either one makes this position
+    // load-bearing with no test to say so.
     let recorded = RecordedOutputs::read(&manifest, ItemKind::Memory).map_err(RunError::Manifest)?;
     let plan = Plan::build(&memories, &reconciliation, &inputs.out_root, &recorded);
     let rows = plan

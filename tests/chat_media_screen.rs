@@ -23,7 +23,7 @@ use exportsnap::export::chat_fix::OverlayMode;
 use exportsnap::export::chat_run::{self, HistoryOutcome, PlanCounts, PlanRow, PlanSnapshot, RunError, RunEvent, RunOutcome};
 use exportsnap::export::env::Environment;
 use exportsnap::export::local_fix::{FixReport, Leg, VideoOptions};
-use exportsnap::export::manifest::{ExportId, ItemKind, Manifest, NewItem, ResumeReport};
+use exportsnap::export::manifest::{ExportId, ItemKind, ItemStatus, Manifest, NewItem, ResumeReport};
 use exportsnap::tui::alert::AlertKind;
 use exportsnap::tui::shell;
 use exportsnap::tui::theme::{Palette, Tier};
@@ -284,6 +284,87 @@ fn a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name() {
         "the recorded item was pushed off the file it had already finished at"
     );
     assert_eq!(named(after, 1).as_deref(), Some("20210304_143005_3.jpg"), "the newcomer took a name a record already claimed");
+}
+
+/// Decision 52's seed read against its own ENROLLMENT — the other side of the window, and the side
+/// only this leg can reach.
+///
+/// The two tests above pin the seed against the resume sweep, which is the LATE edge of the window.
+/// This one pins the EARLY edge: `chat_run::prepare` reads the seed after `Reconciliation::enroll`,
+/// and enroll's `reset` is what clears the record of a row whose file came back. Read ahead of it and
+/// the plan adopts a path the run is about to stop believing.
+///
+/// **A file that leaves and comes back is the only thing that separates the two orderings**, because
+/// `reset` is the only writer that clears a record the enrollment can reach, and a row that never
+/// parked has no record for it to clear. This leg reaches that state through the composition alone
+/// and the memories leg does not — a `b~` token and its file share one `source_id`, so the file
+/// vanishing parks the row it already finished (keeping the record, per queue task 39's decision 50)
+/// and the file
+/// returning resets it, both under the same row. On the memories leg the same removal changes the
+/// entry's identity to a synthetic one and leaves the uuid row `Done`, which `retire_absent` exempts,
+/// so no memories row carrying a record ever reaches enroll's reset arm. See `Plan::build`'s table.
+///
+/// The newcomer does here what it does above: seed 1 sorts ahead of both recorded items, so the
+/// adopted answer and the derived one differ and the assertion can tell them apart.
+///
+/// - correct — the enrollment cleared seed 3's record before the read, so seed 1 takes the `_2` that
+///   record no longer claims and seed 3 derives past both to `_3`;
+/// - seed read AHEAD of the enrollment — seed 3's stale record still claims `_2`, so seed 3 is handed
+///   it back and seed 1 is pushed to `_3`.
+///
+/// Note that this is the mirror image of the sweep pin above, where `_2`/`_3` is the CORRECT answer
+/// for seeds 3 and 1: there the record must survive into the read, here it must not.
+#[test]
+fn a_returning_chat_file_has_its_record_cleared_before_the_seed_is_read() {
+    let sent = "2021-03-04 14:30:05 UTC";
+    let dir = export_tree(&[("friend-handle", &[(sent, "b~aB3xY90002"), (sent, "b~aB3xY90003")])], &[2, 3]);
+    let (inputs, _state) = inputs(&dir, OverlayMode::Both);
+    let first = collect(&inputs);
+    assert_eq!(report(finished(&first)).fixed, 2, "{:?}", report(finished(&first)).failed);
+
+    let named = |snapshot: &PlanSnapshot, seed: u32| {
+        snapshot.rows.iter().find(|row| row.source_id == media_id(seed)).map(|row| row.output_name.clone())
+    };
+    let snapshot = planned(&first);
+    assert_eq!(named(snapshot, 2).as_deref(), Some("20210304_143005.jpg"), "the fixture is not two items on one second");
+    assert_eq!(named(snapshot, 3).as_deref(), Some("20210304_143005_2.jpg"), "the fixture is not two items on one second");
+
+    // Seed 3's SOURCE leaves while the message naming it stays, so its token becomes a gap and its
+    // own row parks at `SourceMissing` KEEPING the record — the state enroll's `reset` clears, and
+    // the whole reason this fixture needs a run here rather than two runs and a hand-written row.
+    let part = dir.path().join(format!("mydata~{EXPORT_ID}"));
+    let source = chat_media_dir(&part).join(format!("{DAY}_{}.jpg", media_id(3)));
+    assert!(source.is_file(), "the fixture must remove a file that is there");
+    fs::remove_file(&source).unwrap();
+
+    let second = collect(&inputs);
+    assert_eq!(report(finished(&second)).fixed, 0, "{:?}", report(finished(&second)).failed);
+    let parked = Manifest::open_in(&snapshot.manifest_dir, &snapshot.export_id).unwrap();
+    let row = parked.item(ItemKind::ChatMedia, &media_id(3)).unwrap().expect("the vanished file's row is still enrolled");
+    assert_eq!(row.status, ItemStatus::SourceMissing, "the fixture never parked the row whose reset this test is about");
+    assert!(row.output_path.is_some(), "the park dropped the record, so the reset below would have nothing to clear");
+    drop(parked);
+
+    // The file comes back — which is what makes the enrollment reset it — and a newcomer sorting
+    // ahead of both arrives with it, through the same history rewrite the tests above do.
+    write_media(&part, 3);
+    write_media(&part, 1);
+    write_history(&part.join("json"), &[("friend-handle", &[(sent, "b~aB3xY90002"), (sent, "b~aB3xY90003"), (sent, "b~aB3xY90001")])]);
+
+    let third = collect(&inputs);
+    assert_eq!(report(finished(&third)).fixed, 2, "{:?}", report(finished(&third)).failed);
+    let after = planned(&third);
+    assert_eq!(after.rows.len(), 3, "the newcomer never became an item, so the names below prove nothing");
+    assert_eq!(
+        named(after, 1).as_deref(),
+        Some("20210304_143005_2.jpg"),
+        "the newcomer was held off by a record the enrollment had already cleared"
+    );
+    assert_eq!(
+        named(after, 3).as_deref(),
+        Some("20210304_143005_3.jpg"),
+        "the returning file was handed back a record its own return cleared"
+    );
 }
 
 /// **The privacy gate, at the boundary the screen reads from.** A conversation key is a friend's

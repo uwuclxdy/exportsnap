@@ -356,6 +356,14 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     // was written into rather than starting a second one for the same thread. One read serves both
     // layers: the same rows carry decision 52's per-item output paths, and the same ordering
     // argument applies to them one component down.
+    //
+    // **Both edges are held by a test on this leg, and by different ones**, which is what makes them
+    // separable rather than one claim. Each stays green under the other's mutation. Both live in
+    // `tests/chat_media_screen.rs`:
+    //   `a_returning_chat_file_has_its_record_cleared_before_the_seed_is_read`
+    //     reds if this read moves above the enrollment;
+    //   `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name`
+    //     reds if the resume sweep moves above this read.
     let recorded = chat_fix::RecordedDirs::read(&reconciliation, &manifest).map_err(RunError::Manifest)?;
     let plan = chat_fix::plan(&reconciliation, &inputs.out_root, inputs.overlay, &recorded);
     let counts = counts(&reconciliation, &plan, had_history);
