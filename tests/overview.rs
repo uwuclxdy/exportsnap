@@ -5,8 +5,9 @@
 //! against `docs/design.md`'s TUI screen map, not against this crate.
 //!
 //! The export trees below are written by the tests themselves out of the smallest json each parser
-//! accepts. `fixtures/` is gitignored so CI has none; the one test that reads it prints a notice
-//! and returns, exactly as `tests/export.rs` does.
+//! accepts. `fixtures/` is gitignored so CI has none; the one test that reads it goes through
+//! `common::fixtures`, which skips it on a box without the tree and fails it on a runner that set
+//! `EXPORTSNAP_REQUIRE_FIXTURES`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
@@ -22,6 +23,12 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::Modifier;
+
+/// The crate-level allow is scoped here rather than inside `common`, and only on the crates that
+/// need it: this one reads the fixture half and gates on no tool, so without it every tool-side
+/// function warns. See `tests/common/mod.rs` for what that placement keeps measuring.
+#[allow(dead_code, reason = "this crate reads the fixture tree and gates on no external tool")]
+mod common;
 
 /// A frame wide enough for both panels and tall enough for no compact banner, so the body starts
 /// at row 1 and the two panels are 50 cells each.
@@ -835,12 +842,12 @@ fn every_overview_state_survives_degenerate_sizes() {
 
 #[test]
 fn the_fixture_export_populates_every_summary_row() {
-    // `fixtures/` is gitignored, so CI never has it.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-    if !root.is_dir() {
-        println!("skipping: fixtures/ is absent (gitignored, so CI never has it)");
+    // `fixtures/` is gitignored, so CI never has it. Asked through the shared gate rather than by
+    // rebuilding the path here: this crate's copy of the check was invisible to every census taken
+    // by grepping `tests/export.rs`'s helper names, which is how it stayed unpinned longest.
+    let Some(root) = common::fixtures::root("the_fixture_export_populates_every_summary_row") else {
         return;
-    }
+    };
 
     let terminal = draw(Overview::load_with(&root, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();

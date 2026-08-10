@@ -25,9 +25,33 @@
 //! `ffmpeg` that runs is not an `ffmpeg` that can encode HEVC. Nothing in these crates decodes
 //! without also having built a fixture, so there is no decode-only variant; add one when a call
 //! site needs it rather than widening one that already means more.
+//!
+//! [`fixtures`] answers the same demanded-versus-absent question about the `fixtures/` TREE. Its
+//! own module because the two halves are read by disjoint sets of crates and each half is dead code
+//! in the other's, which the allow below is scoped against.
 
 use std::process::Command;
 use std::sync::OnceLock;
+
+/// The module-level allow is what keeps the three tool-gating crates measuring their own half.
+///
+/// **Measured under `RUSTFLAGS="--force-warn dead_code"`, which overrides every allow in the tree
+/// and so reports what each crate would warn with none of them:** `video`, `local_fix` and
+/// `chat_fix` reach every function out here and nothing under [`fixtures`], so they warn 6 times
+/// each — the whole fixture module — and zero on a function out here. The alternative placement is
+/// a crate-level allow on those three `mod common;` declarations, which would have taken that zero
+/// with it. `export`, `overview` and `fixture_gate` are the mirror image at 11 tool-side warnings
+/// each and carry that crate-level allow instead; `tool_gate` warns 11 with nothing allowed and 5
+/// with this one in place, which is the number its own allow is documented against.
+///
+/// **The cost, stated rather than glossed: an uncalled function under [`fixtures`] warns nowhere.**
+/// All six of its items are live in `export` and `overview` — those two reach the whole chain from
+/// `root` down — but both crates have to allow dead code crate-wide for the tool half anyway, so
+/// there is no crate left in which a new dead fixture helper would surface. With two halves and no
+/// crate reading both, one of them loses that signal whichever way the allows are placed; this
+/// keeps it on the larger half, the one three crates exercise in full.
+#[allow(dead_code, reason = "the crates that gate on a tool never read the fixture tree, and the reverse")]
+pub mod fixtures;
 
 /// A capability a gating call site depends on, named for exactly what its probe verifies.
 ///
@@ -42,9 +66,10 @@ pub enum Tool {
     Exiftool,
     /// `ffprobe` runs and answers `-version`: the independent container reader.
     ///
-    /// Answers to the ffmpeg variable rather than one of its own. `ffprobe` ships in the ffmpeg
-    /// distribution, and `docs/todo.md` already tells the future CI leg to export exactly two
-    /// variables — a third would be silently missing from every runner that followed it.
+    /// Answers to the ffmpeg variable rather than one of its own, and the reason is `ffprobe`
+    /// itself rather than any count of variables: it ships inside the ffmpeg distribution, so a
+    /// runner that satisfied `EXPORTSNAP_REQUIRE_FFMPEG` already has it, and a second variable would
+    /// be one more thing to forget for no coverage gained.
     Ffprobe,
     /// `ffmpeg` runs and carries the encoders every fixture builder in these crates asks for:
     /// `libx265` for the `hvc1` main and `aac` for its audio track.
@@ -79,6 +104,11 @@ impl Tool {
 
     /// Set this on a runner and this tool being unusable fails the run instead of skipping the
     /// checks that needed it.
+    ///
+    /// **These are not the only two.** [`fixtures::VARIABLE`] is the third and answers for the
+    /// `fixtures/` tree, so a CI leg exports every one of the three it can satisfy — a leg that
+    /// exports a subset leaves the rest of the gates disarmed and reads green over whatever they
+    /// were guarding, which is the defect this whole mechanism exists to remove.
     #[must_use]
     pub fn variable(self) -> &'static str {
         match self {

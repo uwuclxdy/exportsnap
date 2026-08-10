@@ -9,12 +9,18 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-/// The function-level dead-code allow lives on this one declaration rather than inside the module,
-/// because this is the only crate that needs it. Measured by removing it: this crate warns 5 times
-/// (`usable`, `probe`, `answers`, `reports_encoder`, `demanded` — it drives the decision half and
-/// never calls the probing half), while `video`, `local_fix` and `chat_fix` warn zero on functions.
-/// Blanket-allowing inside the module would have cost those three that coverage; the separate,
-/// narrower allow on `Tool` itself covers the one unused VARIANT `video` legitimately has.
+/// The function-level dead-code allow lives on this declaration rather than inside the module, so
+/// the crates that reach every tool-side function keep warning when one of them goes uncalled.
+/// Measured by removing it: this crate warns 5 times (`usable`, `probe`, `answers`,
+/// `reports_encoder`, `demanded` — it drives the decision half and never calls the probing half),
+/// while `video`, `local_fix` and `chat_fix` warn zero on functions. Blanket-allowing inside the
+/// module would have cost those three that coverage; the separate, narrower allow on `Tool` itself
+/// covers the one unused VARIANT `video` legitimately has.
+///
+/// `export`, `overview` and `fixture_gate` carry the same allow for the mirror-image reason since
+/// the fixture gate landed: they read `common::fixtures` and gate on no tool. The 5 above still
+/// holds because `common`'s own allow on `pub mod fixtures;` absorbs that half here; with every
+/// allow in the tree overridden (`RUSTFLAGS="--force-warn dead_code"`) this crate warns 11.
 #[allow(dead_code, reason = "this crate pins the decision half and never calls the probing half")]
 mod common;
 
@@ -89,9 +95,11 @@ fn a_demanded_tool_that_is_not_usable_fails_the_run_rather_than_skipping() {
 
 #[test]
 fn every_ffmpeg_capability_answers_to_one_variable_and_exiftool_to_its_own() {
-    // `ffprobe` ships in the ffmpeg distribution and gets no variable of its own: `docs/todo.md`
-    // tells the CI leg to export exactly these two, so a third would be silently absent on every
-    // runner set up from it.
+    // `ffprobe` ships in the ffmpeg distribution and gets no variable of its own: a runner that
+    // satisfied the ffmpeg variable already has it, so a second one would be one more thing to
+    // forget for no coverage gained. That is an argument about `ffprobe`, not about how many
+    // variables the crate has — `common::fixtures::VARIABLE` is a third, pinned in
+    // `tests/fixture_gate.rs`, and a CI leg exports every one of the three it can satisfy.
     assert_eq!(Tool::Ffprobe.variable(), "EXPORTSNAP_REQUIRE_FFMPEG");
     assert_eq!(Tool::FfmpegFixtures.variable(), "EXPORTSNAP_REQUIRE_FFMPEG");
     assert_eq!(Tool::FfmpegTranscode.variable(), "EXPORTSNAP_REQUIRE_FFMPEG");

@@ -10,8 +10,9 @@
 //! **Fixture arrays are truncated to their first 25 elements.** No count below is a real export
 //! total; the true lengths live in `fixtures/_redaction_report.json`.
 //!
-//! `fixtures/` is gitignored, so CI has none. Every test that reads it prints a notice and
-//! returns instead of failing.
+//! `fixtures/` is gitignored, so CI has none. Every test that reads it goes through
+//! `common::fixtures`, which skips it on a box without the tree and fails it on a runner that set
+//! `EXPORTSNAP_REQUIRE_FIXTURES`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
@@ -24,18 +25,23 @@ use exportsnap::export::model::{
 };
 use exportsnap::export::{ExportJson, LoadError, SCHEMA_FILES, schema};
 
-fn fixtures_root() -> Option<PathBuf> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-    dir.is_dir().then_some(dir)
-}
+/// The crate-level allow is scoped here rather than inside `common`, and only on the crates that
+/// need it: this one reads the fixture half and gates on no tool, so without it every tool-side
+/// function warns. See `tests/common/mod.rs` for what that placement keeps measuring.
+#[allow(dead_code, reason = "this crate reads the fixture tree and gates on no external tool")]
+mod common;
 
-/// `None` only when `fixtures/` itself is absent, which is the CI case and the one that skips.
+/// `None` only when `fixtures/` is absent AND no runner demanded it. An absent tree under
+/// `EXPORTSNAP_REQUIRE_FIXTURES` never reaches this body at all — `common::fixtures::root` panics
+/// before returning.
 ///
-/// A `fixtures/` that exists but does not hold exactly one `mydata~*/json` panics instead. Those
-/// are different situations and collapsing them is how ten tests quietly become no-ops after a
-/// regeneration lands a differently-shaped tree — green, locally, with nothing to notice.
-fn fixture_json_dir() -> Option<PathBuf> {
-    let root = fixtures_root()?;
+/// So three outcomes live here and they stay distinct: skip (absent, undemanded), gate failure
+/// (absent, demanded), and the `parts.len() == 1` panic below for a tree that is present in the
+/// wrong shape. Collapsing that last one into the first is how the nine tests behind
+/// `json_dir_or_skip!` quietly become no-ops after a regeneration lands a differently-shaped tree —
+/// green, locally, with nothing to notice.
+fn fixture_json_dir(test: &str) -> Option<PathBuf> {
+    let root = common::fixtures::root(test)?;
     let mut parts: Vec<PathBuf> = fs::read_dir(&root)
         .unwrap()
         .filter_map(|entry| {
@@ -55,15 +61,16 @@ fn fixture_json_dir() -> Option<PathBuf> {
     parts.pop().map(|part| part.join("json"))
 }
 
-/// Binds the fixture dir, or prints why the test did nothing and returns.
+/// Binds the fixture json dir, or returns after `common::fixtures` has recorded why.
+///
+/// Takes the test's own name because that is what a demanded-but-absent tree fails with, and
+/// nothing in a `macro_rules!` expansion can read the enclosing function's name. A rename that
+/// leaves the literal behind costs a wrong name in one failure message, not a wrong verdict.
 macro_rules! json_dir_or_skip {
-    () => {
-        match fixture_json_dir() {
+    ($test:literal) => {
+        match fixture_json_dir($test) {
             Some(dir) => dir,
-            None => {
-                println!("skipping: fixtures/ is absent (gitignored, so CI never has it)");
-                return;
-            }
+            None => return,
         }
     };
 }
@@ -750,8 +757,10 @@ fn a_value_the_model_cannot_validate_fails_the_load_and_names_the_field() {
 
 #[test]
 fn every_json_file_in_the_fixture_tree_parses_as_json() {
-    let Some(root) = fixtures_root() else {
-        println!("skipping: fixtures/ is absent (gitignored, so CI never has it)");
+    // The one test here that walks the whole tree rather than its `json/` dir, so it asks
+    // `common::fixtures` directly instead of through `json_dir_or_skip!`. Same gate either way —
+    // the hand-rolled `is_dir` check this used to carry was the second of the three spellings.
+    let Some(root) = common::fixtures::root("every_json_file_in_the_fixture_tree_parses_as_json") else {
         return;
     };
     let mut seen = Vec::new();
@@ -785,7 +794,7 @@ fn the_fixture_json_dir_holds_only_known_schema_files() {
     // (`docs/design.md`, n=2), so a fixture built from one export legitimately omits names
     // another export contributed to the union — the fixture on disk right now is the OLDER
     // export, so it holds no `in_app_reports.json` and that is expected, not a gap to fill.
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("the_fixture_json_dir_holds_only_known_schema_files");
     let mut names: Vec<String> =
         fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort(); // keeps a failure's `{name}` message deterministic across runs
@@ -797,7 +806,7 @@ fn the_fixture_json_dir_holds_only_known_schema_files() {
 
 #[test]
 fn loading_the_fixture_dir_fills_every_modelled_field() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("loading_the_fixture_dir_fills_every_modelled_field");
     let loaded = load_fixture(&dir);
     assert!(loaded.account.is_some());
     assert!(loaded.account_history.is_some());
@@ -824,7 +833,7 @@ fn loading_the_fixture_dir_fills_every_modelled_field() {
 
 #[test]
 fn account_carries_the_owner_the_devices_and_the_logins() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("account_carries_the_owner_the_devices_and_the_logins");
     let account = load_fixture(&dir).account.unwrap();
 
     assert_eq!(account.basics.username, Username::new("user_1"));
@@ -852,7 +861,7 @@ fn account_carries_the_owner_the_devices_and_the_logins() {
 
 #[test]
 fn user_profile_carries_the_engagement_counts_and_the_ad_id() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("user_profile_carries_the_engagement_counts_and_the_ad_id");
     let profile = load_fixture(&dir).user_profile.unwrap();
 
     assert_eq!(profile.created.unwrap().to_string(), "2016-09-29 09:22:31 UTC");
@@ -877,7 +886,7 @@ fn user_profile_carries_the_engagement_counts_and_the_ad_id() {
 
 #[test]
 fn friends_splits_into_its_eight_relationship_lists() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("friends_splits_into_its_eight_relationship_lists");
     let friends = load_fixture(&dir).friends.unwrap();
 
     // Truncated at 25 by the redactor; `_redaction_report.json` says the real list holds 100.
@@ -910,7 +919,7 @@ fn friends_splits_into_its_eight_relationship_lists() {
 
 #[test]
 fn memories_carry_a_date_a_coordinate_pair_and_two_urls() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("memories_carry_a_date_a_coordinate_pair_and_two_urls");
     let memories = load_fixture(&dir).memories.unwrap();
 
     assert_eq!(memories.saved_media.len(), 25);
@@ -938,7 +947,7 @@ fn memories_carry_a_date_a_coordinate_pair_and_two_urls() {
 
 #[test]
 fn chat_history_groups_messages_by_conversation() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("chat_history_groups_messages_by_conversation");
     let chat = load_fixture(&dir).chat_history.unwrap();
 
     assert_eq!(chat.conversations.len(), 72);
@@ -1001,7 +1010,7 @@ fn chat_history_groups_messages_by_conversation() {
 
 #[test]
 fn snap_history_shares_its_conversation_ids_with_chat_history() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("snap_history_shares_its_conversation_ids_with_chat_history");
     let loaded = load_fixture(&dir);
     let snaps = loaded.snap_history.unwrap();
     let chat = loaded.chat_history.unwrap();
@@ -1042,7 +1051,7 @@ fn tally<T: Ord>(values: impl Iterator<Item = T>) -> BTreeMap<T, usize> {
 
 #[test]
 fn the_thirteen_passthrough_files_land_with_their_fields_typed() {
-    let dir = json_dir_or_skip!();
+    let dir = json_dir_or_skip!("the_thirteen_passthrough_files_land_with_their_fields_typed");
     let loaded = load_fixture(&dir);
 
     let history = loaded.account_history.unwrap();
