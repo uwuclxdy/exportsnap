@@ -29,6 +29,12 @@
 //! [`super::chat_media::Join::NoToken`] because `chat_history.json` can name nothing but the plain
 //! `b` family, and a `NoToken` item is by definition one no message names.
 //!
+//! Decision 53, those copies keep the export's own filenames and take a `_2` where two of them fold
+//! onto one name in one subfolder. The claim is [`super::local_fix::Outputs`], the same set the
+//! merged file's own path comes out of, so every path this run writes is issued once. What that
+//! reservation is worth, and what it does not buy without a record to adopt from, is at
+//! [`super::local_fix::Originals`].
+//!
 //! # The overlay mode
 //!
 //! [`OverlayMode`] is decision 44b, and it is expressed entirely in the PLAN. `local_fix::fix`
@@ -69,9 +75,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::export::chat_media::{ChatMediaItem, MediaDate, Message, Reconciliation, Token};
-use crate::export::local_fix::{
-    self, Capture, DeferralReason, Deferred, Leg, Originals, Outputs, Plan, PlannedItem, RecordedOutputs, SourceMedia,
-};
+use crate::export::local_fix::{self, Capture, DeferralReason, Deferred, Leg, Outputs, Plan, PlannedItem, RecordedOutputs, SourceMedia};
 use crate::export::manifest::{ItemKind, Manifest, ManifestError};
 use crate::export::model::{Attribution, ConversationId};
 
@@ -740,8 +744,13 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
             // `media` ended up with, which is the whole difference between `originals` (kept, not
             // composited) and `merged` (composited, not kept). Only where the export shipped a
             // layer is there an un-merged version to lose.
+            //
+            // Decision 53: the two copy paths come out of the same claim set the output above did,
+            // so a second item whose export filename folds onto this one's takes a `_2` here rather
+            // than the same path. `media.main` and not `item.media.file.path`, so the file the fix
+            // step copies and the name this claims are one value.
             originals: match (mode.keeps_originals(), overlay) {
-                (true, Some(overlay)) => Some(Originals { dir: dir.join(ORIGINALS_DIR), overlay }),
+                (true, Some(overlay)) => outputs.kept(&dir.join(ORIGINALS_DIR), &media.main, overlay),
                 _ => None,
             },
             media,

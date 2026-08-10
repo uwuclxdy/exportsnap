@@ -514,12 +514,67 @@ pub struct PlannedItem {
 /// on [`PlannedItem::originals`] rather than an empty collection here, so "keep originals" and
 /// "there is an overlay to keep" cannot be recorded out of step — which is the agreement two
 /// independent `Option` fields used to rest on.
+///
+/// **Both copy paths are worked out at PLAN time, through the claim set every other output path in
+/// the run goes through** (decision 53, queue task 55). They used to be `<dir>` joined onto whatever
+/// [`Path::file_name`] answered at fix time — an `OsStr` join with no fold in it, so the defect had
+/// two arms and neither is simply "the copies collided". Two items whose export filenames were EQUAL
+/// took one path and the second `fs::copy` wrote over the first on every filesystem, silently, since
+/// nothing records or checksums a copy; that arm no walk can reach and
+/// [`super::chat_media::Discovery::from_files`] can. Two whose names differ only in ascii case took
+/// one path or two depending on **the destination filesystem, not the platform**: an export holding
+/// both spellings is itself proof its own mount does not fold, so the reachable shape is a
+/// case-sensitive source read onto a folding `--out` — an ext4 export onto an exFAT stick or a macOS
+/// share — where the second copy overwrote the first. The OUTPUTS were already safe across that
+/// split, [`claimed::ClaimedPaths`] having folded since decision 52; the copies were not, and that
+/// asymmetry is the walk-reachable half of what this closes. Decision 11 is cross-platform.
+///
+/// **The fold is ascii and the destinations that merge names are not, which leaves a residual rather
+/// than the hole it looks like.** Every part of a parsed basename that DEFINES an item is
+/// ascii-validated — `is_alphanumeric_run` gates the plain tail, the zip word and the zip hash, the
+/// day is digits, the token is one of four ascii words — and a MAIN's extension is ascii as well,
+/// since [`Leg::of`] admits only ascii spellings and an unmatched one is deferred rather than
+/// planned. So every difference two items can be told apart by is one an ascii fold already sees,
+/// and two files differing only in extension share an id and dedupe to one item before any of this.
+/// The OVERLAY's extension is the one part nothing validates: two items whose ids differ only in
+/// ascii case and whose overlay extensions differ by a Unicode-only equivalence — NFD against NFC —
+/// are held apart here and merged by APFS. Unobserved, it needs a non-ascii extension on an overlay,
+/// and closing it means normalizing the whole path in [`claimed::ClaimedPaths`], which is one ruling
+/// for the output layer and this one together rather than this layer's to make.
+///
+/// [`Outputs::kept`] is the crate's only site that mints one of these, which is what keeps a claimed
+/// main from travelling beside a derived overlay. **That is a convention and not a guarantee**: the
+/// fields are `pub` with no `#[non_exhaustive]`, so the counterexample compiles in crate and out and
+/// the compiler rejects nothing — the same reading [`kept_name`] states for its own arms. Left open
+/// deliberately, public fields being how [`super::chat_media::Discovery`] documents its way in and
+/// what [`PlannedItem::originals`] already exposes.
+///
+/// **There is no adoption half to pair with that reservation, and the condition it holds under is
+/// the whole of what makes it enough.** Nothing records a copy's path anywhere, so unlike
+/// [`PlannedItem::output`] a copy cannot be handed back the path an earlier run gave it. What bounds
+/// that is the name: an un-collided copy's is `output_name(stem, extension, 0)` over the source
+/// basename alone, which no re-plan can move, so the only copy that can take a different ordinal is
+/// one inside a real collision class. Decision 52 needed its adoption half because a derived
+/// `YYYYMMDD_HHMMSS` stem made every item's name a function of its neighbours; these names are not.
+///
+/// **Inside a collision class the residual is real, and it is not the harmless swap an earlier
+/// draft of this paragraph called it.** It needs the survivor owed work again — the resume sweep
+/// demoting it after the user deleted its output, since [`run`] skips a `Done` row — and then the
+/// departed item's ordinal is free and the survivor takes it. Three shapes, and only the first
+/// loses nothing: on a destination that does not fold, the survivor's old suffixed copy is left
+/// behind as a stale file nothing revisits or reports; on one that DOES fold, the survivor's new
+/// un-suffixed name is the departed item's copy and overwrites it; and on the exact-name arm it
+/// overwrites on every destination. That is decision 52's own defect one layer down, un-adopted, and
+/// it is the accepted price of a layer with no record to adopt from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Originals {
-    /// The directory the copies land in.
-    pub dir: PathBuf,
-    /// The caption layer, under the name the export gave it.
+    /// The caption layer's own file. The one SOURCE here, and the only one not already on
+    /// [`SourceMedia`] — see this type's first paragraph for why it is read back off here.
     pub overlay: PathBuf,
+    /// Where [`SourceMedia::main`]'s verbatim copy lands.
+    pub main_copy: PathBuf,
+    /// Where [`Self::overlay`]'s verbatim copy lands.
+    pub overlay_copy: PathBuf,
 }
 
 /// Why a paired memory is not in [`Plan::items`].
@@ -1005,8 +1060,13 @@ mod claimed {
     }
 }
 
-/// One output path per item: the one the manifest already records for it, or the first name in this
-/// plan nothing has claimed.
+/// Every path one run writes: an item's output, and — since decision 53 — the [`Originals`] copies
+/// kept beside it.
+///
+/// An output is the one the manifest already records for that item, or the first name in this plan
+/// nothing has claimed. A copy is only ever the second, because nothing records a copy; the two
+/// enter the same set all the same, so no path this run writes can be handed out twice whichever
+/// question minted it.
 ///
 /// Both planners drive this. They disagree about which directory an item lands in and about how the
 /// stem is worked out, and not at all about what a collision is or how a broken one is spelled — the
@@ -1070,8 +1130,8 @@ impl Outputs {
     /// memory this run dates into another month — is left claimed and not returned, so the item
     /// derives a fresh name where it now belongs. Two things would break without it: decision 44a's
     /// grouping, since one conversation's items would sit in two folders; and decision 46c, since
-    /// [`Originals::dir`] is built from `dir` while the merged file would have come back from
-    /// somewhere else, splitting a pair the mode exists to keep together.
+    /// the [`Originals`] copies are claimed under `dir` while the merged file would have come back
+    /// from somewhere else, splitting a pair the mode exists to keep together.
     ///
     /// The parent equality is also what makes the returned path containment-safe on its own: `dir`
     /// is the planner's own join onto the output root, so a record equal to `dir` plus one component
@@ -1080,11 +1140,52 @@ impl Outputs {
         if let Some(output) = self.assigned.get(source_id).filter(|output| output.parent() == Some(dir)) {
             return output.clone();
         }
+        self.free(dir, stem, extension)
+    }
+
+    /// Both [`Originals`] copies of one item, claimed in one call.
+    ///
+    /// **One call rather than two, so THIS CALL cannot build the pair half from this set and half
+    /// from a filename**, which is the shape decision 53 exists to close and the shape a guard whose
+    /// two halves come from different sets fails in. Being the only minting site is what extends that
+    /// to the type, and [`Originals`] says why that is a convention rather than a guarantee. `main`
+    /// and `overlay` are the export's own files; what comes back is where each one's copy lands
+    /// under `dir`.
+    ///
+    /// **Derives and never adopts**, which is not a shortcut: no manifest column records a copy, so
+    /// there is nothing to adopt and nothing to seed a reservation with either. [`Originals`] states
+    /// what that costs and the condition that bounds it.
+    ///
+    /// **Adoption cannot reach a copy's ordinal either, and that is what makes the plan-time claim
+    /// worth anything.** [`Self::adopt`] is manifest-dependent, so a copy sharing a `next` key with
+    /// an output would inherit exactly the run-to-run movement this layer is being kept out of. The
+    /// two spaces are disjoint by construction: an output is `<dir>/<name>` and a copy is
+    /// `<dir>/originals/<name>`, so their folded keys differ in a whole path component, and `adopt`
+    /// only ever claims paths a row RECORDS, which is never a copy.
+    ///
+    /// `None` when either name cannot carry an ordinal — see [`kept_name`] — and both or neither,
+    /// because what decision 46c keeps is the pair. Not reachable from a discovered file.
+    pub(crate) fn kept(&mut self, dir: &Path, main: &Path, overlay: PathBuf) -> Option<Originals> {
+        // Both names resolved before either is claimed, so a refusal cannot leave a claim behind for
+        // a copy that is not going to be written.
+        let (main_stem, main_extension) = kept_name(main)?;
+        let (overlay_stem, overlay_extension) = kept_name(&overlay)?;
+        let main_copy = self.free(dir, main_stem, main_extension);
+        let overlay_copy = self.free(dir, overlay_stem, overlay_extension);
+        Some(Originals { overlay, main_copy, overlay_copy })
+    }
+
+    /// The first name in `dir` nothing has claimed, starting at `<stem>.<extension>`, claimed on the
+    /// way out.
+    ///
+    /// The one ordinal walk, driven by every question this type answers: an output name and a kept
+    /// copy's name differ in where the stem comes from and not at all in how a collision is broken.
+    fn free(&mut self, dir: &Path, stem: &str, extension: &str) -> PathBuf {
         let folded = dir.join(output_name(stem, extension, 0)).as_os_str().to_ascii_lowercase();
         let mut ordinal = self.next.get(&folded).copied().unwrap_or_default();
         // Terminates: every iteration raises the ordinal, the names it spells are all distinct, and
         // `used` is finite, so a free one is reached in at most `used.len() + 1` steps.
-        let output = loop {
+        let path = loop {
             let candidate = dir.join(output_name(stem, extension, ordinal));
             ordinal += 1;
             if self.used.claim(&candidate) {
@@ -1092,8 +1193,27 @@ impl Outputs {
             }
         };
         self.next.insert(folded, ordinal);
-        output
+        path
     }
+}
+
+/// The `(stem, extension)` a kept copy's name is claimed under: the source's own file name, split on
+/// its last dot so [`output_name`] spells a collision the way it spells one for an output.
+///
+/// `None` for a name no ordinal can be written into — no file name at all, a name that is not UTF-8,
+/// or one carrying no dot. **No discovered file is one**: [`super::chat_media::ChatMediaFile::parse`]
+/// answers `None` for each of the three and is the only producer of the paths a chat-media plan
+/// carries, which is the leg that mints every [`Originals`]. That is a convention and not a
+/// guarantee — this builds, so the compiler rejects no counterexample, and [`Originals`] holds plain
+/// [`PathBuf`]s that a library caller can fill by hand — so the arm is answered rather than asserted.
+/// Answering it with `None` keeps NOTHING for that item, and **that set is wider than the guard it
+/// replaces**. The fix step tested [`Path::file_name`] alone and joined the `OsStr` it got back, so
+/// it skipped only the first of the three arms and copied a non-UTF-8 or dotless name verbatim; both
+/// of those now keep nothing at all, and a [`super::chat_media::Discovery::from_files`] caller is
+/// who would meet the widening. Deliberate: the pair is what decision 46c keeps, and half a pair
+/// under a name nothing chose is not a better outcome than none.
+fn kept_name(source: &Path) -> Option<(&str, &str)> {
+    source.file_name()?.to_str()?.rsplit_once('.')
 }
 
 /// Whether `output` is a path under `root` that this run could have written itself.
@@ -1361,11 +1481,19 @@ pub fn fix(item: &PlannedItem, video: &VideoOptions) -> Result<Vec<Notice>, FixE
 /// Copies the export's own files beside the output, decision 44b's `both` and `originals` overlay
 /// modes.
 ///
-/// Verbatim, under the names the export gave them, which is the point of keeping them at all: the
+/// Verbatim, under the names the export gave them — with the ordinal suffix two colliding names take,
+/// stated here rather than three paragraphs down, since a reader meeting the unqualified rule first
+/// takes it as current. Keeping the export's names is the point of keeping the files at all: the
 /// output is the repaired file and these are the bytes it was made from, so putting them under the
 /// output's `YYYYMMDD_HHMMSS` shape would leave the run with two files claiming to be the same
 /// thing. They get the output's modification time so a browser sorts the set together, and nothing
 /// else about them is touched — no composite, no stamp.
+///
+/// **Where each copy lands was decided at plan time and this step spells nothing**, decision 53:
+/// [`Outputs::kept`] claimed both paths in the set that already holds every output, so two items
+/// whose export filenames collide land under one directory as two files. This function joining a
+/// name off the source is what used to decide it, and [`Originals`] states which filesystem that
+/// lost a file on and which arm no walk can reach.
 ///
 /// A no-op unless the item carries an [`Originals`], which a planner mints only where a composite
 /// had two files to consume: with no overlay there is no un-merged version to lose. Decision 47
@@ -1375,17 +1503,13 @@ pub fn fix(item: &PlannedItem, video: &VideoOptions) -> Result<Vec<Notice>, FixE
 /// **This reads [`Originals::overlay`] and never [`SourceMedia::overlay`]**, which is what lets the
 /// `originals` mode hand the fix pass a main alone while still keeping the pair.
 fn keep_originals(item: &PlannedItem) -> Result<(), FixError> {
-    let Some(Originals { dir, overlay }) = &item.originals else {
+    let Some(Originals { overlay, main_copy, overlay_copy }) = &item.originals else {
         return Ok(());
     };
-    fs::create_dir_all(dir).map_err(|source| FixError::Create { path: dir.clone(), source })?;
-    for source in [&item.media.main, overlay] {
-        // A discovered file always has a name; a source that somehow does not is skipped rather
-        // than joined onto the directory itself, which would overwrite the directory's own path.
-        let Some(name) = source.file_name() else { continue };
-        let copy = dir.join(name);
-        fs::copy(source, &copy).map_err(|error| FixError::Copy { from: source.clone(), to: copy.clone(), source: error })?;
-        set_modified(&copy, item.capture.instant()).map_err(|source| FixError::Touch { path: copy, source })?;
+    for (source, copy) in [(&item.media.main, main_copy), (overlay, overlay_copy)] {
+        make_parent(copy)?;
+        fs::copy(source, copy).map_err(|error| FixError::Copy { from: source.clone(), to: copy.clone(), source: error })?;
+        set_modified(copy, item.capture.instant()).map_err(|source| FixError::Touch { path: copy.clone(), source })?;
     }
     Ok(())
 }
@@ -1514,8 +1638,12 @@ fn fix_video(item: &PlannedItem, options: &VideoOptions) -> Result<Vec<Notice>, 
     Ok(notices)
 }
 
-/// Makes the year and month directories an output lands in. Idempotent, so the video leg calling it
-/// twice — once for the scratch file, once for the real write — costs a stat.
+/// Makes the directories a written file lands in. Idempotent, and two callers rely on that: the
+/// video leg calls it for the scratch file and again for the real write, and [`keep_originals`]
+/// calls it once per copy for one `originals/` directory both copies share. Each repeat costs a stat.
+///
+/// Not only the year and month, since decision 53: an `originals/` subfolder is neither an output's
+/// directory nor a dated one, and this is what makes it without a second spelling of `create_dir_all`.
 fn make_parent(output: &Path) -> Result<(), FixError> {
     match output.parent() {
         Some(parent) => fs::create_dir_all(parent).map_err(|source| FixError::Create { path: parent.to_path_buf(), source }),

@@ -34,10 +34,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::Tool;
 use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs, dir_name};
-use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Reconciliation, Token, discover, reconcile};
+use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Family, Reconciliation, Token, discover, reconcile};
 use exportsnap::export::exif::{Jpeg, Stamp};
 use exportsnap::export::local_fix::{self, DeferralReason, FixReport, Notice, Plan, RecordedOutputs, TimeSource, VideoOptions};
 use exportsnap::export::manifest::{Checksum, DemotionReason, ExportId, Item, ItemKind, ItemStatus, Manifest};
+use exportsnap::export::memories::Day;
 use exportsnap::export::model::ChatHistory;
 use exportsnap::export::schema;
 use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
@@ -168,12 +169,19 @@ fn plain(root: &Path, token: Token, seed: u32) -> String {
 /// asks. `shade` is that dimension and the test guards it rather than assuming it.
 fn plain_shaded(root: &Path, token: Token, seed: u32, shade: u8) -> String {
     let stem = format!("{}~{}", token.as_word(), id(seed));
+    paint_shaded_jpeg(&chat_media_dir(root).join(format!("{DAY}_{stem}.jpg")), shade);
+    stem
+}
+
+/// [`paint_jpeg`] with subpixel 0 held at `shade` instead of varying, which is the dimension
+/// [`plain_shaded`] documents: two files painted at different shades differ in their bytes, so a copy
+/// of one can be told from a copy of the other.
+fn paint_shaded_jpeg(path: &Path, shade: u8) {
     let mut pixels = RgbImage::new(WIDTH, HEIGHT);
     for (x, y, pixel) in pixels.enumerate_pixels_mut() {
         *pixel = Rgb([shade, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]);
     }
-    pixels.save_with_format(chat_media_dir(root).join(format!("{DAY}_{stem}.jpg")), ImageFormat::Jpeg).unwrap();
-    stem
+    pixels.save_with_format(path, ImageFormat::Jpeg).unwrap();
 }
 
 /// A lone plain-family `overlay~*.png`, which is its own item with no overlay of its own.
@@ -323,11 +331,17 @@ impl Workspace {
     /// [`Self::run_in`] under a named set of video options, for the one test whose subject is what
     /// the video leg does with a mode. Every other caller takes [`copying`], which needs no tool.
     fn run_with(&self, history: &ChatHistory, mode: OverlayMode, video: &VideoOptions) -> Run {
-        let reconciliation = reconcile(history, discover(self.source()).unwrap());
+        self.run_over(&reconcile(history, discover(self.source()).unwrap()), mode, video)
+    }
+
+    /// [`Self::run_with`] over a reconciliation the caller built rather than one walked out of the
+    /// source, for the decision 53 fixtures whose file list no walk can produce. The four steps and
+    /// their order are [`Self::run_in`]'s, stated there.
+    fn run_over(&self, reconciliation: &Reconciliation, mode: OverlayMode, video: &VideoOptions) -> Run {
         let mut manifest = self.manifest();
         reconciliation.enroll(&mut manifest).unwrap();
-        let recorded = RecordedDirs::read(&reconciliation, &manifest).unwrap();
-        let plan = chat_fix::plan(&reconciliation, self.out(), mode, &recorded);
+        let recorded = RecordedDirs::read(reconciliation, &manifest).unwrap();
+        let plan = chat_fix::plan(reconciliation, self.out(), mode, &recorded);
         let report = local_fix::run(&plan, &mut manifest, 3, video).unwrap();
         Run { plan, manifest, report }
     }
@@ -568,6 +582,206 @@ fn a_composited_pair_keeps_both_originals_beside_the_merged_file() {
     let merged = image::open(work.out().join("chat/_no-conversation/2021/03/20210304_000000.jpg")).unwrap().to_rgb8();
     assert!(merged.get_pixel(4, 4).0[0] > 200, "the left half is the overlay's red: {:?}", merged.get_pixel(4, 4));
     assert_shows_main_through(&merged, "the transparent half is the main showing through");
+}
+
+// ---- decision 53: the kept copies go through the claim set too ----
+
+/// A zip pair on disk in a `chat_media` dir of its own, under filenames and an id the caller picks
+/// apart from each other.
+///
+/// **Synthetic by construction, and it does not reproduce an export shape.**
+/// [`ChatMediaFile::parse`] derives an item's id FROM its filename, so two files sharing a basename
+/// parse to one id and one role and `Discovery::from_walk` keeps the first while reporting the rest
+/// as duplicates: no walk of any export can hand a plan two items whose kept filenames collide. The
+/// collision is reachable through the struct literal below — public fields, which [`Discovery`]
+/// documents as the way in for a caller that already knows the answers — and there only. On the
+/// observed export the question cannot arise at all, its 9465 basenames being distinct across all
+/// three `chat_media` dirs.
+///
+/// The id is the ONE thing here a parse would have answered differently. The day, the family, the
+/// roles and the extensions are all read off the names the way a parsed file's would be, so nothing
+/// downstream of the plan is looking at a shape it could not otherwise meet.
+fn colliding_pair(chat_media: &Path, id: &str, main: &str, overlay: &str, shade: u8) -> Vec<ChatMediaFile> {
+    fs::create_dir_all(chat_media).unwrap();
+    paint_shaded_jpeg(&chat_media.join(main), shade);
+    paint_split_png(&chat_media.join(overlay), Rgba([shade, 0, 255, 255]));
+
+    let (mid, hash) = id.strip_prefix(&format!("{DAY}_")).unwrap().split_once(".zip.").unwrap();
+    let file = |name: &str, token: Token, extension: &str| ChatMediaFile {
+        path: chat_media.join(name),
+        day: Day::parse(DAY).unwrap(),
+        token,
+        family: Family::Zip { mid: mid.to_owned(), hash: hash.to_owned() },
+        id: id.to_owned(),
+        extension: extension.to_owned(),
+    };
+    vec![file(main, Token::Media, "jpg"), file(overlay, Token::Overlay, "png")]
+}
+
+/// The `<day>_<mid>.zip.<hash>` id a zip pair shares, and the two filenames a parse would spell it
+/// out of.
+fn zip_id(seed: u32) -> String {
+    format!("{DAY}_{ZIP_WORD}-{seed:07}.zip.a1b2c3d")
+}
+
+fn zip_main_name(seed: u32) -> String {
+    format!("{DAY}_media~{ZIP_WORD}-{seed:07}.zip.a1b2c3d.jpg")
+}
+
+fn zip_overlay_name(seed: u32) -> String {
+    format!("{DAY}_overlay~{ZIP_WORD}-{seed:07}.zip.a1b2c3d.png")
+}
+
+/// [`zip_pair`] under a mid the caller spells and with bytes that tell it from its neighbour, for the
+/// one fixture below whose two pairs differ in the CASE of that mid alone. Returns the shared id.
+fn zip_pair_shaded(root: &Path, mid: &str, shade: u8) -> String {
+    let dir = chat_media_dir(root);
+    paint_shaded_jpeg(&dir.join(format!("{DAY}_media~{mid}.zip.a1b2c3d.jpg")), shade);
+    paint_split_png(&dir.join(format!("{DAY}_overlay~{mid}.zip.a1b2c3d.png")), Rgba([shade, 0, 255, 255]));
+    format!("{DAY}_{mid}.zip.a1b2c3d")
+}
+
+/// Every kept copy holds the bytes of the file it was made from.
+///
+/// **The half that makes the file COUNT above worth anything.** Two items landing on one copy path
+/// leaves one file holding one item's bytes, and an assertion that only counted names would read the
+/// same on a directory holding two copies of one source. Read off each item's own plan entry rather
+/// than off a path spelled here, so a mutation moving where a copy lands cannot move the assertion
+/// with it.
+fn assert_kept_bytes(plan: &Plan) {
+    for item in &plan.items {
+        let kept = item.originals.as_ref().expect("`both` keeps every pair the export shipped");
+        assert_eq!(fs::read(&kept.main_copy).unwrap(), fs::read(&item.media.main).unwrap(), "{:?}", kept.main_copy);
+        assert_eq!(fs::read(&kept.overlay_copy).unwrap(), fs::read(&kept.overlay).unwrap(), "{:?}", kept.overlay_copy);
+    }
+}
+
+/// Two items whose MAIN filenames collide. See [`colliding_pair`] for what the fixture is and is not.
+#[test]
+fn two_items_whose_main_filenames_collide_keep_both_of_them() {
+    let work = Workspace::new();
+    // The same main name in two `chat_media` dirs, which is the only place one export could hold it
+    // twice, and an overlay each that does not collide with anything.
+    let mut files = colliding_pair(&work.source().join("first/chat_media"), &zip_id(4), &zip_main_name(4), &zip_overlay_name(4), 10);
+    files.extend(colliding_pair(&work.source().join("second/chat_media"), &zip_id(5), &zip_main_name(4), &zip_overlay_name(5), 200));
+    let reconciliation = reconcile(&no_history(), Discovery::from_files(files, Vec::new()));
+
+    let run = work.run_over(&reconciliation, OverlayMode::Both, &copying());
+    assert_eq!(run.plan.items.len(), 2, "the two pairs are two items — the pre-condition everything below rests on");
+    assert_eq!(run.report.fixed, 2, "both were written: {:?}", run.report.failed);
+
+    // Both mains want `originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d.jpg`. The claim set
+    // hands the second a `_2` at PLAN time, so the subfolder holds four files rather than three.
+    let kept: Vec<String> = tree(&work.out()).into_iter().filter(|path| path.contains("/originals/")).collect();
+    assert_eq!(
+        kept,
+        [
+            "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d.jpg",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d_2.jpg",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000004.zip.a1b2c3d.png",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000005.zip.a1b2c3d.png",
+        ]
+    );
+
+    // Guarded rather than assumed: painted at one shade the two mains would be byte-identical, and
+    // then one file overwriting the other would satisfy every comparison in `assert_kept_bytes`.
+    let mains: BTreeSet<Vec<u8>> = run.plan.items.iter().map(|item| fs::read(&item.media.main).unwrap()).collect();
+    assert_eq!(mains.len(), 2, "the fixture's two mains have to differ for the byte check below to discriminate");
+    assert_kept_bytes(&run.plan);
+}
+
+/// The overlay half of the pair above, and it is a separate test rather than a second assertion:
+/// [`local_fix::Outputs::kept`] claims two paths, and one test can only red for one of them.
+#[test]
+fn two_items_whose_overlay_filenames_collide_keep_both_of_them() {
+    let work = Workspace::new();
+    let mut files = colliding_pair(&work.source().join("first/chat_media"), &zip_id(4), &zip_main_name(4), &zip_overlay_name(4), 10);
+    files.extend(colliding_pair(&work.source().join("second/chat_media"), &zip_id(5), &zip_main_name(5), &zip_overlay_name(4), 200));
+    let reconciliation = reconcile(&no_history(), Discovery::from_files(files, Vec::new()));
+
+    let run = work.run_over(&reconciliation, OverlayMode::Both, &copying());
+    assert_eq!(run.plan.items.len(), 2, "the two pairs are two items — the pre-condition everything below rests on");
+    assert_eq!(run.report.fixed, 2, "both were written: {:?}", run.report.failed);
+
+    let kept: Vec<String> = tree(&work.out()).into_iter().filter(|path| path.contains("/originals/")).collect();
+    assert_eq!(
+        kept,
+        [
+            "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d.jpg",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000005.zip.a1b2c3d.jpg",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000004.zip.a1b2c3d.png",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000004.zip.a1b2c3d_2.png",
+        ]
+    );
+
+    let overlays: BTreeSet<Vec<u8>> =
+        run.plan.items.iter().map(|item| fs::read(&item.originals.as_ref().unwrap().overlay).unwrap()).collect();
+    assert_eq!(overlays.len(), 2, "the fixture's two overlays have to differ for the byte check below to discriminate");
+    assert_kept_bytes(&run.plan);
+}
+
+/// The same collision reached through the WALK rather than through a struct literal, which is the
+/// whole reason it is here beside the two above.
+///
+/// **They are pinned on a fixture the production path cannot produce and this one is not**, which is
+/// a listed way for a test to read as discriminating while every reachable input leaves it
+/// equivalent. `ChatMediaFile::parse` makes a file's id a function of its name, so the one collision
+/// it admits is a pair of names that fold onto one string without being equal: two ids, two items,
+/// and two files or one depending on the DESTINATION filesystem — an export holding both spellings
+/// proves its own mount does not fold, so what this stands in for is that export read onto a folding
+/// `--out`. The claim set folds ascii case for exactly that reason, so the second copy is suffixed
+/// here too, and decision 11 is why it has to be.
+///
+/// Unobserved rather than impossible: the observed export spells one 8-character word across all 928
+/// zip filenames. This does not claim to reproduce an export shape either — it claims the walk can
+/// build it.
+///
+/// One test for both copies, deliberately: the mid is in both filenames, so both claims move
+/// together here and neither can be pinned apart from the other. The two above are what separate
+/// them.
+///
+/// **The case answer is doubly held and no ONE-line mutation can red this, so nobody re-runs either
+/// as a coverage gap.** `Outputs` folds twice: `next`'s hint key and `ClaimedPaths`' own set.
+/// Dropping the SET's fold is a real gap wherever nothing else covers it, and here it is already
+/// killed by `local_fix::tests::a_recorded_path_differing_only_in_case_still_reserves_its_file`.
+/// Dropping the HINT's fold is **an equivalent mutant on every input, killable by no test that could
+/// ever be written**, and that is a property of `free` rather than of this fixture: `next` is read
+/// only to choose where the loop STARTS, the loop exits on `used.claim` alone, and the value stored
+/// back is the winner's ordinal plus one — every ordinal below it having failed `claim` at that
+/// moment, and a claim never being released. So the hint is always a valid lower bound on the first
+/// free ordinal; splitting its key space can only lower one, and a lower valid bound reaches the same
+/// name after more probes. It changes the probe count and never a returned path. Only dropping both
+/// reds this test, and then nothing but this and the unit test named above.
+#[test]
+fn two_items_whose_filenames_differ_only_in_case_keep_both_of_them() {
+    let work = Workspace::new();
+    zip_pair_shaded(&work.source(), &format!("{ZIP_WORD}-0000004"), 10);
+    zip_pair_shaded(&work.source(), &format!("{}-0000004", ZIP_WORD.to_uppercase()), 200);
+
+    let run = work.run(&no_history());
+    assert_eq!(run.plan.items.len(), 2, "two spellings of one mid are two ids and two items");
+    assert_eq!(run.report.fixed, 2, "both were written: {:?}", run.report.failed);
+
+    // The uppercase mid sorts first, so it takes the plain names and the lowercase pair is what the
+    // fold pushes onto a suffix.
+    let kept: Vec<String> = tree(&work.out()).into_iter().filter(|path| path.contains("/originals/")).collect();
+    assert_eq!(
+        kept,
+        [
+            "chat/_no-conversation/2021/03/originals/2021-03-04_media~VANTSNAP-0000004.zip.a1b2c3d.jpg",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_media~vantsnap-0000004.zip.a1b2c3d_2.jpg",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~VANTSNAP-0000004.zip.a1b2c3d.png",
+            "chat/_no-conversation/2021/03/originals/2021-03-04_overlay~vantsnap-0000004.zip.a1b2c3d_2.png",
+        ]
+    );
+
+    // The same guard the two tests above carry, for the same reason: the shades are the only thing
+    // making the two mains different files, and equalized they would leave the byte half of
+    // `assert_kept_bytes` unable to tell "each copy holds its own source" from "one source at two
+    // names" while every name above still checked out.
+    let mains: BTreeSet<Vec<u8>> = run.plan.items.iter().map(|item| fs::read(&item.media.main).unwrap()).collect();
+    assert_eq!(mains.len(), 2, "the fixture's two mains have to differ for the byte check below to discriminate");
+    assert_kept_bytes(&run.plan);
 }
 
 // ---- decision 44b: the three overlay modes ----
