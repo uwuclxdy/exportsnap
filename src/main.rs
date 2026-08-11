@@ -1,10 +1,11 @@
 //! Entry point: theme argument, tier detection, terminal bootstrap and teardown.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use exportsnap::app::App;
 use exportsnap::tui::theme::{self, Tier};
 
@@ -22,7 +23,7 @@ pub const VERSION_TEXT: &str = concat!(
 );
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = utf8_args(std::env::args_os().skip(1))?;
 
     // `--version` wins over every other flag and prints before the terminal is
     // taken over, so it works headless, piped, and in scripts. A reader leaving
@@ -95,6 +96,32 @@ fn main() -> Result<()> {
     ratatui::restore();
 
     result.context("the terminal ui stopped on an error")
+}
+
+/// Reads argv as text, naming the argument the crate cannot represent instead of aborting on it
+/// (decision 56a). `std::env::args` panics on the first argument that is not valid UTF-8, which is
+/// exit 101 and a bug's failure shape for what is plain bad input — and a caller building
+/// `--source=<dir>` out of a filesystem walk can hand it bytes no unix filesystem forbids.
+///
+/// **The argument is REFUSED rather than honoured.** Carrying the bytes down to `--source` would
+/// mean `OsStr::as_encoded_bytes` plus the reconstruction back to an `OsStr`, which is `unsafe` and
+/// this crate forbids `unsafe`. Collecting here keeps the five parsers on `String` and moves one
+/// call site.
+///
+/// The lossy spelling is printed through `Debug` for the reason
+/// [`exportsnap::app::App::source_report`] quotes its paths: an argument is unvalidated bytes
+/// reaching a stream, and the escapes keep a control character in one from acting on the terminal
+/// it lands in. Lossless it is not — the invalid bytes are already `U+FFFD` by then, which is why
+/// the message says what it says rather than offering to echo the original.
+fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>> {
+    args.into_iter()
+        .map(|arg| {
+            arg.into_string().map_err(|arg| {
+                let lossy = arg.to_string_lossy();
+                anyhow!("{lossy:?}: not valid utf-8; exportsnap reads every argument as text, so pass a utf-8 spelling of it")
+            })
+        })
+        .collect()
 }
 
 /// Hand-parses `--theme=full` / `--theme=compatible`, last one wins. A real CLI with
@@ -219,6 +246,31 @@ mod tests {
 
     fn parse_print_source(args: &[&str]) -> Result<bool> {
         wants_print_source_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    #[test]
+    fn argv_reaches_the_parsers_as_text() {
+        let args = utf8_args(["--theme=full", "--source=/tmp/export"].map(OsString::from)).unwrap();
+        assert_eq!(args, ["--theme=full", "--source=/tmp/export"]);
+        assert!(utf8_args([]).unwrap().is_empty());
+    }
+
+    /// Unix only, and the gate is the FIXTURE rather than the assertion, the same way
+    /// `tests/print_source.rs`'s hostile path is: `OsString::from_vec` is `std::os::unix` and a
+    /// lone `0xff` is a legal byte in a unix filename. The Windows analogue is an unpaired
+    /// surrogate through `OsStringExt::from_wide`, which is a different fixture, not a different
+    /// assertion.
+    #[cfg(unix)]
+    #[test]
+    fn an_argument_that_is_not_utf8_is_a_hard_error_naming_it() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let bad = OsString::from_vec(b"--source=/tmp/\xff".to_vec());
+        let error = utf8_args([bad]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "\"--source=/tmp/\u{fffd}\": not valid utf-8; exportsnap reads every argument as text, so pass a utf-8 spelling of it"
+        );
     }
 
     #[test]
