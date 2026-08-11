@@ -243,14 +243,13 @@ class TestStructure(RedactorCase):
         self.assertIn(False, self.out_json()["flags"])
 
     def test_plain_int_keeps_digit_count_and_sign(self):
-        self.write_json("data.json", {"a": 4211, "b": -17, "c": 0})
+        self.write_json("data.json", {"a": 4211, "b": -17})
         self.run_tool()
         out = self.out_json()
         self.assertEqual(len(str(out["a"])), 4)
         self.assertNotEqual(out["a"], 4211)
         self.assertGreaterEqual(out["b"], -99)
         self.assertLessEqual(out["b"], -10)
-        self.assertEqual(len(str(abs(out["c"]))), 1)
 
 
 class TestFormatPreserving(RedactorCase):
@@ -417,6 +416,19 @@ class TestFormatPreserving(RedactorCase):
 
     def test_epoch_millis_shift_by_exactly_the_offset(self):
         self.assertEqual(self.redact_one(1610742374000), 1610742374000 - 400 * 86400 * 10**3)
+
+    def test_a_zero_epoch_survives_the_round_trip_as_a_zero(self):
+        """A parser that spells absence as 0 gets no fixture for that path at
+        all unless the sentinel comes back a 0: a synthesized single digit reads
+        as a real instant instead."""
+        self.assertEqual(self.redact_one(0, "Created(microseconds)"), 0)
+        self.assertEqual(self.report()["totals"]["value_classes"]["zero (kept)"], 1)
+
+    def test_a_zero_under_a_join_key_still_takes_the_join_path(self):
+        self.redact_one(0, "Message ID")
+        classes = self.report()["totals"]["value_classes"]
+        self.assertEqual(classes.get("join int"), 1)
+        self.assertNotIn("zero (kept)", classes)
 
     def test_digit_string_epoch_shifts_and_stays_a_string(self):
         self.assertEqual(self.redact_one("1610742374"), str(1610742374 - 400 * 86400))
@@ -724,6 +736,14 @@ class TestSelfCheck(RedactorCase):
 
     def test_a_generated_number_passes(self):
         self.assertEqual(self.check({"a.json": json.dumps({"n": 5551234})}, numbers={5551234}), [])
+
+    def test_a_kept_zero_needs_no_accounting(self):
+        self.assertEqual(self.check({"a.json": json.dumps({"n": 0})}), [])
+
+    def test_a_float_zero_is_not_covered_by_the_kept_zero_exemption(self):
+        failures = self.check({"a.json": json.dumps({"n": 0.0})})
+        self.assertEqual(len(failures), 1)
+        self.assertIn(rx.RULE_NUMBERS, failures[0])
 
     def test_bools_and_nulls_are_not_numbers(self):
         payload = json.dumps({"a": True, "b": False, "c": None})

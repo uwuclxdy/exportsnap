@@ -30,7 +30,9 @@ HOW IT DECIDES
 
 GUARANTEES
   * Every leaf value is replaced by a synthetic token of the same JSON type.
-    Booleans are re-rolled; null and "" are kept as-is.
+    Booleans are re-rolled; null, "" and an integer 0 are kept as-is, so a
+    field whose absence the export spells as one of those three still reads as
+    absent in the fixture.
   * Array length is preserved up to --array-sample elements; the true length of
     every truncated array is recorded in the report.
   * Dates keep their exact format, moved by one run-wide offset.
@@ -71,7 +73,7 @@ GUARANTEES
       - no URL carrying userinfo, a live path segment, or a parameter payload;
       - every coordinate pair in a value inside the fake band;
       - every >=6-char token in a mirror value is generated or vocabulary;
-      - every number in a mirror value is one this run generated.
+      - every number in a mirror value is one this run generated or a kept 0.
     This rule does not see the vocabulary-gap warning below: self-check only
     re-reads DST, and that warning is stderr-only, never written to DST.
   * Inside SRC/json/, a FLAT filename (json/<name>, no directory component)
@@ -125,8 +127,8 @@ NOT GUARANTEED
     whenever a container looks keyed by id.
   * Recorded true array lengths are exact real counts (a per-conversation
     message count is real data), and so are the join-handle total in the report
-    (roughly a friend count), emptiness, nullness and, for a number outside a
-    coordinate key, its sign and decade.
+    (roughly a friend count), emptiness, nullness, an integer zero and, for a
+    number outside a coordinate key, its sign and decade.
   * The date offset is one constant for the whole run, so intervals between
     dates survive exactly. The offset is not written to the output, but anyone
     who learns one real date can recover it and invert every other date.
@@ -585,7 +587,7 @@ RULE_ALNUM = "no alnum run >= --max-alnum-run"
 RULE_URL = "no url carrying userinfo, a path segment, or a parameter payload"
 RULE_COORD = f"every coordinate pair in a value inside the fake [{FAKE_COORD_LO}, {FAKE_COORD_HI}] band"
 RULE_VALUES = f"every >= {MIN_TOKEN}-char token in a mirror value is generated or vocabulary"
-RULE_NUMBERS = "every number in a mirror value is one this run generated"
+RULE_NUMBERS = "every number in a mirror value is one this run generated or a kept 0"
 SELF_CHECK_RULES = (RULE_ALNUM, RULE_URL, RULE_COORD, RULE_VALUES, RULE_NUMBERS)
 
 
@@ -1171,6 +1173,15 @@ def synth_int(value: int, ctx: Ctx, path: str, key: str | None) -> int:
         out = ctx.handles.number(str(value), len(str(abs(value))))
         ctx.stats.note_number(out)
         return out
+    # A zero is schema, not payload: this tool already preserves key names,
+    # nesting, types, array shapes, null and "", and a zero carries no
+    # owner-identifying bits, so synthesizing one buys no privacy while costing
+    # the fixture every case a consumer spells as absence. Scope by
+    # construction: EVERY zero-valued int outside a join field is kept, not
+    # only a date field's.
+    if value == 0:
+        ctx.stats.value_classes["zero (kept)"] += 1
+        return 0
     shifted = shift_epoch(value, ctx.shift_seconds)
     if shifted is not None:
         ctx.stats.value_classes["epoch int"] += 1
@@ -1574,7 +1585,12 @@ def self_check(
                             f"({MASK_CHAR * len(token)})"
                         )
             elif rel in mirrors and not isinstance(value, bool) and isinstance(value, (int, float)):
-                if value not in stats.generated_numbers:
+                # An int 0 is the one number synth_int keeps instead of drawing,
+                # so it is never in generated_numbers -- which stays reserved for
+                # what this run actually made, or an echoing path could vouch for
+                # itself. A float 0.0 is not kept and gets no exemption.
+                kept_zero = isinstance(value, int) and value == 0
+                if not kept_zero and value not in stats.generated_numbers:
                     failures.append(
                         f"{where}: {RULE_NUMBERS} -- a {len(str(abs(value)))}-char number"
                     )
