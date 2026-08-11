@@ -26,7 +26,7 @@
 //! is live the table follows its tail until the user scrolls up.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use ratatui::Frame;
@@ -205,6 +205,14 @@ impl Memories {
     #[cfg(test)]
     pub(crate) const fn environment(&self) -> &Environment {
         &self.environment
+    }
+
+    /// The dir this screen reads and the root it writes under — what
+    /// [`crate::app::App::source_report`] reports for it. This screen runs against the export and
+    /// writes files, so the argument reaching it is worth observing separately from the overview's
+    /// copy: they are two fields set by one call, and one can be blanked without the other.
+    pub(crate) fn run_paths(&self) -> (&Path, &Path) {
+        (&self.source, &self.out_root)
     }
 
     /// Swaps in a receiver the caller feeds, exactly the channel [`Self::start_run`] creates —

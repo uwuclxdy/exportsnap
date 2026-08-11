@@ -201,6 +201,39 @@ impl App {
         self.chat_media.with_channel(receiver);
     }
 
+    /// What `--print-source` prints: every screen's own view of the dir this app was launched
+    /// against, as `key=value` lines, `\n`-terminated. Machine-first — the flag exists to be read by
+    /// something other than a human, so no alignment, no glyphs, no color.
+    ///
+    /// **Assembled from all three screens, not from one.** [`Self::start`] hands the source to the
+    /// overview's read, to the space probe, and to both media screens, and those are four separate
+    /// deliveries of one argument. A report observing only the overview left the other three able to
+    /// take `PathBuf::new()` with the whole suite green — measured 2026-08-11, and it is why the keys
+    /// below are per-screen rather than one `source=`.
+    ///
+    /// **Every path value is quoted and escaped** ([`std::path::Path`]'s `Debug`), because a path is
+    /// user-supplied bytes going into a line-oriented format: a source dir whose name contains a
+    /// newline could otherwise emit `parts=one` ahead of the real answer and a first-wins reader
+    /// would believe it. Two ceilings, both in `Debug`'s hands rather than this crate's: the exact
+    /// escaping is a `Debug` impl, so a toolchain bump can move it — `tests/print_source.rs` spells
+    /// the expected bytes out the long way and reds if it does — and a path that is not UTF-8 comes
+    /// back with `\x` escapes, which is lossless enough to compare but is not the original bytes.
+    /// Values that are not paths are bare: a token from a closed set, or digits.
+    ///
+    /// Keys are stable and a reader should match on the name, not the position. Adding one is
+    /// allowed; the numeric keys are already absent whenever nothing measured them. `memories-out`
+    /// and `chat-out` are the roots each screen was handed rather than where either writes — see
+    /// [`ChatMedia::run_paths`] for why the chat leg's own output sits one level below its key.
+    #[must_use]
+    pub fn source_report(&self) -> String {
+        let (memories_source, memories_out) = self.memories.run_paths();
+        let (chat_source, chat_out) = self.chat_media.run_paths();
+        format!(
+            "{}memories-source={memories_source:?}\nmemories-out={memories_out:?}\nchat-source={chat_source:?}\nchat-out={chat_out:?}\n",
+            self.overview.report()
+        )
+    }
+
     #[must_use]
     pub const fn palette(&self) -> &Palette {
         &self.palette

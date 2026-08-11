@@ -179,6 +179,39 @@ impl Overview {
 
         Self { source: Some(source), parts, counts, environment }
     }
+
+    /// This screen's share of the `--print-source` report: the dir it was built against, what the
+    /// read of it found, and the free space measured on that dir's filesystem. See
+    /// [`crate::app::App::source_report`] for the format and for why the three screens each
+    /// contribute their own lines.
+    ///
+    /// Lives here rather than in `App` because [`Parts`] and its numbers are private, and publishing
+    /// an enum plus five variants to format four lines elsewhere is the larger surface.
+    ///
+    /// The numeric keys are emitted only by the states that measured them. A `zips=0` under
+    /// `parts=missing`, or a `free=0` where no `statvfs` succeeded, would be a confident wrong answer
+    /// where the truth is that nothing was counted — the same distinction [`Totals`] keeps for the
+    /// json counts and [`Environment`] for its two space figures.
+    pub(crate) fn report(&self) -> String {
+        let found = match self.parts {
+            Parts::Missing => "parts=missing".to_owned(),
+            Parts::Unreadable => "parts=unreadable".to_owned(),
+            Parts::None => "parts=none".to_owned(),
+            Parts::Several(exports) => format!("parts=several\nexports={exports}"),
+            Parts::One { zips, unpacked, missing } => format!("parts=one\nzips={zips}\nunpacked={unpacked}\nmissing={missing}"),
+        };
+        // Measured on the SOURCE's filesystem, not the output root's — `App::start` probes here and
+        // re-measures at the out root for the media screens, so these two keys are the only report
+        // of the argument this screen was probed against.
+        let space: String = [("free", self.environment.available_space), ("total", self.environment.total_space)]
+            .into_iter()
+            .filter_map(|(key, bytes)| bytes.map(|bytes| format!("{key}={bytes}\n")))
+            .collect();
+        // `unloaded` is the pre-read state and never reaches the flag, which prints off a started
+        // app; an empty value keeps the key set the same either way rather than dropping a line.
+        let source = self.source.as_deref().unwrap_or(Path::new(""));
+        format!("source={source:?}\n{found}\n{space}")
+    }
 }
 
 /// What the source dir holds.

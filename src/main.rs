@@ -38,6 +38,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Unlike `--version`, this one does not short-circuit here: its whole report is read off the
+    // composed app below, so everything that feeds the composition still has to parse first.
+    let print_source = wants_print_source_arg(args.iter().cloned())?;
+
     let cli_tier = parse_theme_arg(args.iter().cloned())?;
     // The config precedence level has no loader yet; `detect_from_env` still orders it.
     let tier = theme::detect_from_env(cli_tier, None);
@@ -60,6 +64,22 @@ fn main() -> Result<()> {
     // on screen to say why. The upgrade path is the phase-2 tokio runtime plus the overview's own
     // loading state, which needs the tick timer no screen has earned yet.
     let mut app = App::start(tier, source, out);
+
+    // Read off the COMPOSED app rather than off the `source` local above. `main` could print the
+    // path byte-identically — its own M2 mutation proved that — so what makes this a pin is the rest
+    // of the report: the part counts, the space figures and each media screen's copy of the argument
+    // are all things only a built app holds. `tests/print_source.rs` is what reds when a delivery
+    // between here and the screens is dropped. Prints and exits before the terminal is taken over,
+    // so it works headless and in scripts; the EPIPE arm is `--version`'s, for the same reason.
+    if print_source {
+        let mut stdout = std::io::stdout().lock();
+        if let Err(e) = stdout.write_all(app.source_report().as_bytes())
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e).context("failed to print the source report");
+        }
+        return Ok(());
+    }
 
     // `try_init` installs ratatui's own restore-then-chain panic hook; unlike `init` it hands
     // back the failure instead of panicking on it. It enables raw mode on `/dev/tty` before
@@ -159,6 +179,24 @@ fn wants_version_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
     Ok(version)
 }
 
+/// Hand-parses `--print-source`: what the app was launched against and what it found there, on
+/// stdout, with no terminal taken over. Any occurrence wins and a `--print-source=` value is a hard
+/// error, both for [`wants_version_arg`]'s reasons — the flag carries no state, so there is no last
+/// one to speak of, and a value is a user believing it takes one. `--version` is checked first and
+/// returns before this is read. Same shape as [`parse_theme_arg`] and for the same reason: a real
+/// CLI with subcommands is phase 5 and brings its own argument parser then.
+fn wants_print_source_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
+    let mut print_source = false;
+    for arg in args {
+        if arg == "--print-source" {
+            print_source = true;
+        } else if arg.starts_with("--print-source=") {
+            bail!("--print-source takes no value; pass --print-source alone, with --source=<dir> naming the dir");
+        }
+    }
+    Ok(print_source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +215,10 @@ mod tests {
 
     fn parse_out(args: &[&str]) -> Result<Option<PathBuf>> {
         parse_out_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn parse_print_source(args: &[&str]) -> Result<bool> {
+        wants_print_source_arg(args.iter().map(|arg| (*arg).to_string()))
     }
 
     #[test]
@@ -278,6 +320,21 @@ mod tests {
     fn version_flag_with_a_value_is_a_hard_error() {
         let error = parse_version(&["--version=full"]).unwrap_err();
         assert_eq!(error.to_string(), "--version takes no value; pass --version alone");
+    }
+
+    #[test]
+    fn print_source_flag_is_read_alongside_the_dir_it_reports() {
+        assert!(parse_print_source(&["--print-source"]).unwrap());
+        assert!(parse_print_source(&["--source=/tmp/export", "--print-source"]).unwrap());
+        assert!(!parse_print_source(&[]).unwrap());
+        // `--source` on its own is the launch path, not the print one.
+        assert!(!parse_print_source(&["--source=/tmp/export"]).unwrap());
+    }
+
+    #[test]
+    fn print_source_flag_with_a_value_is_a_hard_error() {
+        let error = parse_print_source(&["--print-source=/tmp/export"]).unwrap_err();
+        assert_eq!(error.to_string(), "--print-source takes no value; pass --print-source alone, with --source=<dir> naming the dir");
     }
 
     #[test]

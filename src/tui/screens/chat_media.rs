@@ -30,7 +30,7 @@
 //! `enter` mirrors it on both, per the contract's row-interaction grammar.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use ratatui::Frame;
@@ -248,6 +248,21 @@ impl ChatMedia {
     #[cfg(test)]
     pub(crate) const fn environment(&self) -> &Environment {
         &self.environment
+    }
+
+    /// The dir this screen reads and the output root it was handed, for the same reason as
+    /// [`crate::tui::screens::memories::Memories::run_paths`].
+    ///
+    /// The second value is the root as handed in, NOT where this leg's files land: chat output goes
+    /// under `out_root/`[`CHAT_DIR`], which the form row renders and [`chat_fix`] joins. So
+    /// `chat-out` in the report is one level above the chat write root while `memories-out` is the
+    /// memories write root, and that asymmetry is deliberate — the key reports the argument that
+    /// reached the screen, which is what makes a dropped `--out` observable, and folding the leaf in
+    /// would report a path through a render-layer constant instead.
+    ///
+    /// [`chat_fix`]: crate::export::chat_fix
+    pub(crate) fn run_paths(&self) -> (&Path, &Path) {
+        (&self.source, &self.out_root)
     }
 
     /// Swaps in a receiver the caller feeds, exactly the channel [`Self::start_run`] creates — the
