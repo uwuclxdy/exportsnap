@@ -87,12 +87,14 @@ fn main_colour(x: u32, y: u32) -> [u8; 3] {
 /// re-measures instead of inheriting these. The drift is a property of the quantiser at that
 /// block's frequency content; the gap to black is a property of where that block's pseudo-random
 /// green and blue happen to average. Measured 2026-08-11 through this assertion, worst channel and
-/// then the green/blue the main shows through at: `TRANSPARENT_BLOCK` drifts 3.47 at 126/131, and
-/// the 4608x64 block in `a_main_wider_than_four_thousand_pixels_…` drifts 3.16 at 82/129. Green is
-/// what moved, and it is why the gap is stated per block rather than as one number.
+/// then the green/blue the main shows through at: [`TRANSPARENT_BLOCK`] drifts 3.47 at 126/131 —
+/// the same figure on the png pair and on the webp one, which composite that block from the same
+/// main — [`WIDE_TRANSPARENT_BLOCK`] 3.16 at 82/129, [`TALL_TRANSPARENT_BLOCK_BOTTOM`] 0.95 at 100/129, and
+/// [`TALL_TRANSPARENT_BLOCK_EITHER_SIZE`] 3.59 at 140/124. Drift spans nearly 4x across the four and
+/// the gaps run 82 to 140, which is why both are stated per block rather than as one number.
 fn assert_shows_main_through(composite: &RgbImage, block: [u32; 4], label: &str) {
-    /// Clears both measured drifts by more than 2x and sits an order of magnitude under the
-    /// smaller of the two gaps that separate the main from black on green and blue.
+    /// Clears the worst measured drift by better than 2x and sits an order of magnitude under the
+    /// smallest of the four gaps that separate the main from black on green and blue.
     const TOLERANCE: f64 = 8.0;
 
     let [left, top, right, bottom] = block;
@@ -125,8 +127,30 @@ const TRANSPARENT_BLOCK: [u32; 4] = [48, 8, 56, 16];
 
 /// [`TRANSPARENT_BLOCK`] for the 4608x64 pair, whose scaled overlay puts its transparent half
 /// somewhere else entirely. Named rather than inlined at the call site so a grep for one of these
-/// blocks reaches both of them.
+/// blocks reaches every one of them.
 const WIDE_TRANSPARENT_BLOCK: [u32; 4] = [4000, 24, 4008, 32];
+
+/// [`TRANSPARENT_BLOCK`] for the 1440x2560 pair's bottom rows. Scaled, the overlay covers the whole
+/// frame and its opaque half ends at x = 720, so this sits 680px into the transparent half — clear
+/// of the ringing Lanczos leaves at that boundary — and 32 short of the frame's right edge.
+/// **Only the scale-up puts the overlay here at all**: unscaled and centred it spans 180..1260 x
+/// 320..2240, which this block is outside on both axes, so a dropped resize leaves the main showing
+/// here too and this assertion stays green through it (measured 2026-08-11). The sibling `> 200`
+/// assert is what observes the resize.
+///
+/// **What it holds over [`TALL_TRANSPARENT_BLOCK_EITHER_SIZE`] is spatial coverage, not a second
+/// discrimination**: it is the only TRANSPARENCY sample in the region the scale-up alone reaches
+/// (the sibling `> 200` covers that region on the opaque claim), but no mutation tried on
+/// 2026-08-11 — dropped compositing, dropped resize, `Nearest` in place of Lanczos — killed either
+/// block without the other. Deleting it costs that coverage and nothing measured.
+const TALL_TRANSPARENT_BLOCK_BOTTOM: [u32; 4] = [1400, 2496, 1408, 2504];
+
+/// [`TRANSPARENT_BLOCK`] for the 1440x2560 pair, in the region the overlay's transparent half covers
+/// at EITHER size: 280px right of the opaque half's edge, which both placements put at x = 720, and
+/// inside the 720..1260 x 320..2240 the unscaled centred overlay leaves transparent. So it reads
+/// "the alpha composited" whether or not the resize ran, which is the half
+/// [`TALL_TRANSPARENT_BLOCK_BOTTOM`] cannot cover.
+const TALL_TRANSPARENT_BLOCK_EITHER_SIZE: [u32; 4] = [1000, 1000, 1008, 1008];
 
 /// A block wholly inside the overlay's OPAQUE half and away from its edge, where a composite that
 /// ran paints the caption's red.
@@ -817,10 +841,10 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
 fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
     // The dimensions the 2026-08-04 census found on real data: a 1440x2560 main with a
     // 1080x1920 overlay (38 of 161 real pairs, the modal image shape; see the local-fix
-    // section of docs/design.md). `composite` scales the overlay to fit WITHIN the main, so an unscaled
-    // composite would leave the main's bottom 640 rows and right 360 columns unpainted —
-    // which is what the low-row asserts below catch, since the fixture main's red channel
-    // never rises past 40 while the overlay's opaque half is 255.
+    // section of docs/design.md). `composite` scales the overlay to fit WITHIN the main and centres
+    // it, so an unscaled composite would leave the main's top and bottom 320 rows and its left and
+    // right 180 columns unpainted — which is what the bottom-row opaque assert below catches, since
+    // the fixture main's red channel never rises past 40 while the overlay's opaque half is 255.
     const MAIN_W: u32 = 1440;
     const MAIN_H: u32 = 2560;
     const OVERLAY_W: u32 = 1080;
@@ -843,11 +867,23 @@ fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
     assert_eq!(composite.dimensions(), (MAIN_W, MAIN_H), "the composite keeps the MAIN's size, not the overlay's");
     // After scaling, the overlay's opaque red half is 720 wide and covers the full 2560
     // rows. The pixel at (700, MAIN_H - 60) sits inside that half only after scaling: an
-    // unscaled 1080x1920 overlay never paints below row 1920, so this assert reds when the
-    // resize is dropped even though the composite's dimensions do not move.
+    // unscaled 1080x1920 overlay centred in the frame paints rows 320..2240 and nothing below, so
+    // this assert reds when the resize is dropped (measured 2026-08-11) even though the composite's
+    // dimensions do not move.
     assert!(composite.get_pixel(700, MAIN_H - 60).0[0] > 200, "the scaled overlay's opaque half reached the main's bottom rows");
-    assert!(composite.get_pixel(1400, MAIN_H - 60).0[0] < 60, "the scaled transparent half still leaves the main showing, bottom rows");
-    assert!(composite.get_pixel(1400, 100).0[0] < 60, "the scaled transparent half still leaves the main showing, a row both sizes reach");
+    // And the transparent half is the main, not the black an overlay copied over the frame with its
+    // alpha discarded would leave. A red-channel threshold cannot tell those two apart on this
+    // fixture; see the helper's doc for why. The two blocks split the claim by placement.
+    assert_shows_main_through(
+        &composite,
+        TALL_TRANSPARENT_BLOCK_BOTTOM,
+        "the scaled transparent half still leaves the main showing, bottom rows",
+    );
+    assert_shows_main_through(
+        &composite,
+        TALL_TRANSPARENT_BLOCK_EITHER_SIZE,
+        "the scaled transparent half still leaves the main showing, a region both sizes cover",
+    );
 }
 
 #[test]
@@ -988,7 +1024,10 @@ fn an_overlay_that_is_webp_bytes_under_a_png_name_composites_through_the_real_pa
     let composite = image::open(&plan.items[0].output).unwrap().to_rgb8();
     assert_eq!(composite.dimensions(), (WIDTH, HEIGHT));
     assert!(composite.get_pixel(2, 2).0[0] > 200, "the webp overlay's opaque half reached the composite");
-    assert!(composite.get_pixel(WIDTH - 2, 2).0[0] < 60, "the webp overlay's transparent half left the main showing");
+    // The fixture's VP8L header says 64x48, the main's own size, so nothing is resized and the
+    // 64x48 pairs' block is this pair's block too — measured through it, this pair drifts exactly
+    // what the png pair does.
+    assert_shows_main_through(&composite, TRANSPARENT_BLOCK, "the webp overlay's transparent half left the main showing");
 }
 
 #[test]
