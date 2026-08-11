@@ -619,6 +619,8 @@ fn press(app: &mut App, code: KeyCode) {
 /// arrows there), so an unbounded walk from a descended screen spins forever. That is the screen
 /// behaving correctly and the helper behaving badly, and an unbounded loop turns it into a 600-second
 /// hang with no failing assertion to read.
+///
+/// **Both directions are pinned, at this guard and against its own literal.** Termination is structural: a `for` over a finite range cannot spin, so no test adds confidence there. The range being too SMALL is pinned by the walks that go through it — emptying it reds them loudly, 20 of this file's 33 tests at the 2026-08-11 measurement. Re-derive that rather than trusting the count, which moves with every test this file gains. The pin below is among those reds, because its `app_on_export` setup walks from `Overview` first; the twin in `tests/memories_screen.rs` is the one exception in the crate, for the reason recorded there. The literal is pinned by [`walking_off_a_descended_pane_panics_instead_of_spinning`] below, which descends this screen's own pane and then walks off it. The twins in `tests/shell.rs` and `tests/memories_screen.rs` carry their own pins against their own literals; this one spells the same bytes as the shell's by coincidence, not by sharing a constant, so a drift in either is invisible to the other.
 fn on_tab(app: &mut App, tab: Tab) {
     for _ in 0..=Tab::ALL.len() {
         if app.active() == tab {
@@ -1029,6 +1031,8 @@ fn a_failing_chat_item_keeps_its_conversation_out_of_the_alert() {
 /// count ran out precisely when the box was slow enough to be worth waiting for, and the failure
 /// read as the assertion under test rather than as the timeout it was. The bound stays generous
 /// because its only job is to stop a hang, and a hang is what a bug here looks like.
+///
+/// **The deadline arm is deliberately unpinned, and that is a cost decision rather than an oversight.** Firing it needs a worker that never sends, which is 60 s of gate against a 3.5 s release suite (measured 2026-08-11), and parameterising the deadline so a test could pass a short one would move the untested boundary onto whoever supplies the real 60 s rather than remove it. The half that rots silently is the deadline being too SHORT, and that one is pinned below by `a_worker_slower_than_the_old_iteration_budget_still_lands_its_alert`. Termination is structural — the loop runs against a fixed `Instant` — so what is unpinned is the message alone. Do not read that as the deadline being decoration: without it a worker that never finishes wedges the suite, since this crate configures no nextest `terminate-after`.
 fn wait_for_alert(app: &mut App) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
@@ -1227,6 +1231,38 @@ fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Esc);
     assert!(!app.chat_media().descended());
+}
+
+/// [`on_tab`]'s panic arm: a walk off a descended pane gives up with a diagnosis instead of spinning.
+///
+/// What the three guards exist to prevent is a walk that never terminates; here the pane is descended, `→` is inert, and the helper gives up. The twins in `tests/shell.rs` and `tests/memories_screen.rs` each carry the same pin against their own literal, since the three panics are three independent strings.
+///
+/// **`should_panic` on the WHOLE message, not a fragment**, so the target tab and the diagnosis are both pinned. `app_on_export` itself calls `on_tab(&mut app, Tab::ChatMedia)`, whose panic would read `could not reach ChatMedia from …` and would satisfy a fragment like `is a pane descended and trapping the arrows?` — the full literal is what keeps a setup failure from passing as the subject. Deleting the bound makes this test HANG rather than red, which is unavoidable rather than sloppy: the property under test is "does not hang", and nothing short of a timeout harness can red on its absence.
+///
+/// **What it reds on is narrower than "the literal drifting", so do not lean on it for more.** `should_panic` matches by CONTAINMENT, so only an edit INSIDE the expected substring reds; text added around the literal — a prefix, a suffix, an extra leading clause — leaves it green (measured 2026-08-11 on the `tests/shell.rs` twin, whose literal is byte-identical: a prefix left the whole suite green, while `arrows?` → `keys?` red exactly that one pin). The full-literal choice above defeats a too-loose fragment match; it does not make the match exact.
+#[test]
+#[should_panic(expected = "could not reach Memories from ChatMedia: is a pane descended and trapping the arrows?")]
+fn walking_off_a_descended_pane_panics_instead_of_spinning() {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: media_id(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }],
+        clean_counts(),
+    );
+
+    // The trap is the whole fixture, so it is asserted rather than assumed. An app that failed to
+    // descend would reach the memories tab in five `→` presses (`Tab::next` wraps, `src/app.rs:66`)
+    // and the test would fail as "no panic", which reads like a missing guard instead of a broken
+    // fixture.
+    press(&mut app, KeyCode::Enter);
+    assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
+    assert_eq!(app.active(), Tab::ChatMedia, "the walk has to START somewhere other than its target");
+
+    on_tab(&mut app, Tab::Memories);
 }
 
 /// The `⌥` jump ascends the pane it is LEAVING, on either screen.

@@ -353,6 +353,10 @@ fn press(app: &mut App, code: KeyCode) {
 
 /// Bounded for the reason `chat_media_screen.rs`'s `on_tab` spells out in full: `→` is inert while
 /// a pane is descended, so an unbounded walk from a descended screen never terminates.
+///
+/// **Both directions are pinned, at this guard and against its own literal.** Termination is structural: a `for` over a finite range cannot spin, so no test adds confidence there. The range being too SMALL is the half that rots silently, and emptying it reds the walks loudly — 21 of this file's 31 tests at the 2026-08-11 measurement, whole suite, `--no-fail-fast`. Re-derive that rather than trusting the count, which moves with every test this file gains.
+///
+/// **One walk deliberately survives that mutation, and it is the pin below — do not read its green as the pin being broken.** Every ORDINARY caller here starts on `Overview`, so the emptied range makes them panic `…from Overview`. The pin starts on `ChatMedia`, and the emptied range makes `on_memories` panic before the loop body runs, with `…from ChatMedia` — byte-for-byte the string the pin's `should_panic` expects, so it passes. That is a coincidence of this file only: both twins' pins DO red under their own emptied ranges, because their fixtures walk from `Overview` first. Measured 2026-08-11: 10 passed, 21 failed, pin among the passes. The literal is pinned by [`walking_off_a_descended_pane_panics_instead_of_spinning`] below. Reaching it needs a pane descended on a tab that is NOT memories, and the memories pane can never be both — `→` is trapped while it is descended and the `⌥` jump ascends the pane it leaves (`src/app.rs:422`) — so the fixture descends the CHAT MEDIA pane instead. Each of the three guards carries its own pin: this literal differs outright from the twins' in `tests/shell.rs` and `tests/chat_media_screen.rs`, so a drift here is invisible to both.
 fn on_memories(app: &mut App) {
     for _ in 0..=exportsnap::app::Tab::ALL.len() {
         if app.active() == exportsnap::app::Tab::Memories {
@@ -361,6 +365,45 @@ fn on_memories(app: &mut App) {
         press(app, KeyCode::Right);
     }
     panic!("could not reach the memories tab from {:?}: is a pane descended and trapping the arrows?", app.active());
+}
+
+/// [`on_memories`]'s panic arm: a walk off a descended pane gives up with a diagnosis instead of spinning.
+///
+/// The memories pane cannot be the trap for its own walk — `→` is inert only while descended, and this helper returns the moment the memories tab is active — so the fixture descends the CHAT MEDIA pane and walks from there. The chat-media import is function-local: it is the state the guard needs, not a surface this file tests. No export tree and no media are involved; a plan with no rows suffices, because `with_channel` sets `Run::Active` (`src/tui/screens/chat_media.rs:257`) and `plan_landed` fills the view regardless of row count (`:413`), so `has_table` is true and `enter` descends.
+///
+/// **`should_panic` on the WHOLE message, not a fragment**, so the origin tab and the diagnosis are both pinned. A fragment would also be satisfied by the `tests/shell.rs` and `tests/chat_media_screen.rs` twins, whose literals share the trailing clause; the full string is what makes this pin this file's own.
+///
+/// **What it reds on is narrower than "the literal drifting", so do not lean on it for more.** `should_panic` matches by CONTAINMENT, so only an edit INSIDE the expected substring reds; text added around the literal — a prefix, a suffix, an extra leading clause — leaves it green (measured 2026-08-11 on the `tests/shell.rs` twin: a prefix left the whole suite green, while `arrows?` → `keys?` red exactly that one pin). The full-literal choice above defeats a too-loose fragment match; it does not make the match exact. Note this pin is also the one that survives its own guard's emptied range, for the reason recorded at [`on_memories`] — between the two, it is a narrower instrument than its name suggests.
+#[test]
+#[should_panic(expected = "could not reach the memories tab from ChatMedia: is a pane descended and trapping the arrows?")]
+fn walking_off_a_descended_pane_panics_instead_of_spinning() {
+    use exportsnap::export::chat_run;
+
+    let state = TempDir::new().unwrap();
+    let mut app = App::new(Tier::Full);
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(chat_run::RunEvent::Planned(chat_run::PlanSnapshot {
+            export_id: ExportId::new(EXPORT_ID).unwrap(),
+            manifest_dir: state.path().to_path_buf(),
+            rows: Vec::new(),
+            counts: chat_run::PlanCounts::default(),
+        }))
+        .unwrap();
+    app.with_chat_media_channel(receiver);
+    app.tick();
+
+    // The trap is the whole fixture, so it is asserted rather than assumed. An app that failed to
+    // descend would reach the memories tab in five presses and the test would fail as "no panic",
+    // which reads like a missing guard instead of a broken fixture.
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
+
+    // `sender` lives to end of scope, which is what keeps the channel connected across the tick
+    // above; there is deliberately no `drop` after the walk, since the walk never returns.
+    on_memories(&mut app);
 }
 
 fn row(buffer: &Buffer, y: u16) -> String {
@@ -683,6 +726,8 @@ fn the_form_caret_walks_all_rows_and_enter_acts_on_toggle_and_start() {
 /// was slow enough to be worth waiting for, and it failed as "no alert arrived" — the assertion
 /// under test — rather than as the timeout it actually was. The bound below stays generous because
 /// its only job is to stop a hang, and a hang is what a bug here looks like.
+///
+/// **The deadline arm is deliberately unpinned, and that is a cost decision rather than an oversight.** Firing it needs a worker that never sends, which is 60 s of gate against a 3.5 s release suite (measured 2026-08-11), and parameterising the deadline so a test could pass a short one would move the untested boundary onto whoever supplies the real 60 s rather than remove it. The half that rots silently is the deadline being too SHORT, and that one is pinned below by `a_worker_slower_than_the_old_iteration_budget_still_lands_its_alert`. Termination is structural — the loop runs against a fixed `Instant` — so what is unpinned is the message alone. Do not read that as the deadline being decoration: without it a worker that never finishes wedges the suite, since this crate configures no nextest `terminate-after`.
 fn wait_for_alert(app: &mut App) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {

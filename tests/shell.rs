@@ -62,12 +62,72 @@ fn press(app: &mut App, code: KeyCode) {
     app.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
 }
 
+/// A fresh app walked to `tab`. [`on_tab_in`] carries the bound and the reason for it.
 fn on_tab(tab: Tab) -> App {
     let mut app = App::new(Tier::Full);
-    while app.active() != tab {
-        press(&mut app, KeyCode::Right);
-    }
+    on_tab_in(&mut app, tab);
     app
+}
+
+/// Walks `app` to `tab` with `→`, bounded by the tab count — the twin of `tests/chat_media_screen.rs`'s `on_tab` and `tests/memories_screen.rs`'s `on_memories`.
+///
+/// The bound is not decoration. `→` is INERT while a pane is descended: `Memories` and `ChatMedia` consume it and answer `true` (`src/tui/screens/memories.rs:431`, `src/tui/screens/chat_media.rs:472`), so the shell's own `Right` arm never runs and an unbounded walk from a descended app spins forever. That is the screen behaving correctly and the helper behaving badly, and this crate configures no nextest `terminate-after`, so the result is not a slow test but a wedged suite with no failing assertion to read. Until 2026-08-11 this helper was the unbounded `while` its two twins were written to warn about.
+///
+/// **Only one caller in this file reaches that state, and it does so on purpose.** [`on_tab`] and the tier loop in `the_panel_border_and_title_follow_the_tier_too` both build an `App::new` sitting on `Overview` with no run planned, `descended()` is `false` for all six tabs there (`src/app.rs:252`), and `Tab::next` wraps (`src/app.rs:66`), so every tab is at most five presses away and neither can trip the bound. The third caller is [`walking_off_a_descended_pane_panics_instead_of_spinning`], which descends a pane deliberately in order to trip it. Enumerate the callers before trusting that split — it has already gone stale once, when the pin below was added and this paragraph still said there were two.
+///
+/// **Both directions are pinned, at this file's own guard and against this file's own literal.** Termination is structural: a `for` over a finite range cannot spin, so no test adds confidence there. The range being too SMALL is the half that rots silently, and emptying it reds the walks loudly — 15 of this file's 38 tests at the 2026-08-11 measurement, naming four different origin/target pairs, since the literal carries both. Even the zero-distance walk reds: `if app.active() == tab` sits INSIDE the loop, so an empty range never reaches it. That property is the thing to re-derive; the count is not, because it moves with every test this file gains — it read 14 one revision ago, before the pin below existed. Re-measure rather than trusting either number, and note the twin in `tests/memories_screen.rs` does NOT behave this way: its pin survives its own emptied range, for the reason recorded there. The literal itself is pinned by [`walking_off_a_descended_pane_panics_instead_of_spinning`] below, which builds the descended pane this file's ordinary callers never produce. Each of the three guards carries its own pin and none stands for the others: `tests/chat_media_screen.rs`'s twin spells the same bytes by coincidence and `tests/memories_screen.rs`'s differs outright, so a drift in one is invisible to the other two.
+fn on_tab_in(app: &mut App, tab: Tab) {
+    for _ in 0..=Tab::ALL.len() {
+        if app.active() == tab {
+            return;
+        }
+        press(app, KeyCode::Right);
+    }
+    panic!("could not reach {tab:?} from {:?}: is a pane descended and trapping the arrows?", app.active());
+}
+
+/// [`on_tab_in`]'s panic arm: a walk off a descended pane gives up with a diagnosis instead of spinning.
+///
+/// The state no ordinary caller here produces, built on purpose. Every import is function-local, so nothing chat-media enters this file's surface — the shell is what these tests are about, and a descended pane is only the state the guard needs. It is reachable in a plan with no rows at all: `with_channel` sets `Run::Active` (`src/tui/screens/chat_media.rs:257`) and `plan_landed` fills the view regardless of row count (`:413`), so `has_table` is true and `enter` descends.
+///
+/// **`should_panic` on the WHOLE message, not a fragment.** The `on_tab_in(&mut app, Tab::ChatMedia)` walk in the setup would itself panic as `could not reach ChatMedia from …` if it ever failed, which a fragment like `is a pane descended and trapping the arrows?` would happily accept — the full literal is what keeps a setup failure from passing as the subject. Deleting the bound makes this test HANG rather than red, which is unavoidable rather than sloppy: the property under test is "does not hang", and nothing short of a timeout harness can red on its absence.
+///
+/// **What it reds on is narrower than "the literal drifting", so do not lean on it for more.** `should_panic` matches by CONTAINMENT, so only an edit INSIDE the expected substring reds; text added around the literal — a prefix, a suffix, an extra leading clause — leaves it green. Measured 2026-08-11: prefixing this literal left the whole suite green, while `arrows?` → `keys?` reds exactly this pin and nothing else. The full-literal choice above defeats a too-loose fragment match; it does not make the match exact, and those are the two independent directions of the same mechanic.
+#[test]
+#[should_panic(expected = "could not reach Memories from ChatMedia: is a pane descended and trapping the arrows?")]
+fn walking_off_a_descended_pane_panics_instead_of_spinning() {
+    use exportsnap::export::chat_run;
+    use exportsnap::export::manifest::ExportId;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    let state = TempDir::new().unwrap();
+    let mut app = App::new(Tier::Full);
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(chat_run::RunEvent::Planned(chat_run::PlanSnapshot {
+            // Any id `ExportId::new` accepts (`src/export/manifest.rs:187`) — nothing here reads it
+            // back, so it is spelled as the fixture it is rather than as a copy of the real export
+            // id that no grep would ever reach.
+            export_id: ExportId::new("shell-pin").unwrap(),
+            manifest_dir: state.path().to_path_buf(),
+            rows: Vec::new(),
+            counts: chat_run::PlanCounts::default(),
+        }))
+        .unwrap();
+    app.with_chat_media_channel(receiver);
+    app.tick();
+
+    // The trap is the whole fixture, so it is asserted rather than assumed. An app that failed to
+    // descend would reach memories in five presses and the test would fail as "no panic", which
+    // reads like a missing guard instead of a broken fixture.
+    on_tab_in(&mut app, Tab::ChatMedia);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
+
+    // `sender` lives to end of scope, which is what keeps the channel connected across the tick
+    // above; there is deliberately no `drop` after the walk, since the walk never returns.
+    on_tab_in(&mut app, Tab::Memories);
 }
 
 // ---- whole frame ----
@@ -451,10 +511,10 @@ fn the_panel_border_and_title_follow_the_tier_too() {
     for (tier, accent_2, line_strong) in
         [(Tier::Full, Color::Rgb(217, 119, 87), Color::Rgb(69, 71, 90)), (Tier::Compatible, Color::Indexed(173), Color::Indexed(240))]
     {
+        // Through the bounded helper, not a second unbounded walk: one spelling of the question, so
+        // the guard cannot be present on one path and absent on the other.
         let mut app = App::new(tier);
-        while app.active() != Tab::Memories {
-            press(&mut app, KeyCode::Right);
-        }
+        on_tab_in(&mut app, Tab::Memories);
         let terminal = draw(&mut app, 60, 20);
         let buffer = terminal.backend().buffer();
 
