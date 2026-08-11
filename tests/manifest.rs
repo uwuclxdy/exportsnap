@@ -323,11 +323,7 @@ fn re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched() {
 /// The write direction, one leg per half of the guard's condition: a guard is only as good as the
 /// narrowest thing it still lets through, and each half is what lets one of these two rows through.
 ///
-/// The REASON leg is why this is not `exclude`'s bare `status <> ?1`. That note is a constant the
-/// module owns; this one is CALLER TEXT, and `MissingReason::Unscanned` is scan-wide, so one
-/// unlistable directory makes a run write it for every unpaired entry and the next clean run has to
-/// replace it on all of them. A status-only guard would freeze the stale reason with the status
-/// column reading correct.
+/// The REASON leg is why this is not `exclude`'s bare status-only skip. That note is a constant the module owns; this one is CALLER TEXT, and `MissingReason::Unscanned` is scan-wide, so one unlistable directory makes a run write it for every unpaired entry and the next clean run has to replace it on all of them. A status-only guard would freeze the stale reason with the status column reading correct.
 ///
 /// The STATUS leg is the mirror, and it is the half a note-only guard would drop: a failed attempt
 /// whose note already reads like a gap's is still not a gap until this call says so.
@@ -1207,7 +1203,7 @@ fn excluding_an_already_excluded_row_leaves_it_untouched() {
 }
 
 /// The ceiling on `exclude`'s note constant, made loud. Queue task 49 ruled the note stays OUT of
-/// that guard — the guard is the status alone — so an already-excluded row is never revisited and
+/// that decision — the decision is the status alone — so an already-excluded row is never revisited and
 /// whatever note it was parked with is what it carries until the row leaves `Excluded`, which nothing
 /// in a normal run does to it except the retirement sweep (`a_vanished_excluded_row_is_retired`).
 /// Rewording the constant therefore
@@ -1222,7 +1218,7 @@ fn excluding_an_already_excluded_row_leaves_it_untouched() {
 ///
 /// **The still-`Pending` row is the positive control, and it shares the one call.** Without it an
 /// `exclude` that had stopped writing anything at all would pass, because a dead call leaves a
-/// stranded note and a backdated timestamp exactly as untouched as a guarded one does.
+/// stranded note and a backdated timestamp exactly as untouched as a correctly skipping one does.
 #[test]
 fn an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it() {
     /// A timestamp far enough in the past that `unixepoch()` cannot produce it during this test.
@@ -1291,8 +1287,7 @@ fn an_excluded_row_is_never_offered_as_work_and_comes_back_through_reset() {
 
 #[test]
 fn excluding_a_row_no_run_enrolled_is_refused_rather_than_silently_doing_nothing() {
-    // The `status <> excluded` clause means a zero row count no longer implies the row is absent, so
-    // this is the case that would go quiet if the read that discriminates them were dropped.
+    // Since queue task 58 the per-row status read comes FIRST and answers this on its own: an absent row is a `None` from that read, and nothing else in the loop can produce one. Dropping the read for a bare guarded `UPDATE` is what would make this case go quiet, and this test is the only one that reds when it does. Restoring `require_hit` on the statement's count would not red anything and would pin nothing either: the statement is issued only for a row the read just found, inside the transaction that holds the write lock, so its count cannot be zero.
     let work = Workspace::new();
     let mut manifest = work.open();
     match manifest.exclude(ItemKind::Memory, &["never-enrolled".to_owned()]) {
@@ -1301,6 +1296,32 @@ fn excluding_a_row_no_run_enrolled_is_refused_rather_than_silently_doing_nothing
         }
         other => panic!("expected UnknownItem, got {other:?}"),
     }
+}
+
+/// Excluding an empty set issues nothing at all, the transaction included — and the memories leg calls it that way on every run, since its plan's `excluded` is always empty. Observable because a transaction IS a write lock: with the early return the call needs none and returns `Ok(())` under a blocker holding one; without it `BEGIN IMMEDIATE` waits out rusqlite's 5 s busy retry and comes back `DatabaseBusy`. Measured both ways — the early return survived the whole suite until this test, which is why it is here rather than resting on the `if` reading obviously correct.
+///
+/// **The impatient writer is the positive control, and it is the weaker of the two available ones for the reason `restating_a_gap_a_row_already_carries_takes_no_write_lock` gives.** It establishes that the blocker really holds the write lock, so the `Ok(())` below means "took no lock" rather than "there was nothing to contend with". It does not establish that `exclude`'s own `BEGIN` would have blocked; the mutant run is what showed that, at exactly the 5 s, and a clean run does not need to pay it forever.
+#[test]
+fn excluding_nothing_takes_no_write_lock() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+
+    let db = work.state.join(format!("{ID}.sqlite"));
+    let blocker = rusqlite::Connection::open(&db).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let impatient = rusqlite::Connection::open(&db).unwrap();
+    impatient.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+    let refused = impatient.execute("UPDATE items SET last_error = ?1 WHERE source_id = ?2", params!["anything at all", "m-01"]);
+    assert!(
+        refused.is_err(),
+        "the blocker did not actually hold the write lock, so the assertion below would pass on nothing: {refused:?}"
+    );
+
+    let empty = manifest.exclude(ItemKind::Memory, &[]);
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(empty.is_ok(), "excluding nothing opened a transaction it did not need: {empty:?}");
 }
 
 /// The batch is one transaction, and an unknown id in it rolls the whole thing back rather than
@@ -1322,6 +1343,53 @@ fn one_unknown_id_rolls_the_whole_exclusion_back() {
     // proves the rollback rather than the one that was never reached.
     assert_eq!(status_of(&manifest, "m-01"), ItemStatus::Pending, "the write before the failure was rolled back");
     assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending);
+}
+
+/// A word this build cannot read reaches a decision here now that the status read comes FIRST, and the answer has to be the module's usual refusal rather than a silent park. Before queue task 58 the SQL guard let such a row straight through — `'a_status_from_a_later_build' <> 'excluded'` is true, so the `UPDATE` matched, the count came back non-zero and nothing ever parsed the word — and a status a NEWER build wrote was overwritten with this build's verdict, which is exactly the resumable state `ManifestError::CorruptRow`'s "upgrade first" message exists to protect.
+///
+/// **The refusal takes the whole batch down with it, which is the transaction behaving as `one_unknown_id_rolls_the_whole_exclusion_back` already describes rather than a second decision.** `m-02` is ordered before the bad id so it is written inside the transaction and its rollback is observable rather than being a row the loop never reached. That costs the only caller nothing new: `local_fix::run` calls `resume` on the next line and `counts` parses every row of the kind, so a corrupt row of this kind already stopped that run one call later.
+///
+/// **The separate call on `m-03` is the positive control, and it has to be a separate call.** Without it an `exclude` that had stopped doing anything at all would pass, because a dead call leaves a hand-edited row alone just as well as a refusing one does — and a control sharing the refused batch would be rolled back with it and prove nothing.
+#[test]
+fn excluding_a_row_whose_status_this_build_cannot_read_is_refused_rather_than_overwritten() {
+    const UNREADABLE: &str = "a_status_from_a_later_build";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02", "m-03"])).unwrap();
+    }
+
+    // Only reachable by another build or a hand-edit, which is the point: this build cannot write a
+    // word it does not know.
+    let db = work.state.join(format!("{ID}.sqlite"));
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE items SET status = ?1 WHERE source_id = ?2", params![UNREADABLE, "m-01"]).unwrap();
+    }
+
+    let mut manifest = work.open();
+    let error = manifest.exclude(ItemKind::Memory, &["m-02".to_owned(), "m-01".to_owned()]).unwrap_err();
+    assert!(
+        matches!(&error, ManifestError::CorruptRow { column, value } if column.to_string() == "status" && value == UNREADABLE),
+        "{error:?}"
+    );
+    assert_eq!(status_of(&manifest, "m-02"), ItemStatus::Pending, "the write before the refusal was rolled back");
+
+    manifest.exclude(ItemKind::Memory, &["m-03".to_owned()]).unwrap();
+    assert_eq!(
+        status_of(&manifest, "m-03"),
+        ItemStatus::Excluded,
+        "positive control: the same call did run, and did exclude the row it could read"
+    );
+
+    // Read around `item`, which refuses the unreadable word itself and so cannot say what the row now holds.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let row: (String, Option<String>) = conn
+        .query_row("SELECT status, last_error FROM items WHERE source_id = ?1", ["m-01"], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap();
+    assert_eq!(row.0, UNREADABLE, "the row this build cannot read was excluded with this build's verdict instead of being refused");
+    assert_eq!(row.1, None, "and it was given the exclusion note on the way");
 }
 
 /// Excluding is a decision about OUTPUT; the retirement sweep is a fact about the SOURCE. So an

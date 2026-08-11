@@ -821,7 +821,9 @@ impl Manifest {
     ///
     /// **The read comes FIRST, and the redaction cannot move behind the write's condition** (queue task 57, whose own premise said it could). `?2` is the REDACTED reason, so the guard consumes the redaction's output: reading this row's url is an input to the write decision rather than a step that merely precedes it, and no arrangement that keeps the note redacted issues zero reads for a gap it does not restate. What was removable is the duplication. One `SELECT` of `status`, `last_error` and `url` answers the redaction, the skip and [`ManifestError::UnknownItem`] together, where the old shape paid a url `SELECT` inside `redacted`, an `UPDATE` matching nothing, and a status `SELECT` to tell "already says this" from "never enrolled" apart. Per call: 3 statements down to 1 on the common path — the ~90 gap rows the memories leg restates every run, plus one per unpaired chat token — 3 down to 1 on a row nothing enrolled, and 2 either way on a row that genuinely changes.
     ///
-    /// **The cheap path now rests on a Rust-side read-then-write, and the SQL guard is kept ON TOP of it deliberately.** The Rust comparison decides whether to ISSUE the statement; the statement's own `AND (status <> ?1 OR last_error IS NOT ?2)` decides whether to WRITE. Each reads as redundant beside the other and neither is, and both halves are PINNED rather than merely argued: `restating_a_gap_a_row_already_carries_takes_no_write_lock` reds when the Rust check goes, because the statement a skipped call never issues is a statement that never takes a write lock, and `a_row_that_moved_between_the_read_and_the_write_is_not_restamped` reds when the clause goes, because a row that moved under the read then picks up an `updated_at` restamp for a change this run did not make. Both drive a second connection on the same file. A single-connection fixture separates neither, which an earlier draft of this paragraph mistook for the mutants being unkillable — they are killable, and the pins are what say so.
+    /// **The cheap path now rests on a Rust-side read-then-write, and the SQL guard is kept ON TOP of it deliberately.** The Rust comparison decides whether to ISSUE the statement; the statement's own `AND (status <> ?1 OR last_error IS NOT ?2)` decides whether to WRITE. Each reads as redundant beside the other and neither is, and both halves are PINNED rather than merely argued: `restating_a_gap_a_row_already_carries_takes_no_write_lock` reds when the Rust check goes, because the statement a skipped call never issues is a statement that never takes a write lock, and `a_row_that_moved_between_the_read_and_the_write_is_not_restamped` reds when the clause goes, because a row that moved under the read then picks up an `updated_at` restamp for a change this run did not make. Both drive a second connection on the same file. A single-connection fixture separates neither, which an earlier draft of this paragraph mistook for the mutants being unkillable. They are killable, and the pins are what say so.
+    ///
+    /// **[`Self::exclude`] deliberately does NOT keep its guard, and the axis is the transaction rather than the note.** This writer has no transaction, so its read and its write are separately locked and a row can move between them; `exclude` and [`Self::retire_absent`] each run their whole set inside one `TransactionBehavior::Immediate`, which takes the write lock at `BEGIN` and holds it to the commit, so nothing can move under their reads and a SQL guard there is genuinely redundant. Keeping one would also suppress the restamp their Rust skip is pinned by, burying that mutant. Those two now carry byte-identical statements and this one is the outlier, for the reason above rather than by oversight. Ruled in design.md's manifest notes at the task-58 entry; do not read the note-versus-constant axis this module draws elsewhere as the explanation for the difference.
     ///
     /// A mutation that WIDENS the Rust skip is caught by two of the pins named further up — `a_gap_row_is_written_whenever_its_status_or_its_reason_differs` and `a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it`. Not by `re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched`, which pins the skip FIRING and so cannot see it fire too often.
     ///
@@ -874,23 +876,19 @@ impl Manifest {
     /// fixed string holds no secret, so it skips the redactor and the per-row url read that would
     /// pay for it.
     ///
-    /// **Writing `Excluded` over an already-`Excluded` row touches nothing.** That is the same
-    /// property [`Self::retire_absent`] pays for and it is load-bearing for the same reason: an
-    /// excluded row is re-derived by every later run from the same rule, so a statement matching it
-    /// unconditionally would rewrite `updated_at` — documented on [`Item::updated_at`] as the last
-    /// time the row's own state moved, and explicitly not as the last run — on every run, for every
-    /// excluded row, turning that column into exactly the thing it says it is not. The
-    /// `status <> ?1` clause is what makes the write conditional, and the read below is what keeps
-    /// [`ManifestError::UnknownItem`] answerable once a zero row count no longer implies the row is
-    /// absent. Pinned by `excluding_an_already_excluded_row_leaves_it_untouched`.
+    /// **Writing `Excluded` over an already-`Excluded` row touches nothing.** That is the same property [`Self::retire_absent`] pays for and it is load-bearing for the same reason: an excluded row is re-derived by every later run from the same rule, so a statement matching it unconditionally would rewrite `updated_at` — documented on [`Item::updated_at`] as the last time the row's own state moved, and explicitly not as the last run — on every run, for every excluded row, turning that column into exactly the thing it says it is not. **The per-row status read below is what decides that**, and the statement is issued only for a row the read says is about to move. Pinned by `excluding_an_already_excluded_row_leaves_it_untouched`.
     ///
-    /// **The note is deliberately not a second half of that clause**, which is where this parts
-    /// company with [`Self::mark_source_missing`]'s `status <> ?1 OR last_error IS NOT ?2`: that
-    /// note is caller text two runs of one build genuinely disagree about, and this one is a
-    /// constant no run computes. The consequence a reader has to be able to see is that rewording
-    /// the constant reaches no already-excluded row, and it is written on the constant rather than
-    /// here, because that is the line someone rewording it is looking at. Pinned by
-    /// `an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it`.
+    /// **The note is deliberately not a second half of that comparison**, which is where this parts company with [`Self::mark_source_missing`]'s `status <> ?1 OR last_error IS NOT ?2`: that note is caller text two runs of one build genuinely disagree about, and this one is a constant no run computes. The consequence a reader has to be able to see is that rewording the constant reaches no already-excluded row, and it is written on the constant rather than here, because that is the line someone rewording it is looking at. Pinned by `an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it`.
+    ///
+    /// **The read comes FIRST, and one narrow `SELECT` answers both questions** (queue task 58). It is cheaper here than the same move is at [`Self::mark_source_missing`], and the axis this module already draws is the reason: that note is caller text redacted against the row's own url, so its read has to carry `last_error` and `url` and its redaction is an INPUT to the write decision, where `EXCLUDED_NOTE` is a module constant holding no secret — no url is needed, nothing is redacted, and the status column alone tells the skip and [`ManifestError::UnknownItem`] apart. Statements per id: 2 down to 1 on an already-excluded row, which is the common case because an excluded row is re-derived by every later run from the same rule; 2 down to 1 on a row nothing enrolled. A row that genuinely transitions pays 1 up to 2, and it pays it once per transition INTO `Excluded` rather than once in the row's life — [`Self::reset`] is the documented way back out, so a row that is reset and later re-excluded pays it again — against a saving on every run in between.
+    ///
+    /// **What the saving is NOT is the write lock**, and the neighbouring `restating_a_gap_a_row_already_carries_takes_no_write_lock` at [`Self::mark_source_missing`] makes that easy to carry across wrongly. The transaction opens before the loop, so a call whose every id is already excluded — the chat-media leg's steady state, and the case this whole saving is about — still takes `BEGIN IMMEDIATE`, issues zero statements inside it and commits an empty transaction. Only an empty `source_ids` skips the lock, pinned by `excluding_nothing_takes_no_write_lock`. Deciding outside the transaction to save the lock as well is the wrong trade: it is exactly the read-then-write window the paragraph below says this shape does not have.
+    ///
+    /// **There is no SQL guard on top of that comparison, and the transaction is why** — the one place this is NOT [`Self::mark_source_missing`]'s shape, which keeps `AND (status <> ?1 OR last_error IS NOT ?2)` under its own Rust check. That writer holds no transaction, so its read and its write are two separately-locked operations with rusqlite's 5000 ms busy retry between them, wide enough for another process to write into. Here `TransactionBehavior::Immediate` takes the write lock at `BEGIN`, before the first read, and holds it to the commit: no other connection can commit inside that span, so nothing can move a row between the read that decides it and the write that acts on it. A retained clause would be a predicate no input can make false, and a paragraph explaining it would be describing a hazard that cannot occur here. That is an equivalence claim, so it carries its bound and its measurement rather than an argument, and the bound is TWO preconditions rather than one. First, this transaction began, which is what reaching the loop means — attacked in design.md's task-58 entry with a competing `BEGIN IMMEDIATE` (the call never starts, `DatabaseBusy` at 5.004 s) and with an intruder connection that landed 0 of 6116 writes inside a 5000-row call's 30.1 ms span. Second, `PRIMARY KEY (kind, source_id)` on the schema above, which is what makes the statement's row set exactly the row the read decided on. Drop that key and one connection separates the mutant with no concurrency at all: two rows sharing `('memory', 'm-01')`, one `Pending` and one `Excluded`, and the read returns `Pending`, the skip does not fire, and this unguarded statement restamps BOTH where the guarded one restamps one. With the key present sqlite refuses to construct that state (`UNIQUE constraint failed: items.kind, items.source_id`), which is why the equivalence holds rather than being lucky.
+    ///
+    /// So the dependence runs both ways and both are worth naming, because each is a change someone could make without reading this: demoting the transaction to `Deferred` — or dropping it for per-item commits — reopens the window the gap writer's clause is there for, and widening or removing the primary key breaks the one-read-one-row identity the dropped clause rested on. Either way the clause has to come back with it.
+    ///
+    /// **A status this build cannot read is refused rather than overwritten**, the same call [`Self::mark_source_missing`] makes and reached the same way: the read parses the stored word before anything decides on it. The old shape parsed it only after a zero-row `UPDATE`, and a word this build does not know satisfies `status <> 'excluded'`, so the statement matched, the count came back non-zero and a newer build's status went silently to `Excluded`. Refusing puts this where every other reader of the column already has it — [`Self::item`], [`Self::items`], [`Self::pending`] and `counts` all refuse an unknown word, and design.md's warning against pushing a status filter into SQL is the same rule from the other side. The batch consequence is real and is the transaction's, not a second ruling: one unreadable row rolls the whole set back, exactly as an unknown id already does. It costs the only caller nothing new, since [`crate::export::local_fix::run`] calls [`Self::resume`] on the next line and `counts` parses every row of the kind. Pinned by `excluding_a_row_whose_status_this_build_cannot_read_is_refused_rather_than_overwritten`.
     ///
     /// Every other status is overwritten, [`ItemStatus::Done`] included: the plan deciding this row
     /// produces nothing is a statement about the row as it stands rather than about what an earlier
@@ -907,31 +905,13 @@ impl Manifest {
     ///
     /// # Errors
     ///
-    /// Returns [`ManifestError::UnknownItem`] when nothing enrolled one of the items — the whole
-    /// transaction rolls back — [`ManifestError::CorruptRow`] when the read's stored status no
-    /// longer parses, and [`ManifestError::Sqlite`] when a read or a write fails.
+    /// Returns [`ManifestError::UnknownItem`] when nothing enrolled one of the items, [`ManifestError::CorruptRow`] when a row's stored status no longer parses, and [`ManifestError::Sqlite`] when a read or a write fails. Any of the three rolls the whole transaction back, so a batch that fails part-way excludes nothing at all.
     pub fn exclude(&mut self, kind: ItemKind, source_ids: &[String]) -> Result<(), ManifestError> {
         /// What an excluded row's `last_error` says.
         ///
-        /// **Rewording this strands every row an earlier run already excluded.** The guard below
-        /// skips such a row on its status alone, and nothing else in this module rewrites a parked
-        /// row's note in place, so an existing database goes on carrying the old sentence with its
-        /// status column reading correct. Queue task 49 ruled that cost worth paying rather than
-        /// joining the note to the guard: repairing the note that way restamps `updated_at`, the one
-        /// column here holding a fact no other column can reconstruct, and this note holds none —
-        /// `status` already says exactly this. Upgrade path, if a reword ever has to reach old rows:
-        /// add `OR last_error IS NOT ?2` the way [`Manifest::mark_source_missing`] has it (`IS NOT`
-        /// because the column is nullable) and accept the restamp. A reword is loud rather than
-        /// silent because `an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it` pins
-        /// these bytes.
+        /// **Rewording this strands every row an earlier run already excluded.** The skip below reaches such a row on its status alone and the statement is never issued for it, and nothing else in this module rewrites a parked row's note in place, so an existing database goes on carrying the old sentence with its status column reading correct. Queue task 49 ruled that cost worth paying rather than joining the note to the decision: repairing the note that way restamps `updated_at`, the one column here holding a fact no other column can reconstruct, and this note holds none — `status` already says exactly this. Upgrade path, if a reword ever has to reach old rows: read `last_error` beside `status` below and skip only a row already carrying both (the stored note is an `Option`, so a `None` never equals this constant and such a row is written — the same case [`Manifest::mark_source_missing`]'s `IS NOT` exists for), then accept the restamp. A reword is loud rather than silent because `an_already_excluded_rows_note_is_frozen_at_the_run_that_parked_it` pins these bytes.
         ///
-        /// **A stranded note is only ever replaced by the row LEAVING this status.** Every statement
-        /// in this module that writes `last_error` also writes `status`, and the one that would land
-        /// back on `Excluded` is the guarded statement below, so nothing refreshes the note in place.
-        /// [`Manifest::reset`] is the deliberate route out; [`Manifest::retire_absent`] is an
-        /// incidental one and is reachable — an excluded row the export stops naming is not exempt
-        /// from that sweep, which is the settled answer rather than a missed exemption, pinned by
-        /// `a_vanished_excluded_row_is_retired`.
+        /// **A stranded note is only ever replaced by the row LEAVING this status.** Every statement in this module that writes `last_error` also writes `status`, and the one that would land back on `Excluded` is the statement below, which the skip keeps an excluded row away from, so nothing refreshes the note in place. [`Manifest::reset`] is the deliberate route out; [`Manifest::retire_absent`] is an incidental one and is reachable — an excluded row the export stops naming is not exempt from that sweep, which is the settled answer rather than a missed exemption, pinned by `a_vanished_excluded_row_is_retired`.
         const EXCLUDED_NOTE: &str = "this build writes no output for this item";
 
         if source_ids.is_empty() {
@@ -943,38 +923,33 @@ impl Manifest {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|source| sqlite_error("record excluded items", &path, source))?;
         {
-            let mut write = tx
-                .prepare(
-                    "UPDATE items SET status = ?1, last_error = ?2, \
-                     updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4 AND status <> ?1",
-                )
-                .map_err(|source| sqlite_error("record excluded items", &path, source))?;
-            // The status column alone, not a whole row. This runs once per already-excluded item on
-            // every run after the first, and a full-row read would materialize an output path, a url
-            // and a checksum the verdict never looks at — the narrowing `retire_absent`'s own warning
-            // asks for, which is safe here only because nothing pushes the status filter into sql.
+            // The status column alone, not a whole row. This runs once per item on every run, and a full-row read would materialize an output path, a url and a checksum the verdict never looks at — the narrowing `retire_absent`'s own warning asks for, which is safe here only because nothing pushes the status filter into sql.
             let mut status_of = tx
                 .prepare("SELECT status FROM items WHERE kind = ?1 AND source_id = ?2")
                 .map_err(|source| sqlite_error("record excluded items", &path, source))?;
+            // Prepared once for the whole set rather than per item, the same way the read above is: both are hot on a set that can be every row of a kind.
+            let mut write = tx
+                .prepare(
+                    "UPDATE items SET status = ?1, last_error = ?2, \
+                     updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4",
+                )
+                .map_err(|source| sqlite_error("record excluded items", &path, source))?;
 
             for source_id in source_ids {
-                let changed = write
-                    .execute(params![ItemStatus::Excluded.as_stored(), EXCLUDED_NOTE, kind.as_stored(), source_id])
-                    .map_err(|source| sqlite_error("record excluded items", &path, source))?;
-                if changed != 0 {
-                    continue;
-                }
-                // Nothing changed means one of exactly two things, since the only row the statement
-                // above can miss is one already carrying the status it writes: the row is already
-                // excluded, or nothing enrolled it. Only a read tells them apart.
                 let stored: Option<String> = status_of
                     .query_row(params![kind.as_stored(), source_id], |row| row.get(0))
                     .optional()
                     .map_err(|source| sqlite_error("record excluded items", &path, source))?;
-                match stored {
-                    Some(stored) if ItemStatus::from_stored(&stored)? == ItemStatus::Excluded => {}
-                    _ => return Err(ManifestError::UnknownItem { kind, source_id: source_id.clone() }),
+                let Some(stored) = stored else {
+                    return Err(ManifestError::UnknownItem { kind, source_id: source_id.clone() });
+                };
+                if ItemStatus::from_stored(&stored)? == ItemStatus::Excluded {
+                    continue;
                 }
+                // The row count is dropped rather than checked, and no `status <> ?1` rides along. The read that decided this ran inside this write transaction, so the row is there and still carries the word it was read at.
+                write
+                    .execute(params![ItemStatus::Excluded.as_stored(), EXCLUDED_NOTE, kind.as_stored(), source_id])
+                    .map_err(|source| sqlite_error("record excluded items", &path, source))?;
             }
         }
         tx.commit().map_err(|source| sqlite_error("record excluded items", &path, source))
@@ -1081,14 +1056,7 @@ impl Manifest {
         /// because `an_already_retired_rows_note_is_frozen_at_the_sweep_that_retired_it` pins these
         /// bytes.
         ///
-        /// **A stranded note is only ever replaced by the row LEAVING this status.** Every statement
-        /// in this module that writes `last_error` also writes `status`, and the one that would land
-        /// back on `Retired` is this sweep, whose filter exempts `Retired`, so nothing refreshes the
-        /// note in place. [`Manifest::reset`] is the deliberate route out. [`Manifest::exclude`]'s
-        /// `status <> ?1` does admit a `Retired` row at the SQL level, but its only caller feeds it a
-        /// plan built from sources that are present, and a retired row's source is gone by
-        /// definition — so that path is unproven in either direction rather than known-live, and
-        /// nothing should be built on it.
+        /// **A stranded note is only ever replaced by the row LEAVING this status.** Every statement in this module that writes `last_error` also writes `status`, and the one that would land back on `Retired` is this sweep, whose filter exempts `Retired`, so nothing refreshes the note in place. [`Manifest::reset`] is the deliberate route out. [`Manifest::exclude`] does admit a `Retired` row — its skip compares against `Excluded` and nothing else — but its only caller feeds it a plan built from sources that are present, and a retired row's source is gone by definition — so that path is unproven in either direction rather than known-live, and nothing should be built on it.
         const RETIRED_NOTE: &str = "the export no longer holds a source for this item";
 
         if !unreadable.is_empty() {
