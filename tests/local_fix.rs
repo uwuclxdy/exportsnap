@@ -24,6 +24,10 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::NaiveDate;
 use common::Tool;
+use common::composite::{
+    TALL_TRANSPARENT_BLOCK_BOTTOM, TALL_TRANSPARENT_BLOCK_EITHER_SIZE, TRANSPARENT_BLOCK, WIDE_TRANSPARENT_BLOCK,
+    assert_shows_main_through, main_colour,
+};
 use exportsnap::export::exif::{Jpeg, Stamp};
 use exportsnap::export::local_fix::{self, DeferralReason, Leg, Notice, Plan, RecordedOutputs, TimeSource, TranscodeSkip, VideoOptions};
 use exportsnap::export::manifest::{Checksum, DemotionReason, ExportId, ItemKind, ItemStatus, Manifest};
@@ -55,102 +59,9 @@ fn uuid(seed: u32) -> String {
     format!("{seed:08x}-3ff7-45f1-95f9-a2fda6ba0f8e")
 }
 
-/// The colour [`write_main`] paints at `(x, y)`, which is what a transparent overlay region has to
-/// leave showing.
-fn main_colour(x: u32, y: u32) -> [u8; 3] {
-    [(x % 7) as u8 * 5, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]
-}
-
-/// Asserts the overlay's transparent region left the MAIN showing through, on all three channels.
-///
-/// **What used to stand here was a brightness threshold on subpixel 0, and it could not discriminate
-/// at all.** Per pixel, which is what that threshold sampled, the main's red across these regions
-/// runs 0-31 against black's 0, so `< 60` passed
-/// whether the transparent half showed the main through or the alpha had been dropped to black —
-/// the fixture held the asserted channel near-constant across the two outcomes, which is this repo's
-/// own recorded trap. Green and blue separate them, and matching all three also reds on a composite
-/// onto any invented background rather than only on black.
-///
-/// **Asserted as a block MEAN rather than as one pixel, and that is the load-bearing half.** The
-/// main fixture is high-frequency by design — `write_main`'s doc says so, because the byte-for-byte
-/// copy test needs it — and JPEG's DCT smears neighbours: measured on these fixtures, a lone pixel
-/// drifts up to 21 levels across the two generations they carry, which is close enough to the gap
-/// being detected that a per-pixel tolerance would be guessing. A block mean is essentially the DC
-/// coefficient, which JPEG preserves closely, so the comparison stays tight.
-///
-/// **The block is the caller's, because which region is transparent moves with the fixture.**
-/// [`TRANSPARENT_BLOCK`] is the 64x48 pairs'; a frame of another size puts its own somewhere else
-/// entirely. Whatever a caller passes has to lie wholly inside the transparent half and clear of
-/// its edge, where an overlay scaled by Lanczos rings alpha across the boundary.
-///
-/// **Both halves of the margin are per-block and neither generalizes for free**, so a new block
-/// re-measures instead of inheriting these. The drift is a property of the quantiser at that
-/// block's frequency content; the gap to black is a property of where that block's pseudo-random
-/// green and blue happen to average. Measured 2026-08-11 through this assertion, worst channel and
-/// then the green/blue the main shows through at: [`TRANSPARENT_BLOCK`] drifts 3.47 at 126/131 —
-/// the same figure on the png pair and on the webp one, which composite that block from the same
-/// main — [`WIDE_TRANSPARENT_BLOCK`] 3.16 at 82/129, [`TALL_TRANSPARENT_BLOCK_BOTTOM`] 0.95 at 100/129, and
-/// [`TALL_TRANSPARENT_BLOCK_EITHER_SIZE`] 3.59 at 140/124. Drift spans nearly 4x across the four and
-/// the gaps run 82 to 140, which is why both are stated per block rather than as one number.
-fn assert_shows_main_through(composite: &RgbImage, block: [u32; 4], label: &str) {
-    /// Clears the worst measured drift by better than 2x and sits an order of magnitude under the
-    /// smallest of the four gaps that separate the main from black on green and blue.
-    const TOLERANCE: f64 = 8.0;
-
-    let [left, top, right, bottom] = block;
-    let count = f64::from((right - left) * (bottom - top));
-    let mut actual = [0.0; 3];
-    let mut expected = [0.0; 3];
-    for y in top..bottom {
-        for x in left..right {
-            let painted = main_colour(x, y);
-            for channel in 0..3 {
-                actual[channel] += f64::from(composite.get_pixel(x, y).0[channel]) / count;
-                expected[channel] += f64::from(painted[channel]) / count;
-            }
-        }
-    }
-    for channel in 0..3 {
-        let drift = actual[channel] - expected[channel];
-        assert!(drift.abs() <= TOLERANCE, "{label}: channel {channel} averaged {actual:?} over {block:?}, expected about {expected:?}");
-    }
-}
-
 /// The eight bytes every PNG opens with, so an output asserted to be one is checked against the
 /// container rather than against the name it was given.
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
-
-/// A block wholly inside the overlay's TRANSPARENT half and away from its edge, on the 64x48 pairs.
-/// What the 64x48 callers hand [`assert_shows_main_through`], which takes its block from the caller
-/// for the reason its doc gives.
-const TRANSPARENT_BLOCK: [u32; 4] = [48, 8, 56, 16];
-
-/// [`TRANSPARENT_BLOCK`] for the 4608x64 pair, whose scaled overlay puts its transparent half
-/// somewhere else entirely. Named rather than inlined at the call site so a grep for one of these
-/// blocks reaches every one of them.
-const WIDE_TRANSPARENT_BLOCK: [u32; 4] = [4000, 24, 4008, 32];
-
-/// [`TRANSPARENT_BLOCK`] for the 1440x2560 pair's bottom rows. Scaled, the overlay covers the whole
-/// frame and its opaque half ends at x = 720, so this sits 680px into the transparent half — clear
-/// of the ringing Lanczos leaves at that boundary — and 32 short of the frame's right edge.
-/// **Only the scale-up puts the overlay here at all**: unscaled and centred it spans 180..1260 x
-/// 320..2240, which this block is outside on both axes, so a dropped resize leaves the main showing
-/// here too and this assertion stays green through it (measured 2026-08-11). The sibling `> 200`
-/// assert is what observes the resize.
-///
-/// **What it holds over [`TALL_TRANSPARENT_BLOCK_EITHER_SIZE`] is spatial coverage, not a second
-/// discrimination**: it is the only TRANSPARENCY sample in the region the scale-up alone reaches
-/// (the sibling `> 200` covers that region on the opaque claim), but no mutation tried on
-/// 2026-08-11 — dropped compositing, dropped resize, `Nearest` in place of Lanczos — killed either
-/// block without the other. Deleting it costs that coverage and nothing measured.
-const TALL_TRANSPARENT_BLOCK_BOTTOM: [u32; 4] = [1400, 2496, 1408, 2504];
-
-/// [`TRANSPARENT_BLOCK`] for the 1440x2560 pair, in the region the overlay's transparent half covers
-/// at EITHER size: 280px right of the opaque half's edge, which both placements put at x = 720, and
-/// inside the 720..1260 x 320..2240 the unscaled centred overlay leaves transparent. So it reads
-/// "the alpha composited" whether or not the resize ran, which is the half
-/// [`TALL_TRANSPARENT_BLOCK_BOTTOM`] cannot cover.
-const TALL_TRANSPARENT_BLOCK_EITHER_SIZE: [u32; 4] = [1000, 1000, 1008, 1008];
 
 /// A block wholly inside the overlay's OPAQUE half and away from its edge, where a composite that
 /// ran paints the caption's red.

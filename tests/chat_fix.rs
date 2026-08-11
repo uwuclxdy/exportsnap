@@ -33,6 +33,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::Tool;
+use common::composite::{TRANSPARENT_BLOCK, assert_shows_main_through, main_colour};
 use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs, dir_name};
 use exportsnap::export::chat_media::{ChatMediaFile, Discovery, Family, Reconciliation, Token, discover, reconcile};
 use exportsnap::export::exif::{Jpeg, Stamp};
@@ -65,52 +66,6 @@ const HEIGHT: u32 = 48;
 /// A distinct alphanumeric id per `seed`, in the shape a plain filename carries.
 fn id(seed: u32) -> String {
     format!("aB3xY9{seed:04}")
-}
-
-/// The colour [`paint_jpeg`] paints at `(x, y)`, which is what a transparent overlay region has to
-/// leave showing.
-fn main_colour(x: u32, y: u32) -> [u8; 3] {
-    [(x % 7) as u8 * 5, ((x * 13 + y * 7) % 251) as u8, ((x * 29 + y * 17) % 253) as u8]
-}
-
-/// Asserts the overlay's transparent region left the MAIN showing through, on all three channels.
-///
-/// **What used to stand here was a brightness threshold on subpixel 0, and it could not discriminate
-/// at all.** The main's red in the asserted region is 20 against black's 0, so `< 60` passed whether
-/// the transparent half showed the main through or the alpha had been dropped to black — the fixture
-/// held the asserted channel near-constant across the two outcomes, which is this repo's own recorded
-/// trap. Green and blue separate them, and matching all three also reds on a composite onto any
-/// invented background rather than only on black.
-///
-/// **Asserted as a block MEAN rather than as one pixel, and that is the load-bearing half.** The main
-/// fixture is high-frequency by design and JPEG's DCT smears neighbours: measured on these fixtures a
-/// lone pixel drifts up to 21 levels, close enough to the gap being detected that a per-pixel
-/// tolerance would be guessing. A block mean is essentially the DC coefficient, which JPEG preserves
-/// closely, so the margin to the failure it must catch is about 125 on the chroma channels.
-fn assert_shows_main_through(composite: &RgbImage, label: &str) {
-    /// A block wholly inside the overlay's transparent half and away from its edge.
-    const BLOCK: [u32; 4] = [48, 8, 56, 16];
-    /// Comfortably above the drift a preserved block mean shows and far below the ~125 that
-    /// separates the main from black on green and blue.
-    const TOLERANCE: f64 = 8.0;
-
-    let [left, top, right, bottom] = BLOCK;
-    let count = f64::from((right - left) * (bottom - top));
-    let mut actual = [0.0; 3];
-    let mut expected = [0.0; 3];
-    for y in top..bottom {
-        for x in left..right {
-            let painted = main_colour(x, y);
-            for channel in 0..3 {
-                actual[channel] += f64::from(composite.get_pixel(x, y).0[channel]) / count;
-                expected[channel] += f64::from(painted[channel]) / count;
-            }
-        }
-    }
-    for channel in 0..3 {
-        let drift = actual[channel] - expected[channel];
-        assert!(drift.abs() <= TOLERANCE, "{label}: channel {channel} averaged {actual:?} over {BLOCK:?}, expected about {expected:?}");
-    }
 }
 
 fn chat_media_dir(root: &Path) -> PathBuf {
@@ -581,7 +536,7 @@ fn a_composited_pair_keeps_both_originals_beside_the_merged_file() {
     // right half does not, so a run that skipped the composite could not pass this.
     let merged = image::open(work.out().join("chat/_no-conversation/2021/03/20210304_000000.jpg")).unwrap().to_rgb8();
     assert!(merged.get_pixel(4, 4).0[0] > 200, "the left half is the overlay's red: {:?}", merged.get_pixel(4, 4));
-    assert_shows_main_through(&merged, "the transparent half is the main showing through");
+    assert_shows_main_through(&merged, TRANSPARENT_BLOCK, "the transparent half is the main showing through");
 }
 
 // ---- decision 53: the kept copies go through the claim set too ----
@@ -828,7 +783,7 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says() {
         let written = image::open(&output).unwrap().to_rgb8();
         if composites {
             assert!(written.get_pixel(4, 4).0[0] > 200, "{mode}: the overlay's red left half won — {:?}", written.get_pixel(4, 4));
-            assert_shows_main_through(&written, &format!("{mode}: the transparent half is the main"));
+            assert_shows_main_through(&written, TRANSPARENT_BLOCK, &format!("{mode}: the transparent half is the main"));
         } else {
             let painted = main_colour(4, 4);
             let pixel = written.get_pixel(4, 4).0;

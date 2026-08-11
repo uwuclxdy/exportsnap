@@ -28,7 +28,9 @@
 //!
 //! [`fixtures`] answers the same demanded-versus-absent question about the `fixtures/` TREE. Its
 //! own module because the two halves are read by disjoint sets of crates and each half is dead code
-//! in the other's, which the allow below is scoped against.
+//! in the other's, which the allow below is scoped against. [`composite`] is a third half on the
+//! same terms and for the same reason, holding the one spelling of the overlay-transparency
+//! assertion that `local_fix` and `chat_fix` had a copy of each.
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -36,13 +38,27 @@ use std::sync::OnceLock;
 /// The module-level allow is what keeps the three tool-gating crates measuring their own half.
 ///
 /// **Measured under `RUSTFLAGS="--force-warn dead_code"`, which overrides every allow in the tree
-/// and so reports what each crate would warn with none of them:** `video`, `local_fix` and
-/// `chat_fix` reach every function out here and nothing under [`fixtures`], so they warn 6 times
-/// each — the whole fixture module — and zero on a function out here. The alternative placement is
-/// a crate-level allow on those three `mod common;` declarations, which would have taken that zero
-/// with it. `export`, `overview` and `fixture_gate` are the mirror image at 11 tool-side warnings
-/// each and carry that crate-level allow instead; `tool_gate` warns 11 with nothing allowed and 5
-/// with this one in place, which is the number its own allow is documented against.
+/// and so reports what each crate would warn with none of them.** Stated per HALF rather than as a
+/// per-crate total, because the total moves whenever a half is added and the split is what decides
+/// where an allow goes — re-measured 2026-08-11 when [`composite`] became the third half:
+///
+/// | crate | this module's top level | [`fixtures`] | [`composite`] |
+/// |---|---|---|---|
+/// | `local_fix` | 0 | 6 | 0 |
+/// | `chat_fix` | 0 | 6 | 3 |
+/// | `video` | 1 | 6 | 6 |
+/// | `export` | 11 | 0 | 6 |
+/// | `overview` | 11 | 0 | 6 |
+/// | `fixture_gate` | 11 | 2 | 6 |
+/// | `tool_gate` | 5 | 6 | 6 |
+///
+/// `video`, `local_fix` and `chat_fix` reach every function out here, which is the zero in the first
+/// column; `video`'s 1 is the [`Tool`] variant its own allow is documented against, not a function.
+/// The alternative placement is a crate-level allow on those three `mod common;` declarations, which
+/// would have taken that zero with it. `export`, `overview` and `fixture_gate` are the mirror image
+/// at 11 tool-side warnings each and carry that crate-level allow instead. `tool_gate` warns 5 out
+/// here, which is the number its own allow is documented against, and 17 with nothing allowed at
+/// all.
 ///
 /// **The cost, stated rather than glossed: an uncalled function under [`fixtures`] warns nowhere.**
 /// All six of its items are live in `export` and `overview` — those two reach the whole chain from
@@ -52,6 +68,24 @@ use std::sync::OnceLock;
 /// keeps it on the larger half, the one three crates exercise in full.
 #[allow(dead_code, reason = "the crates that gate on a tool never read the fixture tree, and the reverse")]
 pub mod fixtures;
+
+/// The overlay-transparency assertion and the blocks it is measured at, read by `local_fix` and
+/// `chat_fix` and by nothing else.
+///
+/// Scoped for the same reason [`fixtures`] is, and the table above is why it could not go at this
+/// module's top level: the third column is what these six items cost every crate that does not read
+/// them, and at the top level that cost would have landed on the first column instead — taking the
+/// zero `video`, `local_fix` and `chat_fix` hold there, which is the signal the whole placement
+/// exists to keep.
+///
+/// **The cost is [`fixtures`]'s cost, on a smaller half.** `local_fix` reaches all six items and
+/// `chat_fix` three, so a new dead helper here warns in neither, and no other crate reads the module
+/// at all. The three it costs are the blocks only `local_fix` passes: they are that crate's fixture
+/// sizes, they belong beside the measured table in [`composite::assert_shows_main_through`] that
+/// cites them by name, and splitting them out to buy the signal back is the fork this module was
+/// added to end.
+#[allow(dead_code, reason = "chat_fix passes only the 64x48 block; the other three are local_fix's fixture sizes")]
+pub mod composite;
 
 /// A capability a gating call site depends on, named for exactly what its probe verifies.
 ///
