@@ -54,8 +54,8 @@ fn the_built_binary_prints_the_credit_on_version_without_a_terminal() {
     // The durable half of task 22's verify line: a built binary prints the OSM
     // + ODbL credit without network or extra flags. `--version` is handled
     // before any terminal takeover, so this passes headless — `output()` gives
-    // the child a captured stdout and no tty, and the EPIPE path is not
-    // exercised here by design (a closed pipe is not deterministic).
+    // the child a captured stdout and no tty. The EPIPE path is exercised by
+    // `tests/cli.rs::a_payload_flag_exits_zero_when_its_reader_has_left`, not here.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_exportsnap")).arg("--version").output().unwrap();
     assert!(output.status.success(), "--version must exit 0, got {:?}", output.status);
     let stdout = String::from_utf8(output.stdout).unwrap();
