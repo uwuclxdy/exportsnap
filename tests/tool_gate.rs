@@ -19,8 +19,15 @@
 ///
 /// `export`, `overview` and `fixture_gate` carry the same allow for the mirror-image reason since
 /// the fixture gate landed: they read `common::fixtures` and gate on no tool. The 5 above still
-/// holds because `common`'s own allow on `pub mod fixtures;` absorbs that half here; with every
-/// allow in the tree overridden (`RUSTFLAGS="--force-warn dead_code"`) this crate warns 11.
+/// holds because `common`'s own allows on `pub mod fixtures;` and `pub mod composite;` absorb both
+/// of those halves here — re-measured 2026-08-11 with this allow removed, and the five names above
+/// are still exactly the five reported.
+///
+/// What this crate warns with NO allow left anywhere is a per-half SUM that moves every time a half
+/// is added, so it is stated once, in `common`'s module doc table, and not restated here. This
+/// paragraph used to carry it and was stale the day [`common::composite`] landed — the same
+/// second-telling failure the note in `a_call_site_runs_only_when_every_tool_it_asked_for_is_usable`
+/// warns about, one file up.
 #[allow(dead_code, reason = "this crate pins the decision half and never calls the probing half")]
 mod common;
 
