@@ -235,7 +235,7 @@ fn from_names(history: &ChatHistory, files: &[&str]) -> Reconciliation {
 /// The plan a FIRST run builds: no manifest has recorded a directory yet, so every one of them is
 /// derived from the conversation-key set.
 fn first_run(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode) -> Plan {
-    chat_fix::plan(reconciliation, out_root, mode, &RecordedDirs::default())
+    chat_fix::plan(reconciliation, out_root, mode, &RecordedDirs::default()).unwrap()
 }
 
 struct Workspace {
@@ -296,7 +296,7 @@ impl Workspace {
         let mut manifest = self.manifest();
         reconciliation.enroll(&mut manifest).unwrap();
         let recorded = RecordedDirs::read(reconciliation, &manifest).unwrap();
-        let plan = chat_fix::plan(reconciliation, self.out(), mode, &recorded);
+        let plan = chat_fix::plan(reconciliation, self.out(), mode, &recorded).unwrap();
         let report = local_fix::run(&plan, &mut manifest, 3, video).unwrap();
         Run { plan, manifest, report }
     }
@@ -323,7 +323,7 @@ impl Workspace {
     fn replan(&self, history: &ChatHistory) -> Plan {
         let reconciliation = reconcile(history, discover(self.source()).unwrap());
         let recorded = RecordedDirs::read(&reconciliation, &self.manifest()).unwrap();
-        chat_fix::plan(&reconciliation, self.out(), OverlayMode::Both, &recorded)
+        chat_fix::plan(&reconciliation, self.out(), OverlayMode::Both, &recorded).unwrap()
     }
 }
 
@@ -1813,7 +1813,7 @@ fn a_memories_plan_still_carries_no_attribution_and_no_originals() {
     // that introduced them.
     let memories = exportsnap::export::model::Memories { saved_media: vec![] };
     let reconciliation = exportsnap::export::memories::reconcile(&memories, exportsnap::export::memories::Discovery::default());
-    let plan = Plan::build(&memories, &reconciliation, "/out", &RecordedOutputs::default());
+    let plan = Plan::build(&memories, &reconciliation, "/out", &RecordedOutputs::default()).unwrap();
     assert_eq!(plan.kind, ItemKind::Memory);
     assert!(plan.excluded.is_empty());
     assert!(plan.items.iter().all(|item| item.attribution.is_none() && item.originals.is_none()));

@@ -75,7 +75,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::export::chat_media::{ChatMediaItem, MediaDate, Message, Reconciliation, Token};
-use crate::export::local_fix::{self, Capture, DeferralReason, Deferred, Leg, Outputs, Plan, PlannedItem, RecordedOutputs, SourceMedia};
+use crate::export::local_fix::{
+    self, Capture, DeferralReason, Deferred, Leg, OutRootError, Outputs, Plan, PlannedItem, RecordedOutputs, SourceMedia,
+};
 use crate::export::manifest::{ItemKind, Manifest, ManifestError};
 use crate::export::model::{Attribution, ConversationId};
 
@@ -393,6 +395,11 @@ impl RecordedDirs {
 ///
 /// The whole of what makes a name off the manifest safe to join back onto the output root, and it is
 /// the containment property rather than a cleaning pass — see [`Conversations::adopt`].
+///
+/// **The root is absolute** — [`plan`] canonicalizes the out root with [`std::path::absolute`] before
+/// joining `CHAT_DIR`, so a relative `--out` and an absolute recorded directory name the same path
+/// here. The case-folding ceiling is stated at [`super::local_fix::under`]: `std::path::absolute`
+/// does not resolve case, and the dev platform does not fold it.
 fn child_name<'a>(root: &Path, dir: &'a Path) -> Option<&'a str> {
     if dir.parent() != Some(root) {
         return None;
@@ -673,9 +680,16 @@ impl Conversations {
 /// output. The `_no-conversation` bucket is what made that ordinary rather than rare — 6413 items
 /// share one directory and every one whose date falls all the way through to the filename takes
 /// `YYYYMMDD_000000`.
-#[must_use]
-pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode, recorded: &RecordedDirs) -> Plan {
-    let chat_root = out_root.as_ref().join(CHAT_DIR);
+pub fn plan(
+    reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode, recorded: &RecordedDirs,
+) -> Result<Plan, OutRootError> {
+    // Canonicalized once here, before joining `CHAT_DIR`: both [`Outputs`] and [`Conversations`]
+    // receive the same absolute chat root, and [`child_name`]'s parent check agrees with
+    // [`super::local_fix::under`]'s prefix check across a relative-vs-absolute respelling. The
+    // same call in [`super::local_fix::Plan::build`]; the ceilings (`..`, symlinks, case) there.
+    let root = out_root.as_ref();
+    let out_root = std::path::absolute(root).map_err(|_| OutRootError { root: root.to_path_buf() })?;
+    let chat_root = out_root.join(CHAT_DIR);
     let no_conversation = chat_root.join(NO_CONVERSATION_DIR);
     // The chat root rather than the out root, so a record this leg could not have written — a
     // memories-tree path, a path under an older out root — neither adopts nor reserves. Same root
@@ -764,7 +778,7 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
         });
     }
 
-    Plan { kind: ItemKind::ChatMedia, items, deferred, excluded }
+    Ok(Plan { kind: ItemKind::ChatMedia, items, deferred, excluded })
 }
 
 /// When a chat-media file was sent, working down the chain in the module docs. `None` when no step

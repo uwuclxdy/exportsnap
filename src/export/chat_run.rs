@@ -77,7 +77,7 @@ use std::sync::mpsc::Sender;
 
 use crate::export::chat_fix::{self, OverlayMode};
 use crate::export::chat_media::{self, ChatScanError, Reconciliation, reconcile};
-use crate::export::local_fix::{self, DEFAULT_MAX_ATTEMPTS, FixReport, Leg, Plan, VideoOptions};
+use crate::export::local_fix::{self, DEFAULT_MAX_ATTEMPTS, FixReport, Leg, OutRootError, Plan, VideoOptions};
 use crate::export::manifest::{ExportId, Manifest, ManifestError};
 use crate::export::model::ChatHistory;
 use crate::export::zip::{DiscoverError, discover_parts};
@@ -223,6 +223,8 @@ pub enum RunError {
     /// The manifest could not be opened, enrolled, read back, or written. The one mid-run failure:
     /// the state store itself is broken, so nothing can be recorded against it.
     Manifest(ManifestError),
+    /// The out root could not be made absolute — a path the platform cannot name a directory with.
+    InvalidOutRoot(OutRootError),
     /// A bug in the pipeline unwound the worker. Not an input state; present so a caller can say
     /// something instead of spinning forever.
     Panicked,
@@ -252,6 +254,7 @@ impl fmt::Display for RunError {
             Self::Discover(error) => write!(f, "{error}"),
             Self::Scan(error) => write!(f, "{error}"),
             Self::Manifest(error) => write!(f, "{error}"),
+            Self::InvalidOutRoot(error) => write!(f, "{error}"),
             Self::Panicked => write!(f, "the run stopped unexpectedly; this is a bug in exportsnap, not in your data"),
         }
     }
@@ -264,6 +267,7 @@ impl Error for RunError {
             Self::Discover(error) => Some(error),
             Self::Scan(error) => Some(error),
             Self::Manifest(error) => Some(error),
+            Self::InvalidOutRoot(error) => Some(error),
             Self::NoExportId(_)
             | Self::SeveralExports { .. }
             | Self::NoJsonDir(_)
@@ -365,7 +369,7 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     //   `a_newcomer_sorting_ahead_of_a_recorded_item_does_not_take_its_output_name`
     //     reds if the resume sweep moves above this read.
     let recorded = chat_fix::RecordedDirs::read(&reconciliation, &manifest).map_err(RunError::Manifest)?;
-    let plan = chat_fix::plan(&reconciliation, &inputs.out_root, inputs.overlay, &recorded);
+    let plan = chat_fix::plan(&reconciliation, &inputs.out_root, inputs.overlay, &recorded).map_err(RunError::InvalidOutRoot)?;
     let counts = counts(&reconciliation, &plan, had_history);
     let rows = plan
         .items

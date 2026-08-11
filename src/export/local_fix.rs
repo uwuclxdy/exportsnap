@@ -636,6 +636,26 @@ pub struct Plan {
     pub excluded: Vec<String>,
 }
 
+/// The out root could not be made absolute.
+///
+/// [`Plan::build`] canonicalizes the root with [`std::path::absolute`], which resolves
+/// relative-to-absolute and normalizes `.` but does not require the path to exist. The one thing it
+/// can reject is a path the platform cannot name a directory with — a NUL byte on unix, a reserved
+/// character on windows — which is a bad `--out=<dir>` value rather than a missing directory.
+#[derive(Debug)]
+pub struct OutRootError {
+    /// The value the run was given for `--out`.
+    pub root: PathBuf,
+}
+
+impl fmt::Display for OutRootError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the out root {} cannot be made absolute; pass --out=<dir> naming a path this platform accepts", self.root.display())
+    }
+}
+
+impl Error for OutRootError {}
+
 impl Plan {
     /// Works out what a run would write, without writing anything.
     ///
@@ -742,13 +762,21 @@ impl Plan {
     /// those six makes a record-carrying non-`Done` row; they do not exclude the record arriving from
     /// somewhere unnamed, so what read as a proof was an assertion. That draft also called this leg
     /// absolutely unreachable where one hardcoded `Vec::new()` is what holds it shut.
-    #[must_use]
-    pub fn build(memories: &Memories, reconciliation: &Reconciliation, out_root: impl AsRef<Path>, recorded: &RecordedOutputs) -> Self {
-        let out_root = out_root.as_ref();
+    pub fn build(
+        memories: &Memories, reconciliation: &Reconciliation, out_root: impl AsRef<Path>, recorded: &RecordedOutputs,
+    ) -> Result<Self, OutRootError> {
+        // Canonicalized once here, before any use: every directory this plan derives
+        // (`output_dir`, `Outputs::new`'s `root`) and every comparison against it (`under`)
+        // share one absolute spelling, so a relative `--out` and an absolute recorded path
+        // name the same directory. `std::path::absolute` resolves relative-to-absolute and
+        // normalizes `.` but does NOT normalize `..`, resolve symlinks, or resolve case —
+        // the ceilings are stated at [`under`].
+        let root = out_root.as_ref();
+        let out_root = std::path::absolute(root).map_err(|_| OutRootError { root: root.to_path_buf() })?;
         let agreements = agreements(memories);
         let mut items = Vec::new();
         let mut deferred = Vec::new();
-        let mut outputs = Outputs::new(out_root.to_path_buf(), recorded);
+        let mut outputs = Outputs::new(out_root.clone(), recorded);
 
         for item in &reconciliation.items {
             let (Some(media), Some(memory)) = (item.media(), memories.saved_media.get(item.entry_index)) else {
@@ -779,7 +807,7 @@ impl Plan {
             // second do not claim each other's suffix.
             let stem = capture.local.format("%Y%m%d_%H%M%S").to_string();
             let extension = output_extension(leg, &source);
-            let output = outputs.path(&item.source_id, &output_dir(out_root, capture.local), &stem, extension);
+            let output = outputs.path(&item.source_id, &output_dir(&out_root, capture.local), &stem, extension);
 
             items.push(PlannedItem {
                 source_id: item.source_id.clone(),
@@ -798,7 +826,7 @@ impl Plan {
             });
         }
 
-        Self { kind: ItemKind::Memory, items, deferred, excluded: Vec::new() }
+        Ok(Self { kind: ItemKind::Memory, items, deferred, excluded: Vec::new() })
     }
 }
 
@@ -1245,38 +1273,23 @@ fn kept_name(source: &Path) -> Option<(&str, &str)> {
 /// for a name nothing here holds. `a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved`
 /// pins that, on the arm where refusing is right.
 ///
-/// **It compares SPELLINGS, not directories, and that is a known hole rather than a property.** Any
-/// respelling of one directory between two runs makes the whole of decision 52 inert for the second
-/// one: every recorded path is refused here, so `adopt` assigns nothing and claims nothing, and an
-/// item leaving the export shifts a survivor onto a finished row's file exactly as it did before the
-/// decision existed. The failure is silent — nothing reports a seed that matched zero rows. Both
-/// spellings are user-typed, through `--out=<dir>` or through the source path
-/// [`default_out_root`] inherits, so this needs no hand-edited store to reach.
+/// **The root is absolute.** [`Plan::build`] canonicalizes the out root with [`std::path::absolute`]
+/// before any directory is derived or any comparison is made, so a relative `--out` and an absolute
+/// recorded path name the same directory here. That closes the relative-vs-absolute half of the old
+/// spelling hole: `out` and `/home/u/a/out` no longer read as different roots, and a respelled
+/// `--out` that resolves to the same absolute path adopts and reserves exactly as the first spelling
+/// did. `a_recorded_path_is_adopted_across_a_relative_respelling_of_the_out_root` pins that.
 ///
-/// Measured, `rustc -O`, edition 2024:
+/// **The case-folding half is a ceiling, stated rather than fixed.** [`std::path::absolute`]
+/// resolves relative-to-absolute and normalizes `.` but does NOT normalize `..`, resolve symlinks,
+/// or resolve case. Full [`std::fs::canonicalize`] would resolve case through the filesystem, but
+/// it requires the path to exist, and the out root may not exist yet when the plan is built. So
+/// `/Out` and `/out` still read as different roots here on a filesystem that folds case (APFS,
+/// NTFS), while the claim set's own ascii fold ([`claimed::ClaimedPaths`]) sees them as one. The dev
+/// platform (linux, ext4) does not fold case, so the ceiling is real but does not bite locally.
 ///
-/// | root | recorded output | `under` |
-/// |---|---|---|
-/// | `/out` | `/out/2021/01/a.jpg` | true |
-/// | `/out` | `/out2/2021/01/a.jpg` | false (component-wise, so this one is right) |
-/// | `/out/` | `/out/2021/01/a.jpg` | true (a trailing slash is the one thing it does normalize) |
-/// | `out` | `/home/u/a/out/2021/01/a.jpg` | **false** — relative against absolute, every filesystem |
-/// | `./out` | `out/2021/01/a.jpg` | **false** — every filesystem |
-/// | `/Out` | `/out/2021/01/a.jpg` | **false** — right on ext4, wrong on APFS and NTFS |
-///
-/// **Case is one instance of that class and not the class**, which is worth keeping straight because
-/// the fixture below builds the case pair. It builds that one because the claim set's own ascii fold
-/// is what makes the item layer's answer observable there — [`claimed::ClaimedPaths`] folds one
-/// function down, so on a folding filesystem these two decide the same question opposite ways. The
-/// relative-vs-absolute rows need no folding filesystem at all and are the wider half of the
-/// residual. `a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved` pins the arm
-/// where refusing is RIGHT and bounds none of this.
-///
-/// **Left standing deliberately, and it is not this function's call to make.**
-/// [`super::chat_fix`]'s `child_name` compares spellings the same way for the directory layer, so
-/// this matches task 40's behaviour rather than diverging from it, and closing it is one ruling for
-/// both layers. Recorded here so the next reader inherits the hole rather than the impression of a
-/// guarantee.
+/// [`super::chat_fix`]'s `child_name` compares spellings the same way for the directory layer, and
+/// the same canonicalization at its plan boundary closes the same relative-vs-absolute half there.
 ///
 /// An empty root makes this true for every path on earth, and no shipped surface can produce one:
 /// `main.rs` rejects both a valueless `--out` and a bare `--out=` with a hard error

@@ -150,6 +150,12 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), OverlayError> {
 ///
 /// RGBA throughout so an overlay's transparency survives to the composite; a main with no alpha
 /// channel is widened to one, which costs memory and keeps both layers in one pixel type.
+///
+/// `with_guessed_format` reads the format from the BYTES rather than the extension, which is the
+/// whole point here. The extension axis it does NOT close is Unicode normalization: two overlays
+/// whose extensions differ only by NFC/NFD are held apart by the claim set's ascii fold and merged
+/// by a folding filesystem. That is a separate question about the overlay's stored extension, not
+/// about the out root, and [`crate::export::local_fix`] states it as a ceiling on `Originals`.
 fn decode(path: &Path) -> Result<RgbaImage, OverlayError> {
     let reader = ImageReader::open(path)
         .map_err(|source| OverlayError::Decode { path: path.to_path_buf(), source: ImageError::IoError(source) })?

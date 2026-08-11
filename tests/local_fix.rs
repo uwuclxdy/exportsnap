@@ -270,7 +270,7 @@ fn reconciled(memories: &Memories, files: Vec<MemoryFile>) -> Reconciliation {
 /// The plan a FIRST run builds: no manifest has recorded an output path yet, so every name this
 /// hands out is a position in the plan. The same shape `tests/chat_fix.rs` uses for its own leg.
 fn first_run(memories: &Memories, reconciliation: &Reconciliation, out: impl AsRef<Path>) -> Plan {
-    Plan::build(memories, reconciliation, out, &RecordedOutputs::default())
+    Plan::build(memories, reconciliation, out, &RecordedOutputs::default()).unwrap()
 }
 
 fn manifest(dir: &TempDir, reconciliation: &Reconciliation) -> Manifest {
@@ -597,7 +597,7 @@ fn an_item_leaving_the_export_does_not_shift_a_survivor_onto_its_finished_file()
     let after = reconciled(&memories, vec![MemoryFile::parse(plan.items[1].media.main.clone()).unwrap()]);
     let mut second = manifest(&dir, &after);
     let recorded = RecordedOutputs::read(&second, ItemKind::Memory).unwrap();
-    let replan = Plan::build(&memories, &after, &out, &recorded);
+    let replan = Plan::build(&memories, &after, &out, &recorded).unwrap();
     assert_eq!(local_fix::run(&replan, &mut second, 3, &copying()).unwrap().fixed, 1);
 
     // The assertion this test is NAMED for goes first, deliberately: a sibling assertion above it
@@ -667,7 +667,7 @@ fn an_item_whose_output_was_deleted_is_rewritten_at_the_path_it_recorded() {
     );
     let mut second = manifest(&dir, &again);
     let recorded = RecordedOutputs::read(&second, ItemKind::Memory).unwrap();
-    let replan = Plan::build(&memories, &again, &out, &recorded);
+    let replan = Plan::build(&memories, &again, &out, &recorded).unwrap();
     let report = local_fix::run(&replan, &mut second, 3, &copying()).unwrap();
 
     assert_eq!(
@@ -684,6 +684,37 @@ fn an_item_whose_output_was_deleted_is_rewritten_at_the_path_it_recorded() {
         "the rewrite landed somewhere other than the file this item had already finished at"
     );
     assert!(suffixed_output.is_file(), "the recorded path was not written back");
+}
+
+/// Task 71: a recorded path written under the ABSOLUTE spelling of the out root is adopted when the
+/// current run passes a RELATIVE spelling that `std::path::absolute` resolves to the same path.
+/// Before the canonicalization in `Plan::build`, `under` compared spellings: a relative root never
+/// matched an absolute recorded path on any filesystem, so adoption silently failed and every item
+/// was planned as if no record existed.
+///
+/// The tempdir is canonicalized before the first run so the recorded path and `current_dir()` after
+/// `set_current_dir` share one resolved spelling — the gate's TMPDIR is a symlink, and the OS
+/// resolves it in `current_dir()` but not in `TempDir`'s own path, so the two diverge without this.
+/// Safe under nextest's per-test process isolation (the gate's runner).
+#[test]
+fn a_recorded_path_is_adopted_across_a_relative_respelling_of_the_out_root() {
+    let dir = TempDir::new().unwrap();
+    let resolved = fs::canonicalize(dir.path()).unwrap();
+    let memories = entries(&[(&at("2021-01-15", "00:00:00"), "Image", PARIS)]);
+    let files = vec![write_main(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
+    let mut first = manifest(&dir, &reconciliation);
+
+    let out = resolved.join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 1);
+
+    let recorded = RecordedOutputs::read(&first, ItemKind::Memory).unwrap();
+    let absolute_output = plan.items[0].output.clone();
+
+    std::env::set_current_dir(&resolved).unwrap();
+    let replan = Plan::build(&memories, &reconciliation, "out", &recorded).unwrap();
+    assert_eq!(replan.items[0].output, absolute_output, "the recorded path was not adopted across the relative respelling of the out root");
 }
 
 #[test]

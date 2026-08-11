@@ -554,7 +554,7 @@ fn every_run_error_variant_is_classified_as_self_formatted_or_delegating() {
             | RunError::NoChatMediaDir(_)
             | RunError::Panicked => false,
             // Prose owned by the source type; see the module docs for the residual.
-            RunError::Json(_) | RunError::Discover(_) | RunError::Scan(_) | RunError::Manifest(_) => true,
+            RunError::Json(_) | RunError::Discover(_) | RunError::Scan(_) | RunError::Manifest(_) | RunError::InvalidOutRoot(_) => true,
         }
     }
     assert!(!delegates(&RunError::Panicked));
