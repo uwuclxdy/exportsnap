@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// Launches the built binary with `args` and hands back its whole run. `output()` gives the child a
 /// captured stdout and no tty, which is the point: every flag pinned here has to work with no
@@ -101,6 +101,33 @@ fn help_with_a_value_fails_on_stderr_without_printing_usage() {
     assert!(stderr(&output).contains("--help takes no value"), "the error must name the flag and the fix, got {:?}", stderr(&output));
     // Last, for the reason spelled out at `an_unknown_dash_led_argument_fails_on_stderr_naming_it`.
     assert!(output.stdout.is_empty(), "a rejected flag must leave stdout clean, got {:?}", stdout(&output));
+}
+
+/// The one arm all three payload flags share, from the outside: a reader that walked away mid-pipe
+/// (`exportsnap --help | head -1`) is a finished run, so the exit code stays 0 instead of becoming
+/// the 101 the print macros give an `EPIPE`. Nothing pinned this while the block was being copied
+/// from one flag to the next, which is why the copy was the risk rather than the length.
+///
+/// **The read end is closed before the child is spawned**, so the first write it makes has no reader
+/// at all and fails whatever a buffer would have absorbed. A real `head -1` on the other end races
+/// these payloads — all three fit in one pipe buffer, so the write would succeed and the run would
+/// pass over the arm this exists for.
+#[test]
+fn a_payload_flag_exits_zero_when_its_reader_has_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = format!("--source={}", dir.path().display());
+    for args in [["--version"].as_slice(), ["--help"].as_slice(), ["--print-source", &source].as_slice()] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_exportsnap"));
+        command.args(args).stdout(writer).stderr(Stdio::piped());
+        drop(reader);
+        let output = command.output().unwrap();
+
+        assert!(output.status.success(), "{args:?} must exit 0 when its reader left, got {:?}: {}", output.status, stderr(&output));
+        // The exit code a `println!` would produce here, so a rewrite away from `write_all` reds too.
+        assert_ne!(output.status.code(), Some(101), "{args:?} must not panic on a closed pipe: {}", stderr(&output));
+        assert!(output.stderr.is_empty(), "{args:?} must say nothing about a reader that chose to leave, got {:?}", stderr(&output));
+    }
 }
 
 #[test]

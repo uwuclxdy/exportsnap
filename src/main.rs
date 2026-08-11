@@ -63,17 +63,10 @@ fn main() -> Result<()> {
     let args = utf8_args(std::env::args_os().skip(1))?;
 
     // `--version` wins over every other flag and prints before the terminal is
-    // taken over, so it works headless, piped, and in scripts. A reader leaving
-    // early (`exportsnap --version | head -1`) is a finished run, not a
-    // failure: exit 0, per the EPIPE convention in the rust learnings.
+    // taken over, so it works headless, piped, and in scripts. What a reader
+    // that left early costs the exit code is [`print_payload`]'s to say.
     if wants_version_arg(args.iter().cloned())? {
-        let mut out = std::io::stdout().lock();
-        if let Err(e) = out.write_all(VERSION_TEXT.as_bytes())
-            && e.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            return Err(e).context("failed to print the version text");
-        }
-        return Ok(());
+        return print_payload(VERSION_TEXT.as_bytes(), "version text");
     }
 
     // `--help` is checked immediately after `--version` and ahead of every parse, and prints before
@@ -90,13 +83,7 @@ fn main() -> Result<()> {
     // the version, `ls --help --version` prints help) and ripgrep is version-always; a fixed order
     // sits inside that spread and is what this crate's per-flag scans can express.
     if wants_help_arg(args.iter().cloned())? {
-        let mut out = std::io::stdout().lock();
-        if let Err(e) = out.write_all(HELP_TEXT.as_bytes())
-            && e.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            return Err(e).context("failed to print the help text");
-        }
-        return Ok(());
+        return print_payload(HELP_TEXT.as_bytes(), "help text");
     }
 
     // Runs after the two flags that ignore the rest of the command line and before every parse, so a
@@ -136,15 +123,9 @@ fn main() -> Result<()> {
     // of the report: the part counts, the space figures and each media screen's copy of the argument
     // are all things only a built app holds. `tests/print_source.rs` is what reds when a delivery
     // between here and the screens is dropped. Prints and exits before the terminal is taken over,
-    // so it works headless and in scripts; the EPIPE arm is `--version`'s, for the same reason.
+    // so it works headless and in scripts.
     if print_source {
-        let mut stdout = std::io::stdout().lock();
-        if let Err(e) = stdout.write_all(app.source_report().as_bytes())
-            && e.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            return Err(e).context("failed to print the source report");
-        }
-        return Ok(());
+        return print_payload(app.source_report().as_bytes(), "source report");
     }
 
     // `try_init` installs ratatui's own restore-then-chain panic hook; unlike `init` it hands
@@ -161,6 +142,31 @@ fn main() -> Result<()> {
     ratatui::restore();
 
     result.context("the terminal ui stopped on an error")
+}
+
+/// Writes a finished payload to stdout, which is the entire body of every flag that prints and
+/// returns: `--version`, `--help` and `--print-source` all route through here.
+///
+/// **A broken pipe is swallowed and the run still exits 0.** A reader that left early
+/// (`exportsnap --help | head -1`) is a finished run rather than a failure — `head` printed what it
+/// asked for and closed the pipe. Rust ignores `SIGPIPE`, so the write comes back `EPIPE` instead,
+/// which the print macros would turn into a panic at exit 101; that is the cross-repo rule for a
+/// payload stream, and it is written once here rather than three times at the call sites so a fourth
+/// print-and-exit flag inherits it instead of copying six lines and getting the last one wrong. Every
+/// other write failure is a real one and keeps its context. `tests/cli.rs`'s
+/// `a_payload_flag_exits_zero_when_its_reader_has_left` is what reds when this arm goes.
+///
+/// Takes BYTES rather than a closure that builds them: `--print-source`'s report is read off a
+/// composed [`App`] while the other two are consts, so a finished buffer is the only thing the three
+/// have in common. `what` names the payload in the failure context.
+fn print_payload(payload: &[u8], what: &str) -> Result<()> {
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = out.write_all(payload)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e).with_context(|| format!("failed to print the {what}"));
+    }
+    Ok(())
 }
 
 /// Reads argv as text, naming the argument the crate cannot represent instead of aborting on it
