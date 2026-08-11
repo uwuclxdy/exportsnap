@@ -64,7 +64,8 @@ fn main_colour(x: u32, y: u32) -> [u8; 3] {
 /// Asserts the overlay's transparent region left the MAIN showing through, on all three channels.
 ///
 /// **What used to stand here was a brightness threshold on subpixel 0, and it could not discriminate
-/// at all.** The main's red in the asserted region is 20-30 against black's 0, so `< 60` passed
+/// at all.** Per pixel, which is what that threshold sampled, the main's red across these regions
+/// runs 0-31 against black's 0, so `< 60` passed
 /// whether the transparent half showed the main through or the alpha had been dropped to black —
 /// the fixture held the asserted channel near-constant across the two outcomes, which is this repo's
 /// own recorded trap. Green and blue separate them, and matching all three also reds on a composite
@@ -75,14 +76,26 @@ fn main_colour(x: u32, y: u32) -> [u8; 3] {
 /// copy test needs it — and JPEG's DCT smears neighbours: measured on these fixtures, a lone pixel
 /// drifts up to 21 levels across the two generations they carry, which is close enough to the gap
 /// being detected that a per-pixel tolerance would be guessing. A block mean is essentially the DC
-/// coefficient, which JPEG preserves closely, so the comparison is tight and the margin to the
-/// failure it must catch is about 125 on the chroma channels instead of single digits.
-fn assert_shows_main_through(composite: &RgbImage, label: &str) {
-    /// Comfortably above the drift a preserved block mean shows and far below the ~125 that
-    /// separates the main from black on green and blue.
+/// coefficient, which JPEG preserves closely, so the comparison stays tight.
+///
+/// **The block is the caller's, because which region is transparent moves with the fixture.**
+/// [`TRANSPARENT_BLOCK`] is the 64x48 pairs'; a frame of another size puts its own somewhere else
+/// entirely. Whatever a caller passes has to lie wholly inside the transparent half and clear of
+/// its edge, where an overlay scaled by Lanczos rings alpha across the boundary.
+///
+/// **Both halves of the margin are per-block and neither generalizes for free**, so a new block
+/// re-measures instead of inheriting these. The drift is a property of the quantiser at that
+/// block's frequency content; the gap to black is a property of where that block's pseudo-random
+/// green and blue happen to average. Measured 2026-08-11 through this assertion, worst channel and
+/// then the green/blue the main shows through at: `TRANSPARENT_BLOCK` drifts 3.47 at 126/131, and
+/// the 4608x64 block in `a_main_wider_than_four_thousand_pixels_…` drifts 3.16 at 82/129. Green is
+/// what moved, and it is why the gap is stated per block rather than as one number.
+fn assert_shows_main_through(composite: &RgbImage, block: [u32; 4], label: &str) {
+    /// Clears both measured drifts by more than 2x and sits an order of magnitude under the
+    /// smaller of the two gaps that separate the main from black on green and blue.
     const TOLERANCE: f64 = 8.0;
 
-    let [left, top, right, bottom] = TRANSPARENT_BLOCK;
+    let [left, top, right, bottom] = block;
     let count = f64::from((right - left) * (bottom - top));
     let mut actual = [0.0; 3];
     let mut expected = [0.0; 3];
@@ -97,10 +110,7 @@ fn assert_shows_main_through(composite: &RgbImage, label: &str) {
     }
     for channel in 0..3 {
         let drift = actual[channel] - expected[channel];
-        assert!(
-            drift.abs() <= TOLERANCE,
-            "{label}: channel {channel} averaged {actual:?} over {TRANSPARENT_BLOCK:?}, expected about {expected:?}"
-        );
+        assert!(drift.abs() <= TOLERANCE, "{label}: channel {channel} averaged {actual:?} over {block:?}, expected about {expected:?}");
     }
 }
 
@@ -108,9 +118,15 @@ fn assert_shows_main_through(composite: &RgbImage, label: &str) {
 /// container rather than against the name it was given.
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
-/// A block wholly inside the overlay's TRANSPARENT half and away from its edge. Shared with
-/// [`assert_shows_main_through`]'s own block for the same reason it picked those coordinates.
+/// A block wholly inside the overlay's TRANSPARENT half and away from its edge, on the 64x48 pairs.
+/// What the 64x48 callers hand [`assert_shows_main_through`], which takes its block from the caller
+/// for the reason its doc gives.
 const TRANSPARENT_BLOCK: [u32; 4] = [48, 8, 56, 16];
+
+/// [`TRANSPARENT_BLOCK`] for the 4608x64 pair, whose scaled overlay puts its transparent half
+/// somewhere else entirely. Named rather than inlined at the call site so a grep for one of these
+/// blocks reaches both of them.
+const WIDE_TRANSPARENT_BLOCK: [u32; 4] = [4000, 24, 4008, 32];
 
 /// A block wholly inside the overlay's OPAQUE half and away from its edge, where a composite that
 /// ran paints the caption's red.
@@ -789,7 +805,7 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
     let composite = image::open(&written).unwrap().to_rgb8();
     assert_eq!(composite.dimensions(), (WIDTH, HEIGHT));
     assert!(composite.get_pixel(2, 2).0[0] > 200, "the overlay's opaque half reached the composite");
-    assert_shows_main_through(&composite, "the overlay's transparent half left the main showing");
+    assert_shows_main_through(&composite, TRANSPARENT_BLOCK, "the overlay's transparent half left the main showing");
 
     // The file's own date is the derived instant, not today.
     let modified = fs::metadata(&written).unwrap().modified().unwrap();
@@ -900,6 +916,56 @@ fn an_overlay_whose_aspect_mismatches_the_main_is_scaled_to_fit_centred_rather_t
         composite.get_pixel(left + (right - left) / 2, MAIN_H - 60).0[0] > 200,
         "the drawn overlay's opaque half reached the main's bottom rows"
     );
+}
+
+#[test]
+fn a_main_wider_than_four_thousand_pixels_composites_and_carries_that_width_out() {
+    // Every other fixture in this crate sits under 4096 on both axes and nothing in the pipeline
+    // branches on a dimension, so what this closes is the FIXTURE tree's ceiling rather than a live
+    // gap. It goes live the first time something does branch — a downscale option, a memory cap, a
+    // large-file path — because a `width > 4096` guard authored against a tree where every fixture
+    // takes the safe side ships with its other side unrun.
+    //
+    // Wide and short because the ceiling is a LINEAR dimension while the cost is a pixel COUNT.
+    // Measured 2026-08-11, each shape run alone on the release leg: 4608x64 takes 0.13s against
+    // 1.65s for the 4608x3456 of a 16MP phone photo. In the suite this shape adds about 0.2s to
+    // the debug leg, which pays roughly 7x what release does for pixel work, and nothing
+    // measurable to release, whose critical path is a pair of deliberate 3s sleeps elsewhere.
+    // What it does not buy: a guard keyed on WxH rather than on an axis, since 0.3M pixels trips
+    // no memory cap. Raising MAIN_H is the upgrade path.
+    const MAIN_W: u32 = 4608;
+    const MAIN_H: u32 = 64;
+    // Half-size and same aspect, the modal real pairing, so the overlay is scaled UP to an
+    // oversized dimension and the resize runs there too rather than only the encode.
+    const OVERLAY_W: u32 = MAIN_W / 2;
+    const OVERLAY_H: u32 = MAIN_H / 2;
+
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+    let files = vec![
+        write_main_sized(dir.path(), "2021-01-15", 1, MAIN_W, MAIN_H),
+        write_overlay_sized(dir.path(), "2021-01-15", 1, OVERLAY_W, OVERLAY_H),
+    ];
+    let reconciliation = reconciled(&memories, files);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let out = dir.path().join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    assert!(plan.items[0].media.overlay.is_some(), "the fixture must actually pair an overlay");
+    assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 1, "{:?}", plan.items[0].media);
+
+    let composite = image::open(&plan.items[0].output).unwrap().to_rgb8();
+    // The composite keeps the main's size, so a downscale of the PIXELS keyed on 4096 reds here.
+    // It does not reach the whole hop: `Stamp`'s width is read by `overlay::dimensions`, and a
+    // clamp planted inside that reader leaves the entire suite green (measured 2026-08-11, 686/686).
+    assert_eq!(composite.dimensions(), (MAIN_W, MAIN_H), "the oversized width did not survive to the composite");
+    // The unscaled overlay would sit centred at 1152..3456 x 16..48, so this corner is outside it
+    // on both axes: only the scale-up paints the opaque half here.
+    assert!(composite.get_pixel(2, MAIN_H - 3).0[0] > 200, "the scaled overlay's opaque half reached the frame corner");
+    // The scaled overlay's opaque half ends at x = 2304, so this sits 1696px into the transparent
+    // half and 600 clear of the frame's right edge — outside the ringing Lanczos leaves at either
+    // boundary. A red-channel threshold here would pass whether the alpha composited or was
+    // dropped to black; see the helper's doc for why that trap is what it exists to close.
+    assert_shows_main_through(&composite, WIDE_TRANSPARENT_BLOCK, "the scaled overlay's transparent half left the main showing");
 }
 
 #[test]
