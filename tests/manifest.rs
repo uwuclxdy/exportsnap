@@ -403,9 +403,15 @@ fn a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it
 
 #[test]
 fn marking_a_gap_on_a_row_no_run_enrolled_is_refused_rather_than_silently_doing_nothing() {
-    // The guard above means a zero row count no longer implies the row is absent, so this is the case
-    // that would go quiet if the read that discriminates them were dropped — and the case that reds
-    // every already-parked row as unknown if the read were left out entirely.
+    // The guard above means a zero row count implies nothing about whether the row is there, which is
+    // why since queue task 57 the row-state read comes FIRST and answers this on its own. Dropping
+    // that read for a bare guarded `UPDATE` is what would make this case go quiet, and this test is
+    // the only one that reds when it does. What would NOT red it is restoring `require_hit` on the
+    // statement's count: the skip above returns before an already-parked row can reach the statement,
+    // so in one process the count is never zero there. That mutation is caught instead by
+    // `a_row_that_moved_between_the_read_and_the_write_is_not_restamped`, where a second connection
+    // makes the count genuinely zero and `require_hit` turns a concurrent writer into a phantom
+    // `UnknownItem`. Both measured.
     let work = Workspace::new();
     let manifest = work.open();
     match manifest.mark_source_missing(ItemKind::Memory, "never-enrolled", "no media for it") {
@@ -414,6 +420,136 @@ fn marking_a_gap_on_a_row_no_run_enrolled_is_refused_rather_than_silently_doing_
         }
         other => panic!("expected UnknownItem, got {other:?}"),
     }
+}
+
+/// A word this build cannot read reaches a decision here now that the row-state read comes first, and the answer has to be the module's usual refusal rather than a silent park. Before queue task 57 the SQL guard let such a row straight through — `'a_status_from_a_later_build' <> 'source_missing'` is true — so a status a NEWER build wrote was overwritten with this build's verdict, which is exactly the resumable state `ManifestError::CorruptRow`'s "upgrade first" message exists to protect.
+///
+/// **The still-readable row is the positive control.** Without it a call that had stopped doing anything at all would pass, because a dead call leaves a hand-edited row alone just as well as a refusing one does.
+#[test]
+fn a_gap_on_a_row_whose_status_this_build_cannot_read_is_refused_rather_than_overwritten() {
+    const UNREADABLE: &str = "a_status_from_a_later_build";
+    const REASON: &str = "the export holds no memory media for this entry's day and kind";
+
+    let work = Workspace::new();
+    {
+        let mut manifest = work.open();
+        manifest.enroll(&enrollment(&["m-01", "m-02"])).unwrap();
+    }
+
+    // Only reachable by another build or a hand-edit, which is the point: this build cannot write a
+    // word it does not know.
+    let db = work.state.join(format!("{ID}.sqlite"));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE items SET status = ?1 WHERE source_id = ?2", params![UNREADABLE, "m-01"]).unwrap();
+    drop(conn);
+
+    let manifest = work.open();
+    let error = manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON).unwrap_err();
+    assert!(
+        matches!(&error, ManifestError::CorruptRow { column, value } if column.to_string() == "status" && value == UNREADABLE),
+        "{error:?}"
+    );
+
+    manifest.mark_source_missing(ItemKind::Memory, "m-02", REASON).unwrap();
+    assert_eq!(
+        status_of(&manifest, "m-02"),
+        ItemStatus::SourceMissing,
+        "positive control: the same call did run, and did park the row it could read"
+    );
+
+    // Read around `item`, which refuses the unreadable word itself and so cannot say what the row now holds.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let row: (String, Option<String>) = conn
+        .query_row("SELECT status, last_error FROM items WHERE source_id = ?1", ["m-01"], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap();
+    assert_eq!(row.0, UNREADABLE, "the row this build cannot read was parked with its own verdict instead of being refused");
+    assert_eq!(row.1, None, "and it was given a reason on the way");
+}
+
+/// The Rust-side skip is observable, and a second connection holding the write lock is what sees it. Restating a gap the row already carries issues no statement at all, so it needs no lock and returns `Ok(())`; the same call with the skip removed reaches the guarded `UPDATE`, waits out rusqlite's 5 s busy retry and comes back `DatabaseBusy`. Task 57's first draft claimed no fixture could separate that mutant — this is the fixture.
+///
+/// **The impatient writer is the positive control, and it is deliberately the WEAKER of the two available ones.** It establishes only that the blocker really holds the write lock, so the `Ok(())` below means "issued no statement" rather than "there was nothing to contend with". What it does NOT establish is that the manifest's own write would have blocked — no manifest write is attempted on this path, and the assertion says the narrower thing on purpose. The stronger control is to drive it through `mark_source_missing` itself, and it was rejected on cost, measured both ways: this form runs in 0.021 s and leaves the suite at 3.55 s, the manifest-driven one takes 5.04 s waiting out a busy timeout `Manifest` exposes no setter to shorten and makes itself the critical path at 5.49 s. What proves the manifest's write really does block is the mutant run, where dropping the Rust skip reds this test with `DatabaseBusy` after exactly that 5 s — a measurement the clean path does not need to repeat on every run forever.
+#[test]
+fn restating_a_gap_a_row_already_carries_takes_no_write_lock() {
+    const REASON: &str = "the export holds no memory media for this entry's day and kind";
+
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON).unwrap();
+
+    let db = work.state.join(format!("{ID}.sqlite"));
+    let blocker = rusqlite::Connection::open(&db).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let impatient = rusqlite::Connection::open(&db).unwrap();
+    impatient.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+    let refused = impatient.execute("UPDATE items SET last_error = ?1 WHERE source_id = ?2", params!["anything at all", "m-01"]);
+    assert!(
+        refused.is_err(),
+        "the blocker did not actually hold the write lock, so the assertion below would pass on nothing: {refused:?}"
+    );
+
+    let identical = manifest.mark_source_missing(ItemKind::Memory, "m-01", REASON);
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(identical.is_ok(), "restating an identical gap took a write lock it did not need: {identical:?}");
+}
+
+/// The SQL guard is observable too, because rusqlite's 5 s busy retry IS the read-then-write window and it is wide enough to write into. The worker's `SELECT` succeeds — WAL readers do not block on a writer — and its `UPDATE` parks in the retry; while it is parked another writer lands exactly what the worker is about to write, without restamping. With the guard the worker's statement matches nothing and `updated_at` stays put. Without it the worker restamps a row for a change it did not make, which is the one column here that answers "when did this vanish".
+///
+/// **The elapsed assertion is the positive control, and it is load-bearing rather than decoration.** This fixture's failure mode is a FALSE GREEN, not a flaky red: if the worker's `SELECT` landed after the other writer's commit it would read the new note, the Rust skip would fire, no statement would be issued, and the row would keep its timestamp — passing under the mutant while pinning nothing. The channel is what puts the worker's read ahead of the hold, and the elapsed check is what proves it: a worker that blocked cannot return before the commit, and one whose skip fired returns in microseconds. Measured at 35.711 µs by pre-writing `SECOND` so the read cannot precede the other writer — without this assertion that fixture passes under the mutant.
+///
+/// Nothing can signal from between the read and the write, since both are inside the library call, so the timing dependence is not removable and is not defended against beyond this. The residual is bounded and points the right way: if the box is loaded enough that the commit slips past the manifest connection's own 5 s busy timeout, the worker errors and this test reds. A flaky red is loud, and it is the failure direction to prefer over a fixture that quietly stops discriminating.
+#[test]
+fn a_row_that_moved_between_the_read_and_the_write_is_not_restamped() {
+    const SENTINEL: i64 = 1_000_000_000;
+    const FIRST: &str = "the export holds no memory media for this entry's day and kind";
+    const SECOND: &str = "part of the source could not be listed, so media for this entry may exist but was never seen";
+    /// How long the other writer sits on the write lock before landing its note.
+    const HOLD: std::time::Duration = std::time::Duration::from_millis(700);
+
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    manifest.enroll(&enrollment(&["m-01"])).unwrap();
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", FIRST).unwrap();
+
+    // Backdated so a restamp is distinguishable from a skip, the same way the single-threaded gap
+    // pins do it.
+    let db = work.state.join(format!("{ID}.sqlite"));
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE items SET updated_at = ?1 WHERE source_id = ?2", params![SENTINEL, "m-01"]).unwrap();
+    }
+
+    let blocker = rusqlite::Connection::open(&db).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let (started, ready) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        let begun = std::time::Instant::now();
+        let outcome = manifest.mark_source_missing(ItemKind::Memory, "m-01", SECOND);
+        (outcome, begun.elapsed())
+    });
+    ready.recv().unwrap();
+    std::thread::sleep(HOLD);
+
+    blocker.execute("UPDATE items SET last_error = ?1 WHERE source_id = ?2", params![SECOND, "m-01"]).unwrap();
+    blocker.execute_batch("COMMIT").unwrap();
+
+    let (outcome, waited) = worker.join().unwrap();
+    outcome.unwrap();
+    assert!(
+        waited >= HOLD,
+        "the worker never blocked, so its read did not precede the other writer and this fixture proves nothing: {waited:?}"
+    );
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let row: (Option<String>, i64) = conn
+        .query_row("SELECT last_error, updated_at FROM items WHERE source_id = ?1", ["m-01"], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap();
+    assert_eq!(row.0.as_deref(), Some(SECOND), "the other writer's note is what the row should hold");
+    assert_eq!(row.1, SENTINEL, "a row already saying what this run would write was restamped for a change this run did not make");
 }
 
 /// The sweep's whole rule in one fixture, one row per verdict: every status an unnamed row can be
@@ -795,6 +931,27 @@ fn a_missing_source_reason_is_stripped_the_same_way_as_a_failure_note() {
 
     let stored = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap().last_error.unwrap();
     assert_eq!(stored, "nothing on disk and the link was <redacted> only");
+}
+
+/// The identity pass through THIS writer, which reads its url from somewhere else than the failure path `a_bare_signature_lifted_out_of_the_items_own_url_is_still_stripped` covers: since queue task 57 the url comes off the row-state read this call makes to decide whether to write at all, not off `redacted`'s own `SELECT`.
+///
+/// A whole url is caught by the shape pass whatever the redactor was handed, so the test above cannot tell "redacted against this row's url" from "redacted against nothing". Only a bare signature separates them, which makes this the assertion that reds if the url stops reaching the redactor.
+#[test]
+fn a_bare_signature_in_a_gap_reason_is_stripped_against_the_rows_own_url() {
+    let work = Workspace::new();
+    let mut manifest = work.open();
+    let url = DownloadUrl::new(SIGNED_URL);
+    manifest.enroll(&[NewItem { kind: ItemKind::Memory, source_id: "m-01", url: Some(&url) }]).unwrap();
+
+    // Exactly the token the shape pass has to let through: alphanumeric, no url punctuation at all,
+    // well under the 64-character cap.
+    assert!(!SIGNATURE.contains(['/', '=', '%', '&', '@']), "the fixture has to defeat the shape pass to test the other one");
+    assert!(SIGNATURE.len() < 64, "and it has to be under the length cap too");
+
+    manifest.mark_source_missing(ItemKind::Memory, "m-01", &format!("no media, and the link {SIGNATURE} signs is gone")).unwrap();
+
+    let stored = manifest.item(ItemKind::Memory, "m-01").unwrap().unwrap().last_error.unwrap();
+    assert_eq!(stored, "no media, and the link <redacted> signs is gone");
 }
 
 #[cfg(unix)]

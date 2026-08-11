@@ -765,8 +765,7 @@ impl Manifest {
 
     /// Records that the export names this item but holds no media for it.
     ///
-    /// Not an attempt, so the retry count is left alone. `reason` is reduced to prose exactly like
-    /// [`Self::mark_failed`]'s note; the same channel gets the same guard.
+    /// Not an attempt, so the retry count is left alone. `reason` is reduced to prose exactly like [`Self::mark_failed`]'s note — the same channel gets the same guard — but off the url the read below already carries rather than through `redacted` and a second `SELECT` for it.
     ///
     /// **Not a statement about output either**, which is why the three output columns are absent
     /// from the statement below rather than nulled by it: this says the SOURCE is gone, and a row an
@@ -818,55 +817,54 @@ impl Manifest {
     /// `retry_count = retry_count + 1`, so an identically-repeating failure would stop incrementing
     /// and [`Self::pending`]'s `retry_count < ?4` would go on offering the row for ever.
     ///
-    /// `IS NOT` rather than `<>` because `last_error` is nullable and `<>` against `NULL` is
-    /// `NULL`, which is not true, so the plain operator would skip a row whose note has to be
-    /// written. **No call here stores a note-less gap row** — every one of them writes a note — so
-    /// that is a future writer's footgun closed rather than a live one, and the pin below reaches
-    /// the row by editing the database rather than through this API. Pinned by
-    /// `re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched`,
-    /// `a_gap_row_is_written_whenever_its_status_or_its_reason_differs`,
-    /// `a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it`, and — over
-    /// two whole runs of the leg that pays for this — `memories`'
-    /// `two_runs_over_an_unchanged_export_leave_a_gap_rows_timestamp_alone`.
+    /// `IS NOT` rather than `<>` because `last_error` is nullable and `<>` against `NULL` is `NULL`, which is not true, so the plain operator would skip a row whose note has to be written. The Rust-side skip below has to reproduce that exactly and does — a `None` note is never equal to the reason, so the row is written — and spelling it as "the stored note differs" instead would lose the same row the SQL operator would. **No call here stores a note-less gap row** — every one of them writes a note — so that is a future writer's footgun closed rather than a live one, and the pin below reaches the row by editing the database rather than through this API. Pinned by `re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched`, `a_gap_row_is_written_whenever_its_status_or_its_reason_differs`, `a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it`, and — over two whole runs of the leg that pays for this — `memories`' `two_runs_over_an_unchanged_export_leave_a_gap_rows_timestamp_alone`.
     ///
-    /// The read below is what keeps [`ManifestError::UnknownItem`] answerable once a zero row count
-    /// no longer implies the row is absent — [`Self::exclude`]'s shape, and required rather than
-    /// decorative: a bare `require_hit` would call every already-parked row unknown.
+    /// **The read comes FIRST, and the redaction cannot move behind the write's condition** (queue task 57, whose own premise said it could). `?2` is the REDACTED reason, so the guard consumes the redaction's output: reading this row's url is an input to the write decision rather than a step that merely precedes it, and no arrangement that keeps the note redacted issues zero reads for a gap it does not restate. What was removable is the duplication. One `SELECT` of `status`, `last_error` and `url` answers the redaction, the skip and [`ManifestError::UnknownItem`] together, where the old shape paid a url `SELECT` inside `redacted`, an `UPDATE` matching nothing, and a status `SELECT` to tell "already says this" from "never enrolled" apart. Per call: 3 statements down to 1 on the common path — the ~90 gap rows the memories leg restates every run, plus one per unpaired chat token — 3 down to 1 on a row nothing enrolled, and 2 either way on a row that genuinely changes.
+    ///
+    /// **The cheap path now rests on a Rust-side read-then-write, and the SQL guard is kept ON TOP of it deliberately.** The Rust comparison decides whether to ISSUE the statement; the statement's own `AND (status <> ?1 OR last_error IS NOT ?2)` decides whether to WRITE. Each reads as redundant beside the other and neither is, and both halves are PINNED rather than merely argued: `restating_a_gap_a_row_already_carries_takes_no_write_lock` reds when the Rust check goes, because the statement a skipped call never issues is a statement that never takes a write lock, and `a_row_that_moved_between_the_read_and_the_write_is_not_restamped` reds when the clause goes, because a row that moved under the read then picks up an `updated_at` restamp for a change this run did not make. Both drive a second connection on the same file. A single-connection fixture separates neither, which an earlier draft of this paragraph mistook for the mutants being unkillable — they are killable, and the pins are what say so.
+    ///
+    /// A mutation that WIDENS the Rust skip is caught by two of the pins named further up — `a_gap_row_is_written_whenever_its_status_or_its_reason_differs` and `a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it`. Not by `re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched`, which pins the skip FIRING and so cannot see it fire too often.
+    ///
+    /// **What the read-then-write window costs, exactly.** No in-process writer reaches it, but `!Sync` is not the reason and citing it would be wrong twice over. `rusqlite::Connection` does have no `Sync` impl anywhere in rusqlite 0.40.1 — it is `Send` only, and a grep of the crate for `Sync for Connection` answers nothing — yet a `Mutex<Manifest>` is `Sync` because `Manifest` is `Send`, and its guard hands `&Manifest` to whichever thread holds it, which is exactly the arrangement this module's own concurrency note describes for a concurrent downloader. What rules out an interleaved in-process writer is that lock and the single-writer rule, not the auto trait. Across PROCESSES nothing rules it out: there is no single-instance guard, and rusqlite arms a 5000 ms busy timeout on every `Connection::open` (`inner_connection.rs:118`) which this crate never overrides, so a second run contends rather than failing fast.
+    ///
+    /// That timeout is the width of this window, and it is also what the skip is worth behind a concurrent writer: a call that issues no statement never waits on it, where ~90 gap rows a run each waiting one out is the cost avoided. What the retained guard buys INSIDE the window is narrower than "no wrong write", and the delta is the honest way to say it: a concurrent change cannot cost a spurious restamp. It can still cost a clobber — a [`Self::mark_done`] landing between the read and the write is overwritten by this call's now-stale `SourceMissing`, since `'done' <> 'source_missing'` satisfies the guard. That is last-write-wins keyed on observation time, it predates task 57, and nothing here fixes it.
+    ///
+    /// **A status this build cannot read is now refused rather than overwritten.** The old shape parsed the stored word only after a zero-row `UPDATE`, and the only row that statement can miss already reads `source_missing`, so [`ManifestError::CorruptRow`] was unreachable on this path in a single process and a hand-edited word went silently to `SourceMissing` instead — `'a_status_from_a_later_build' <> 'source_missing'` is true, so the guard let it through. Parsing the status the read hands back puts that error where every other reader of the column already has it: [`Self::item`], [`Self::items`], [`Self::pending`] and `counts` all refuse a word this build does not know, and design.md's warning against pushing a status filter into SQL is the same rule from the other side. Pinned by `a_gap_on_a_row_whose_status_this_build_cannot_read_is_refused_rather_than_overwritten`.
     ///
     /// # Errors
     ///
     /// Returns [`ManifestError::UnknownItem`] when nothing enrolled that item,
-    /// [`ManifestError::CorruptRow`] when the read's stored status no longer parses, and
-    /// [`ManifestError::Sqlite`] when a read or the write fails.
+    /// [`ManifestError::CorruptRow`] when the row's stored status no longer parses, and
+    /// [`ManifestError::Sqlite`] when the read or the write fails.
     pub fn mark_source_missing(&self, kind: ItemKind, source_id: &str, reason: &str) -> Result<(), ManifestError> {
-        let reason = self.redacted(kind, source_id, reason)?;
-        let changed = self
+        // Three named columns, not a whole row: this decides on the status, the note and the url, and a full-row read would materialize an output path, a checksum and a length the verdict never looks at.
+        let current: Option<(String, Option<String>, Option<String>)> = self
             .conn
+            .query_row(
+                "SELECT status, last_error, url FROM items WHERE kind = ?1 AND source_id = ?2",
+                params![kind.as_stored(), source_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|source| sqlite_error("record a missing source", &self.path, source))?;
+        let Some((stored_status, stored_note, url)) = current else {
+            return Err(ManifestError::UnknownItem { kind, source_id: source_id.to_owned() });
+        };
+        let stored_status = ItemStatus::from_stored(&stored_status)?;
+        let reason = redact_note(reason, url.as_deref());
+        if stored_status == ItemStatus::SourceMissing && stored_note.as_deref() == Some(reason.as_str()) {
+            return Ok(());
+        }
+
+        // The row count is dropped rather than checked. A zero here is no longer an absent row — the read above settled that — but a writer from another process that changed this one in between, and the guard is what keeps that from costing a wrong write. Restoring a `require_hit` here would report that writer as a phantom `UnknownItem`; pinned by `a_row_that_moved_between_the_read_and_the_write_is_not_restamped`, which is the only fixture that can make the count zero.
+        self.conn
             .execute(
                 "UPDATE items SET status = ?1, last_error = ?2, \
                  updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4 AND (status <> ?1 OR last_error IS NOT ?2)",
                 params![ItemStatus::SourceMissing.as_stored(), reason, kind.as_stored(), source_id],
             )
             .map_err(|source| sqlite_error("record a missing source", &self.path, source))?;
-        if changed != 0 {
-            return Ok(());
-        }
-        // Nothing changed means one of exactly two things, since the only row the statement above
-        // can miss is one already carrying both values it writes: the row already says this, or
-        // nothing enrolled it. Only a read tells them apart, and the status column alone answers it
-        // — a row present here can only be `SourceMissing`, so a full-row read would materialize an
-        // output path, a url and a checksum the verdict never looks at.
-        let stored: Option<String> = self
-            .conn
-            .query_row("SELECT status FROM items WHERE kind = ?1 AND source_id = ?2", params![kind.as_stored(), source_id], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|source| sqlite_error("record a missing source", &self.path, source))?;
-        match stored {
-            Some(stored) if ItemStatus::from_stored(&stored)? == ItemStatus::SourceMissing => Ok(()),
-            _ => Err(ManifestError::UnknownItem { kind, source_id: source_id.to_owned() }),
-        }
+        Ok(())
     }
 
     /// Records that this build writes no output for these items at all.
@@ -1385,6 +1383,8 @@ impl Manifest {
     /// exact match against the url this row holds can catch it. An item with no url — every memory
     /// in the one observed export — falls back to the shape pass alone, and an item with a url is
     /// exactly the case where there is a secret to lose.
+    ///
+    /// [`Manifest::mark_failed`] is the only caller since queue task 57, and the statement is why: it records an EVENT, so it writes on every call and has nothing to read the row for beyond this url. [`Manifest::mark_source_missing`] re-derives a standing verdict, so it reads the row anyway to decide whether to write at all, and redacts against the url that read already returned rather than paying for a second one.
     fn redacted(&self, kind: ItemKind, source_id: &str, note: &str) -> Result<String, ManifestError> {
         let url: Option<String> = self
             .conn
