@@ -1007,10 +1007,11 @@ fn a_lone_overlay_png_keeps_its_alpha_its_extension_and_its_own_bytes() {
 ///
 /// This pins the normalization and **not** the length-independence of `ALPHA_CAPABLE_EXTENSIONS`,
 /// which no shipped test can pin: while that list holds one member, indexing it and reading the
-/// item's own extension answer identically on every input that exists. The evidence for that is a
-/// mutation, recorded in the round's table, not an assertion here — and the list is capped at one
-/// member anyway until `fix_image` picks its encoder off the resolved extension, which the constant's
-/// own doc records.
+/// item's own extension answer identically on every input that exists. Task 70 moved where the
+/// normalization comes from — `output_extension` answers with the member the list itself matched, so
+/// the lower-casing is a consequence of that rather than a step beside it — and the two-member half
+/// of the claim now belongs to `local_fix`'s own `cfg(test)` set, which is the only place a second
+/// member exists.
 #[test]
 fn a_shouted_extension_is_normalized_rather_than_carried_into_the_output_path() {
     let work = Workspace::new();

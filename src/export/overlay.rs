@@ -8,9 +8,10 @@
 //! **Two encoders, one hardcoded format each, and neither takes a format argument.**
 //! [`compose_jpeg`] flattens the composite; [`compose_png`] keeps its alpha channel, for a main
 //! whose own format can carry one that JPEG would drop. **Which of the two runs is the CALLER's
-//! choice, and it is taken from a predicate rather than from the resolved extension**, so encoder
-//! and extension coincide only while that predicate admits a single format. The cap, and the one
-//! edit that lifts it, are recorded on `local_fix`'s `ALPHA_CAPABLE_EXTENSIONS`.
+//! choice, and since task 70 it is taken from the RESOLVED extension** — the same string the plan
+//! built the output name out of — so encoder and extension cannot disagree however many formats keep
+//! their own. A format this module has no encoder for is refused by name at that call site rather
+//! than handed one of these two; `local_fix`'s `compose_own_format` is where both halves live.
 //!
 //! **This module used to produce JPEG bytes whatever went in, and used to claim that was what kept
 //! a PNG out of `little_exif`. The claim was never what held the property, and it is false now as

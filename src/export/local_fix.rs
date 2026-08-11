@@ -54,7 +54,6 @@
 //! same [`Plan`] rather than growing a second copy of the composite-stamp-write-date sequence —
 //! two copies of that sequence would be two places a metadata rule has to be kept true.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::OsString;
@@ -138,39 +137,37 @@ const VIDEO_EXTENSIONS: [&str; 1] = ["mp4"];
 /// extension, which made its LENGTH load-bearing at a call site that never mentioned the length: the
 /// two readings agreed only while it held exactly one member, and a second one added at the front
 /// would have had [`output_extension`] answer with the wrong format's name while the predicate
-/// admitted the right one. [`output_extension`] now takes the item's own extension instead, so IT no
-/// longer moves when this does.
+/// admitted the right one. [`output_extension`] now answers with the member [`own_format`] matched
+/// here, so IT no longer moves when this does.
 ///
-/// **The length is load-bearing again one layer up, so this list may not grow until that is closed.**
-/// [`fix_image`]'s arm picks its encoder off this predicate's BOOLEAN and calls
-/// [`crate::export::overlay::compose_png`], which hardcodes PNG. A second member would therefore have
-/// [`output_extension`] name that member's format while PNG bytes were written under it and
-/// `mark_done` recorded the item finished — the same defect the paragraph above records, resurrected
-/// at a different call site rather than fixed everywhere. The upgrade path is one edit and it is not
-/// in this constant: `fix_image` has to choose its encoder off the RESOLVED extension, and refuse by
-/// name a format it has no encoder for, the way [`crate::export::exif::Jpeg`] refuses one. Until
-/// then `png` alone is what makes that arm's claims true, and it is a cap rather than a coincidence.
-///
-/// **The cap is compiler-held, and the assertion below is what holds it.** The array's own length
-/// type does not do it alone: bumping the length alongside the new member builds clean (measured
-/// 2026-08-09), which by this repo's own test leaves a prose cap a convention rather than a
-/// guarantee.
+/// **A second member is an ordinary edit now, and what it needs is an encoder.** [`fix_image`] keys
+/// its encoder on [`output_extension`]'s answer — the same string the plan built the output NAME out
+/// of — so a member this build can encode is composited into its own format, and a member it cannot
+/// is refused per item by name ([`FixError::NoEncoder`]) instead of taking PNG bytes under another
+/// format's name. That refusal is what replaced the compile-time assertion this constant used to
+/// carry (task 70): the assertion made a second member fail the BUILD, which is a refusal to grow
+/// the list rather than an answer about what growing it does, and it could not tell the member with
+/// an encoder from the member without one.
 ///
 /// Growing it is the one question [`IMAGE_EXTENSIONS`] sets out; a format has to be in that list to
 /// reach this one at all.
+#[cfg(not(test))]
 const ALPHA_CAPABLE_EXTENSIONS: [&str; 1] = ["png"];
 
-/// The cap above, held by the compiler rather than by whoever reads the paragraph stating it.
+/// The set above plus one member this build has no encoder for, so both of [`fix_image`]'s
+/// format-keeping arms are reachable from a unit test without shipping a format.
 ///
-/// Same instrument as the TUI's row-fit invariants (`overview.rs`, `memories.rs`, `chat_media.rs`),
-/// for the reason `overview.rs` gives at its own: the constraint belongs in a compile-time assertion
-/// "rather than left as arithmetic in a comment". The message is the entire explanation anyone gets
-/// at the moment they hit it, so it names the two things that have to change together rather than
-/// pointing at a doc.
-const _: () = assert!(
-    ALPHA_CAPABLE_EXTENSIONS.len() == 1,
-    "fix_image's arm hardcodes compose_png; a second member needs the encoder picked off the resolved extension first"
-);
+/// `webp` rather than an invented name, because it is the real next candidate: 107 of the observed
+/// export's 224 unpaired overlay files are named `.webp` (measured 2026-08-04), this build already
+/// decodes the format, and `overlay` exposes a JPEG encoder and a PNG one and nothing else. `image`
+/// can write lossless WebP under the feature this crate already turns on, so `overlay::compose_webp`
+/// is a real upgrade path rather than an impossibility — until someone takes it, `webp` is the member
+/// that makes the refusal observable.
+///
+/// Inert everywhere else: [`IMAGE_EXTENSIONS`] does not admit `webp`, so no plan can hand the image
+/// leg one and no other test's item changes shape under this.
+#[cfg(test)]
+const ALPHA_CAPABLE_EXTENSIONS: [&str; 2] = ["png", "webp"];
 
 /// What a transcode writes before the finished file replaces it.
 ///
@@ -339,9 +336,9 @@ impl Leg {
 
     /// Which leg reads a main with this extension, or `None` for a format this build does not read.
     pub(crate) fn of(extension: &str) -> Option<Self> {
-        if matches(extension, &IMAGE_EXTENSIONS) {
+        if matched(extension, &IMAGE_EXTENSIONS).is_some() {
             Some(Self::Image)
-        } else if matches(extension, &VIDEO_EXTENSIONS) {
+        } else if matched(extension, &VIDEO_EXTENSIONS).is_some() {
             Some(Self::Video)
         } else {
             None
@@ -782,7 +779,7 @@ impl Plan {
             // second do not claim each other's suffix.
             let stem = capture.local.format("%Y%m%d_%H%M%S").to_string();
             let extension = output_extension(leg, &source);
-            let output = outputs.path(&item.source_id, &output_dir(out_root, capture.local), &stem, &extension);
+            let output = outputs.path(&item.source_id, &output_dir(out_root, capture.local), &stem, extension);
 
             items.push(PlannedItem {
                 source_id: item.source_id.clone(),
@@ -895,7 +892,27 @@ pub(crate) fn embedded(leg: Leg, media: &SourceMedia, location: Option<LocationP
 /// because it decides which encoder runs. Pinned at both call sites rather than only here.
 #[must_use]
 pub(crate) fn needs_its_own_format(leg: Leg, media: &SourceMedia) -> bool {
-    leg == Leg::Image && matches(&media.extension, &ALPHA_CAPABLE_EXTENSIONS)
+    own_format(leg, media).is_some()
+}
+
+/// WHICH format the answer above is about: the member of [`ALPHA_CAPABLE_EXTENSIONS`] this item's
+/// main names, or `None` where the leg's own default is what the output takes.
+///
+/// One lookup with two projections rather than two spellings of one question — the predicate above is
+/// this one's `is_some`, so a call site asking "does it keep its format" and a call site asking
+/// "which format" cannot answer differently.
+///
+/// **It answers with the CONSTANT's spelling and never with the filename's own bytes.** That is what
+/// makes [`output_extension`] a `&'static str`, and through it what keeps the export's bytes out of
+/// [`FixError::NoEncoder`]'s message: a filename is user-controlled input as much as a json value is,
+/// and decision 49 keeps those out of a message. It also normalizes by construction — the membership
+/// test is ascii-case-insensitive, so a `.PNG` main matches and answers `png` with no second
+/// lower-casing step to keep in step with the first.
+fn own_format(leg: Leg, media: &SourceMedia) -> Option<&'static str> {
+    if leg != Leg::Image {
+        return None;
+    }
+    matched(&media.extension, &ALPHA_CAPABLE_EXTENSIONS)
 }
 
 /// The extension an item's output carries.
@@ -911,27 +928,26 @@ pub(crate) fn needs_its_own_format(leg: Leg, media: &SourceMedia) -> bool {
 /// decides is the FILE at that name — `originals` withholds the layer, so the pass copies the main
 /// byte for byte instead of burning the caption in — and what is kept beside it.
 ///
-/// The format-keeping arm answers with the item's OWN extension rather than with a member of
+/// The format-keeping arm answers with the member [`own_format`] matched rather than by indexing
 /// [`ALPHA_CAPABLE_EXTENSIONS`], so that list's length is not load-bearing here — see the constant
-/// for what indexing it cost. **Normalized to lower case**, which is the load-bearing half of that: the
-/// membership test is ascii-case-insensitive, so a `.PNG` source is admitted, and answering with its
-/// own spelling would put `.PNG` in the output path while the same file spelled `.png` produced
+/// for what indexing it cost. **Normalized to lower case**, which is the load-bearing half of that:
+/// the membership test is ascii-case-insensitive, so a `.PNG` source is admitted, and answering with
+/// its own spelling would put `.PNG` in the output path while the same file spelled `.png` produced
 /// `.png`. Both planners build the path [`Outputs`] claims out of this string, so a divergence there
 /// moves output paths rather than staying cosmetic. It would no longer let two spellings claim one
 /// file — that set folds ascii case since decision 52 — but it would still write `.PNG` into a tree
-/// whose every other name is lower case. Pinned by
+/// whose every other name is lower case. The normalization is now a consequence of answering with
+/// the constant rather than a `to_ascii_lowercase` step beside it; pinned all the same by
 /// `a_shouted_extension_is_normalized_rather_than_carried_into_the_output_path`.
+///
+/// **Every answer is this crate's own bytes**, from [`Leg::extension`] or from the constant, and
+/// none is the filename's. [`fix_image`] keys its encoder on this, so what it can name in a refusal
+/// is bounded by that rather than by what a source file happens to be called.
 #[must_use]
-pub(crate) fn output_extension(leg: Leg, media: &SourceMedia) -> Cow<'_, str> {
-    if !needs_its_own_format(leg, media) {
-        return Cow::Borrowed(leg.extension());
-    }
-    // Borrowed on the common path — every observed name is already lower case — and owned only when
-    // normalizing actually changes something.
-    if media.extension.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        Cow::Owned(media.extension.to_ascii_lowercase())
-    } else {
-        Cow::Borrowed(media.extension.as_str())
+pub(crate) fn output_extension(leg: Leg, media: &SourceMedia) -> &'static str {
+    match own_format(leg, media) {
+        Some(format) => format,
+        None => leg.extension(),
     }
 }
 
@@ -955,10 +971,15 @@ fn output_dir(root: &Path, local: NaiveDateTime) -> PathBuf {
     root.join(local.format("%Y").to_string()).join(local.format("%m").to_string())
 }
 
-/// Ascii-case-insensitive membership, matching how the rest of the export layer reads an
-/// extension.
-fn matches(extension: &str, known: &[&str]) -> bool {
-    known.iter().any(|candidate| extension.eq_ignore_ascii_case(candidate))
+/// The member of `known` that `extension` names, ascii-case-insensitively, matching how the rest of
+/// the export layer reads an extension.
+///
+/// Answers with the MEMBER rather than with a boolean, so a caller that needs the format's name gets
+/// this crate's spelling of it instead of the filename's; a caller that only needs the membership
+/// takes `.is_some()`. One function rather than two, because a second one would be a second reading
+/// of one question.
+fn matched(extension: &str, known: &[&'static str]) -> Option<&'static str> {
+    known.iter().copied().find(|candidate| extension.eq_ignore_ascii_case(candidate))
 }
 
 // ---- where the last run's outputs actually landed ----
@@ -1528,12 +1549,12 @@ fn fix_image(item: &PlannedItem) -> Result<Vec<Notice>, FixError> {
     // either shape would otherwise land as whatever RGB sat under `alpha = 0`.
     //
     // **The verbatim question is answered HERE, by the `Option` and not by a predicate.** A lone
-    // main is copied byte for byte, so it keeps its own format whatever that format is; a paired one
-    // is composited and re-encoded losslessly, and `compose_png` hardcodes PNG. So the bytes agree
-    // with the extension the plan committed to only while `ALPHA_CAPABLE_EXTENSIONS` holds `png`
-    // alone — that constant carries the cap and the one edit that lifts it. What the `Option` buys
-    // unconditionally is different and smaller: the verbatim answer cannot DRIFT from the
-    // format answer, because only one of the two is a predicate.
+    // main is copied byte for byte, so it keeps its own format whatever that format is and no
+    // encoder is involved at all; a paired one is composited and re-encoded losslessly by whichever
+    // encoder the RESOLVED extension names, and a resolved extension with no encoder is refused by
+    // name rather than written as some other format's bytes (task 70). What the `Option` buys is
+    // that the verbatim answer cannot DRIFT from the format answer, because only one of the two is a
+    // predicate.
     //
     // **No metadata call on either shape, deliberately.** No `Jpeg` value is constructed in this
     // block, so nothing here reaches `little_exif` at all. That is the whole of what this branch
@@ -1543,7 +1564,12 @@ fn fix_image(item: &PlannedItem) -> Result<Vec<Notice>, FixError> {
     // and is the only place either should be read from. Read it before adding anything here.
     if needs_its_own_format(item.leg, &item.media) {
         let bytes = match item.media.overlay.as_deref() {
-            Some(overlay) => overlay::compose_png(&item.media.main, overlay)?,
+            // Keyed on `output_extension` rather than on the predicate above, which is the whole of
+            // task 70: the encoder has to answer to the name the PLAN committed to, since that name
+            // is what the file lands under and what the manifest records as finished. The no-overlay
+            // arm is deliberately not routed through it — it writes the source's own bytes, so there
+            // is no encoder for it to pick and a format with none is not a failure there.
+            Some(overlay) => compose_own_format(output_extension(item.leg, &item.media), &item.media.main, overlay)?,
             None => fs::read(&item.media.main).map_err(|source| FixError::Read { path: item.media.main.clone(), source })?,
         };
         make_parent(&item.output)?;
@@ -1584,6 +1610,29 @@ fn fix_image(item: &PlannedItem) -> Result<Vec<Notice>, FixError> {
     make_parent(&item.output)?;
     jpeg.write(&item.output)?;
     Ok(Vec::new())
+}
+
+/// The composite encoded as `format`, or a refusal naming the format this build cannot write.
+///
+/// **The one place an encoder is chosen, and it is chosen off the resolved extension** — task 70.
+/// The arm above used to call [`crate::export::overlay::compose_png`] unconditionally, which was
+/// true only because [`ALPHA_CAPABLE_EXTENSIONS`] held `png` alone: a second member would have taken
+/// PNG bytes under its own name with the manifest recording the item finished. Growing that list now
+/// either finds an encoder here or produces a per-item failure, and neither of those is a wrong file
+/// on disk.
+///
+/// **Refusing rather than falling back to a JPEG**, the way [`crate::export::exif::Jpeg`] refuses
+/// bytes it cannot walk: the whole reason this item is off the JPEG path is that JPEG drops what its
+/// format carries, so silently spending that to avoid a failure would be the defect decision 47
+/// exists to close.
+///
+/// `format` is a [`&'static str`](str) from [`output_extension`] and so this crate's own bytes,
+/// which is what lets the failure name it under decision 49.
+fn compose_own_format(format: &'static str, main: &Path, overlay: &Path) -> Result<Vec<u8>, FixError> {
+    match format {
+        "png" => Ok(overlay::compose_png(main, overlay)?),
+        _ => Err(FixError::NoEncoder { main: main.to_path_buf(), format }),
+    }
 }
 
 /// The video leg: ffmpeg for pixels when the run is transcoding, pure Rust for metadata always.
@@ -1710,6 +1759,24 @@ pub enum FixError {
     Compose {
         source: OverlayError,
     },
+    /// The output has to keep a format this build has no encoder for, so the composite was refused
+    /// instead of written as some other format's bytes under that format's name.
+    ///
+    /// Reachable only after [`ALPHA_CAPABLE_EXTENSIONS`] grows a member [`compose_own_format`] has no
+    /// arm for, which is why the shipped set can hold no such member and a unit-test one does. Kept
+    /// as a per-item failure like every variant here: one format nobody wrote an encoder for must not
+    /// stop a run over the formats it did.
+    NoEncoder {
+        /// The export's own file, which is what a user recognises. Never the OUTPUT path — that is
+        /// the one carrying a conversation key on the chat leg (see [`Failure::reason`]), and a
+        /// source path is a uuid or a file id.
+        main: PathBuf,
+        /// This crate's own name for the format, from [`ALPHA_CAPABLE_EXTENSIONS`] by way of
+        /// [`output_extension`], never the filename's spelling of it. Decision 49: a filename is the
+        /// export's bytes as much as a json value is, and the type is what holds that rather than a
+        /// promise at the call site.
+        format: &'static str,
+    },
     Metadata {
         source: ExifError,
     },
@@ -1781,6 +1848,13 @@ impl fmt::Display for FixError {
         match self {
             Self::Read { path, source } => write!(f, "could not read {}: {source}", path.display()),
             Self::Compose { source } => write!(f, "{source}"),
+            Self::NoEncoder { main, format } => write!(
+                f,
+                "could not composite {}: it has to stay {format} so its transparency survives, and this build writes no \
+                 {format}; drawing the caption in would mean putting another format under a .{format} name, so nothing was \
+                 written and the export's own file is untouched",
+                main.display()
+            ),
             Self::Metadata { source } => write!(f, "{source}"),
             Self::Container { source } => write!(f, "{source}"),
             Self::Transcode { source } => write!(f, "{source}"),
@@ -1814,6 +1888,9 @@ impl Error for FixError {
             Self::Read { source, .. } | Self::Create { source, .. } | Self::Copy { source, .. } | Self::Touch { source, .. } => {
                 Some(source)
             }
+            // Nothing underneath it: the refusal is this build's own answer about its own encoders,
+            // not a library's about these bytes.
+            Self::NoEncoder { .. } => None,
             Self::Compose { source } => Some(source),
             Self::Metadata { source } => Some(source),
             Self::Container { source } => Some(source),
@@ -1825,11 +1902,18 @@ impl Error for FixError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::Cursor;
     use std::path::Path;
 
     use chrono::NaiveDate;
+    use image::{ImageFormat, Rgba, RgbaImage};
 
-    use super::{Capture, Leg, Outputs, RecordedOutputs, TimeSource, VideoOptions, output_dir, output_name};
+    use super::{
+        Capture, FixError, Leg, Notice, Outputs, PlannedItem, RecordedOutputs, SourceMedia, TimeSource, VideoOptions, fix, output_dir,
+        output_extension, output_name,
+    };
+    use crate::export::memories::Day;
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> chrono::NaiveDateTime {
         NaiveDate::from_ymd_opt(year, month, day).unwrap().and_hms_opt(hour, minute, second).unwrap()
@@ -2018,6 +2102,112 @@ mod tests {
         }
         assert_eq!(Leg::of("heic"), None, "an unknown format is deferred rather than guessed at");
         assert_eq!(Leg::of("mov"), None);
+    }
+
+    // ---- task 70: the encoder comes off the resolved extension ----
+
+    /// One planned image item, with the output under `work` where a written file can be looked for.
+    ///
+    /// Built by hand rather than through [`super::Plan::build`] on purpose: `IMAGE_EXTENSIONS` admits
+    /// no format the alpha-capable test set adds, so no planner can produce this item — and the arm
+    /// under test is `fix_image`'s, which reads the leg and the extension off the item it is handed
+    /// and never re-derives either.
+    fn image_item(work: &Path, extension: &str, main: &[u8], overlay: Option<&str>) -> PlannedItem {
+        let main_path = work.join(format!("2021-01-15_a-main.{extension}"));
+        fs::write(&main_path, main).unwrap();
+        PlannedItem {
+            source_id: "a".to_owned(),
+            media: SourceMedia {
+                main: main_path,
+                day: Day::parse("2021-01-15").unwrap(),
+                extension: extension.to_owned(),
+                overlay: overlay.map(|name| work.join(name)),
+            },
+            leg: Leg::Image,
+            capture: Capture::from_day(Day::parse("2021-01-15").unwrap()).unwrap(),
+            location: None,
+            attribution: None,
+            output: work.join("out/2021/01/20210115_000000").with_extension(extension.to_ascii_lowercase()),
+            originals: None,
+        }
+    }
+
+    /// Nothing is transcoded on the image leg, so both halves of this are the "no" answer.
+    fn no_video() -> VideoOptions {
+        VideoOptions { transcode: false, ffmpeg: None }
+    }
+
+    /// **The first half of task 70's verify line.** A second alpha-capable member with no encoder is
+    /// a named per-item failure rather than PNG bytes under its own name — which is what the arm did
+    /// while it called `compose_png` unconditionally, and what a compile-time cap on the list's
+    /// length could refuse to allow but never answer.
+    ///
+    /// The fixture's extension is SHOUTED, so the format the failure names is observably the
+    /// constant's spelling and not the filename's. The rest of that property is held by the type:
+    /// [`FixError::NoEncoder`]'s `format` is a `&'static str`, so the export's own bytes cannot reach
+    /// it (decision 49).
+    ///
+    /// The overlay file is never created, which is itself an assertion: the refusal has to come
+    /// before anything reads a layer, or a run would pay a decode to be told there was no encoder.
+    #[test]
+    fn an_alpha_capable_format_with_no_encoder_is_refused_by_name() {
+        let work = tempfile::TempDir::new().unwrap();
+        let item = image_item(work.path(), "WEBP", b"not really a webp", Some("caption.png"));
+        assert_eq!(output_extension(item.leg, &item.media), "webp", "the plan committed to the member's own name");
+
+        let error = fix(&item, &no_video()).unwrap_err();
+        let FixError::NoEncoder { main, format } = &error else {
+            panic!("a format with no encoder must be its own failure, not another one's: {error}");
+        };
+        assert_eq!(*format, "webp");
+        assert_eq!(main, &item.media.main, "the failure names the export's file, not the output");
+        let message = error.to_string();
+        assert!(message.contains("this build writes no webp"), "{message}");
+
+        assert!(!item.output.exists(), "a refusal writes no file");
+        assert!(!item.output.parent().unwrap().exists(), "and leaves no year and month behind either");
+    }
+
+    /// **The second half**, and the one that keeps the refusal off the arm that never needed an
+    /// encoder: with nothing to composite the source's own bytes ARE the output, so a format this
+    /// build cannot encode is written out in its own format rather than refused.
+    ///
+    /// Routing this arm through the encoder selection would red here — which is the point of it being
+    /// matched on the overlay `Option` instead of on the format.
+    #[test]
+    fn an_alpha_capable_format_with_no_encoder_is_still_copied_verbatim_with_nothing_to_composite() {
+        let work = tempfile::TempDir::new().unwrap();
+        let bytes = b"the export's own bytes, in whatever format they are";
+        let item = image_item(work.path(), "webp", bytes, None);
+
+        assert_eq!(fix(&item, &no_video()).unwrap(), vec![Notice::NotStamped]);
+        assert_eq!(fs::read(&item.output).unwrap(), bytes, "the copy is byte for byte");
+        assert_eq!(item.output.extension().and_then(|extension| extension.to_str()), Some("webp"));
+    }
+
+    /// The other member of the same two-member set still reaches its own encoder, which is the half
+    /// of the verify line no shipped test can carry: `tests/local_fix.rs` and `tests/chat_fix.rs` pin
+    /// the composited PNG against the ONE-member set they link, so only a test inside `cfg(test)`
+    /// sees a member with an encoder and a member without one in one build.
+    #[test]
+    fn a_member_with_an_encoder_still_composites_beside_one_without() {
+        let work = tempfile::TempDir::new().unwrap();
+        fs::write(work.path().join("caption.png"), png_bytes([200, 0, 0, 128])).unwrap();
+        let main = png_bytes([0, 0, 200, 255]);
+        let item = image_item(work.path(), "png", &main, Some("caption.png"));
+
+        assert_eq!(fix(&item, &no_video()).unwrap(), vec![Notice::NotStamped]);
+        let written = fs::read(&item.output).unwrap();
+        assert_eq!(&written[..8], b"\x89PNG\r\n\x1a\n", "composited as a png");
+        assert_ne!(written, main, "and composited rather than copied through");
+    }
+
+    /// A solid 8x8 RGBA PNG. The colours only have to differ between the two layers, so a composite
+    /// that ran is not byte-identical to the main that went in.
+    fn png_bytes(colour: [u8; 4]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        RgbaImage::from_pixel(8, 8, Rgba(colour)).write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png).unwrap();
+        bytes
     }
 
     #[test]

@@ -736,7 +736,7 @@ pub fn plan(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: O
         // the name: two conversations may each hold a file that wants `20210304_000000.jpg`, and
         // those two do not collide.
         let extension = local_fix::output_extension(leg, &media);
-        let output = outputs.path(item.source_id(), &dir, &stem, &extension);
+        let output = outputs.path(item.source_id(), &dir, &stem, extension);
 
         items.push(PlannedItem {
             source_id: item.source_id().to_owned(),
