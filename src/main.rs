@@ -22,6 +22,36 @@ pub const VERSION_TEXT: &str = concat!(
     "Timezone data via the tzf-dist crate; full third-party notices: THIRD-PARTY-LICENSES\n",
 );
 
+/// The `--help` text: what the binary is, how it is invoked, and every flag it answers to. A
+/// constant for [`VERSION_TEXT`]'s reason — the inline tests pin its shape against the flag set
+/// rather than re-implementing it — and the flags are spelled with their `=` so the one form the
+/// parsers accept is the one the help shows.
+///
+/// **No project or bug-report URL**, which GNU would end a help text with: `Cargo.toml` carries no
+/// `repository` field (the publish metadata is deliberately deleted until phase 5), so there is
+/// nothing honest to print yet. Phase 5 owns the URL, along with the README and the wiki this text
+/// stands in for until they exist.
+pub const HELP_TEXT: &str = concat!(
+    "exportsnap — give a Snapchat data export back its metadata\n",
+    "\n",
+    "Usage: exportsnap [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "  --source=<dir>   the dir holding the export's zips and unpacked parts; defaults to the working dir\n",
+    "  --out=<dir>      where a run writes the fixed files; defaults to <source>/exportsnap-out\n",
+    "  --theme=<tier>   full or compatible; detected from the environment when absent\n",
+    "  --print-source   print what exportsnap was launched against, then exit; takes no value\n",
+    "  --version        print the version and the third-party attribution, then exit; takes no value\n",
+    "  -h, --help       print this text, then exit\n",
+    "\n",
+    "With no options exportsnap opens its terminal ui against the dir you ran it from.\n",
+);
+
+/// Every `--` spelling the parsers below answer to, and the set [`reject_unknown_args`] measures an
+/// argument against. An entry matches whole or followed by `=`, so both a flag's bare form and its
+/// valued form reach the parser that owns its own error message.
+const KNOWN_FLAGS: [&str; 6] = ["--theme", "--source", "--out", "--version", "--print-source", "--help"];
+
 fn main() -> Result<()> {
     let args = utf8_args(std::env::args_os().skip(1))?;
 
@@ -38,6 +68,28 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+
+    // `--help` is checked immediately after `--version` and ahead of every parse, and prints before
+    // the terminal is taken over for `--version`'s reasons. **The order between the two is fixed
+    // rather than first-in-argv**: `--version` keeps winning, so the comment above stays literally
+    // true and no shipped precedence moves, and the ODbL attribution it carries (decision 38) stays
+    // unconditional. Both print to stdout and exit 0, so a user passing both loses nothing either
+    // way. GNU is first-in-argv (`ls --version --help` prints the version, `ls --help --version`
+    // prints help) and ripgrep is version-always; a fixed order sits inside that spread and is what
+    // this crate's per-flag scans can express.
+    if wants_help_arg(args.iter().cloned())? {
+        let mut out = std::io::stdout().lock();
+        if let Err(e) = out.write_all(HELP_TEXT.as_bytes())
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e).context("failed to print the help text");
+        }
+        return Ok(());
+    }
+
+    // Runs after the two flags that ignore the rest of the command line and before every parse, so a
+    // typo is reported as a typo rather than as a downstream parse failure or a silent TUI launch.
+    reject_unknown_args(args.iter().cloned())?;
 
     // Unlike `--version`, this one does not short-circuit here: its whole report is read off the
     // composed app below, so everything that feeds the composition still has to parse first.
@@ -125,8 +177,9 @@ fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>> {
 }
 
 /// Hand-parses `--theme=full` / `--theme=compatible`, last one wins. A real CLI with
-/// subcommands is phase 5 and brings its own argument parser then; anything else on the
-/// command line is left alone until it exists.
+/// subcommands is phase 5 and brings its own argument parser then; a bare argument is left alone
+/// until it exists, while an unrecognized `--` one is refused by [`reject_unknown_args`]
+/// (decision 56c).
 fn parse_theme_arg(args: impl IntoIterator<Item = String>) -> Result<Option<Tier>> {
     let mut tier = None;
     for arg in args {
@@ -206,11 +259,57 @@ fn wants_version_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
     Ok(version)
 }
 
+/// Hand-parses `-h` / `--help`: any occurrence wins and a `--help=` value is a hard error, both for
+/// [`wants_version_arg`]'s reasons — the flag carries no state, and a value is a user believing it
+/// takes one. `-h` is the only single-dash spelling this crate reads; every other one is still left
+/// alone, so `-h=1` reaches no parser and opens the ui, the way `-x` always has.
+///
+/// Landing help before phase 5's argument parser is decision 56b: phase 5 is gated behind phases
+/// 2-4, while `-h`/`--help` is reserved by convention and reachable today — without this arm it
+/// fell through to the terminal takeover and exited 1 with a message about the terminal.
+fn wants_help_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
+    let mut help = false;
+    for arg in args {
+        if arg == "--help" || arg == "-h" {
+            help = true;
+        } else if arg.starts_with("--help=") {
+            bail!("--help takes no value; pass --help alone");
+        }
+    }
+    Ok(help)
+}
+
+/// Refuses an argument that starts with `--` and is not one of [`KNOWN_FLAGS`] (decision 56c), which
+/// supersedes the "anything else on the command line is left alone" convention for that shape only:
+/// `--print-sourc` used to launch the ui, which is hostile for a flag whose whole point is
+/// scripting. A BARE argument keeps the old convention, so nothing that works today breaks. `--` on
+/// its own is refused with the rest — this crate reads no positional arguments, so there is nothing
+/// for it to separate.
+///
+/// A known flag's own error still comes from the parser that owns it: every spelling in the set is
+/// matched whole or followed by `=`, so `--theme` alone and `--source=` reach their own messages
+/// rather than being reported as unknown.
+///
+/// The refused argument is quoted through `Debug` for [`utf8_args`]'s reason: it is unvalidated
+/// bytes on their way to a stream.
+fn reject_unknown_args(args: impl IntoIterator<Item = String>) -> Result<()> {
+    for arg in args {
+        if !arg.starts_with("--") {
+            continue;
+        }
+        if KNOWN_FLAGS.iter().any(|flag| arg == *flag || arg.strip_prefix(flag).is_some_and(|rest| rest.starts_with('='))) {
+            continue;
+        }
+        bail!("{arg:?}: unknown flag; run exportsnap --help for the flags it takes");
+    }
+    Ok(())
+}
+
 /// Hand-parses `--print-source`: what the app was launched against and what it found there, on
 /// stdout, with no terminal taken over. Any occurrence wins and a `--print-source=` value is a hard
 /// error, both for [`wants_version_arg`]'s reasons — the flag carries no state, so there is no last
-/// one to speak of, and a value is a user believing it takes one. `--version` is checked first and
-/// returns before this is read. Same shape as [`parse_theme_arg`] and for the same reason: a real
+/// one to speak of, and a value is a user believing it takes one. `--version` and `--help` are both
+/// checked first and return before this is read. Same shape as [`parse_theme_arg`] and for the same
 /// CLI with subcommands is phase 5 and brings its own argument parser then.
 fn wants_print_source_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
     let mut print_source = false;
@@ -246,6 +345,14 @@ mod tests {
 
     fn parse_print_source(args: &[&str]) -> Result<bool> {
         wants_print_source_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn parse_help(args: &[&str]) -> Result<bool> {
+        wants_help_arg(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn reject_unknown(args: &[&str]) -> Result<()> {
+        reject_unknown_args(args.iter().map(|arg| (*arg).to_string()))
     }
 
     #[test]
@@ -387,6 +494,62 @@ mod tests {
     fn print_source_flag_with_a_value_is_a_hard_error() {
         let error = parse_print_source(&["--print-source=/tmp/export"]).unwrap_err();
         assert_eq!(error.to_string(), "--print-source takes no value; pass --print-source alone, with --source=<dir> naming the dir");
+    }
+
+    #[test]
+    fn help_flag_is_read_in_both_of_its_spellings() {
+        assert!(parse_help(&["--help"]).unwrap());
+        assert!(parse_help(&["-h"]).unwrap());
+        assert!(parse_help(&["--source=/tmp/export", "-h"]).unwrap());
+        assert!(!parse_help(&[]).unwrap());
+        // Every other single-dash argument is still left alone, `-h=1` included.
+        assert!(!parse_help(&["-x", "some/path"]).unwrap());
+        assert!(!parse_help(&["-h=1"]).unwrap());
+    }
+
+    #[test]
+    fn help_flag_with_a_value_is_a_hard_error() {
+        let error = parse_help(&["--help=flags"]).unwrap_err();
+        assert_eq!(error.to_string(), "--help takes no value; pass --help alone");
+    }
+
+    /// The coupling that makes the help text answerable for the parsers: a flag added to
+    /// [`KNOWN_FLAGS`] and left out of [`HELP_TEXT`] reds here rather than shipping undocumented.
+    #[test]
+    fn help_text_names_every_flag_the_binary_parses() {
+        for flag in KNOWN_FLAGS {
+            assert!(HELP_TEXT.contains(flag), "the help text lacks '{flag}'");
+        }
+        assert!(HELP_TEXT.contains("-h, --help"), "the help text must name the short spelling too");
+        assert!(HELP_TEXT.ends_with('\n'));
+        // Decision: no bug or project URL until phase 5 has one to print.
+        assert!(!HELP_TEXT.contains("http"), "the help text must not carry an invented url");
+    }
+
+    #[test]
+    fn an_unknown_double_dash_argument_is_refused_by_name() {
+        let error = reject_unknown(&["--print-sourc"]).unwrap_err();
+        assert_eq!(error.to_string(), "\"--print-sourc\": unknown flag; run exportsnap --help for the flags it takes");
+        // A prefix of a known flag is not a known flag, and neither is a bare `--`.
+        assert!(reject_unknown(&["--print"]).is_err());
+        assert!(reject_unknown(&["--"]).is_err());
+    }
+
+    /// The other half of the refusal: every known spelling has to survive the scan, or a flag's own
+    /// error message is replaced by "unknown flag" and the fix it names is lost.
+    #[test]
+    fn every_known_flag_survives_the_unknown_scan() {
+        for flag in KNOWN_FLAGS {
+            reject_unknown(&[flag]).unwrap_or_else(|error| panic!("{flag} must reach its own parser: {error}"));
+            let valued = format!("{flag}=value");
+            reject_unknown(&[&valued]).unwrap_or_else(|error| panic!("{valued} must reach its own parser: {error}"));
+        }
+    }
+
+    #[test]
+    fn a_bare_or_single_dash_argument_is_still_left_alone() {
+        // Decision 56c supersedes the leave-it-alone convention for the `--` shape only.
+        reject_unknown(&["some/path", "-x", "-", "--theme=full"]).unwrap();
     }
 
     #[test]
