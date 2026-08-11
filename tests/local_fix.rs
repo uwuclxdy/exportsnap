@@ -956,11 +956,13 @@ fn an_overlay_whose_aspect_mismatches_the_main_is_scaled_to_fit_centred_rather_t
 
 #[test]
 fn a_main_wider_than_four_thousand_pixels_composites_and_carries_that_width_out() {
-    // Every other fixture in this crate sits under 4096 on both axes and nothing in the pipeline
-    // branches on a dimension, so what this closes is the FIXTURE tree's ceiling rather than a live
-    // gap. It goes live the first time something does branch — a downscale option, a memory cap, a
-    // large-file path — because a `width > 4096` guard authored against a tree where every fixture
-    // takes the safe side ships with its other side unrun.
+    // Nothing in the pipeline branches on a dimension's MAGNITUDE, so what this closes is the
+    // FIXTURE tree's ceiling rather than a live gap. Not "branches on a dimension" — `composite`
+    // branches on whether the two layers' dimensions are EQUAL, and this fixture takes its else
+    // arm, which is what paints the corner asserted below. It goes live the first time something
+    // compares a dimension against a NUMBER — a downscale option, a memory cap, a large-file path
+    // — because a `width > 4096` guard authored against a tree whose every fixture takes the safe
+    // side ships with its other side unrun.
     //
     // Wide and short because the ceiling is a LINEAR dimension while the cost is a pixel COUNT.
     // Measured 2026-08-11, each shape run alone on the release leg: 4608x64 takes 0.13s against
@@ -991,8 +993,11 @@ fn a_main_wider_than_four_thousand_pixels_composites_and_carries_that_width_out(
 
     let composite = image::open(&plan.items[0].output).unwrap().to_rgb8();
     // The composite keeps the main's size, so a downscale of the PIXELS keyed on 4096 reds here.
-    // It does not reach the whole hop: `Stamp`'s width is read by `overlay::dimensions`, and a
-    // clamp planted inside that reader leaves the entire suite green (measured 2026-08-11, 686/686).
+    // It does not reach the TAG: `Stamp`'s width comes from `overlay::dimensions`, and a clamp
+    // planted inside that reader leaves this assertion green. That half is
+    // `a_dimension_past_four_thousand_pixels_reaches_the_written_exif_tag_on_either_axis`, which is
+    // gated on exiftool; this test stays ungated so the oversized fixture still runs where exiftool
+    // is absent, and that is why the tag is not read back here as well.
     assert_eq!(composite.dimensions(), (MAIN_W, MAIN_H), "the oversized width did not survive to the composite");
     // The unscaled overlay would sit centred at 1152..3456 x 16..48, so this corner is outside it
     // on both axes: only the scale-up paints the opaque half here.
@@ -1424,6 +1429,78 @@ fn the_stamped_output_reads_back_correctly_through_an_independent_reader() {
     // dropped or swapped component would move.
     assert!(tags.get("GPSLatitude").is_some_and(|value| value.starts_with("48 deg 51")), "{tags:#?}");
     assert!(tags.get("GPSLongitude").is_some_and(|value| value.starts_with("2 deg 17")), "{tags:#?}");
+}
+
+#[test]
+fn a_dimension_past_four_thousand_pixels_reaches_the_written_exif_tag_on_either_axis() {
+    if !common::usable("a_dimension_past_four_thousand_pixels_reaches_the_written_exif_tag_on_either_axis", &[Tool::Exiftool]) {
+        return;
+    }
+    // The hop is `overlay::dimensions` -> `Stamp`'s width and height -> `ExifImageWidth` and
+    // `ExifImageHeight`. **What was missing is not observation of the reader — the 64x48 sibling
+    // above has always had that.** Swap the reader's axes (`.map(|(w, h)| (h, w))` on its
+    // `into_dimensions()`) and two tests red, that sibling among them. What no test held was a TAG
+    // READ-BACK a clamp could move — scoped to the read-back and deliberately NOT to the output,
+    // because `a_main_wider_than_four_thousand_pixels_...` already writes a 4608x64 one and the
+    // clamp moves that output's TAG while leaving its PIXELS untouched — the reader feeds `Stamp`
+    // and nothing else, so that test PASSES under the clamp, which is what makes it the ungated
+    // half rather than a second copy of this one. Every test that did read these tags read them at
+    // 64x48, so `.map(|(w, h)| (w.min(4096), h.min(4096)))` passed the whole suite. Those two
+    // plants are what this test is scored by, and they discriminate in opposite directions —
+    // re-derive both rather than trusting the sentence.
+    //
+    // Both axes, because the reader returns the pair from one expression and has no reason to
+    // prefer the width. Long-and-thin plus its transpose, for the reason
+    // `a_main_wider_than_four_thousand_pixels_...` states about its own shape: the ceiling is a
+    // LINEAR dimension while the cost is a pixel COUNT, and these two carry that test's pixel count
+    // each.
+    //
+    // Neither main is paired, so nothing composites and nothing resizes: `fix_image` reads the
+    // main, reads the dimensions back off the bytes it is about to write, and stamps. That is the
+    // whole hop, and the composite arm reaches the same reader the same way — what it adds is
+    // pixels, which is the other test's half.
+    //
+    // **What no assertion here reaches is the reader's own stated point — that the tags describe
+    // the bytes WRITTEN and not the source they came from.** Handing `fix_image`'s
+    // `overlay::dimensions` call a re-read of `item.media.main` instead of `jpeg.as_bytes()` passes
+    // the whole suite, this test included, and nothing in this crate can catch it: `composite`
+    // never resizes its base, so an output always carries its main's dimensions. It becomes
+    // observable the first time the pipeline can write a size its source did not have.
+    const LONG: u32 = 4608;
+    const SHORT: u32 = 64;
+
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS), (&at("2021-02-20", "13:30:05"), "Image", PARIS)]);
+    let wide = write_main_sized(dir.path(), "2021-01-15", 1, LONG, SHORT);
+    let tall = write_main_sized(dir.path(), "2021-02-20", 2, SHORT, LONG);
+    let (wide_source, tall_source) = (wide.path.clone(), tall.path.clone());
+    let reconciliation = reconciled(&memories, vec![wide, tall]);
+    let mut manifest = manifest(&dir, &reconciliation);
+
+    let out = dir.path().join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    // Guarded rather than left to the comment above: an overlay pairing here would still reach the
+    // same reader and this test would stay green over a sentence that had gone false.
+    assert!(plan.items.iter().all(|item| item.media.overlay.is_none()), "neither fixture may pair an overlay: {:?}", plan.items);
+    assert_eq!(local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap().fixed, 2);
+
+    // Located by its source file rather than by position in the plan, so the two can never be read
+    // for each other. Asserting the two pairs as a SET would be invariant under a width/height
+    // swap, which is the defect two adjacent `u32` fields on one struct most invite.
+    let tags_of = |source: &Path| {
+        let item = plan.items.iter().find(|item| item.media.main == source).expect("the fixture must reach the plan");
+        exiftool(&item.output)
+    };
+
+    let wide_tags = tags_of(&wide_source);
+    assert_eq!(wide_tags.get("Validate").map(String::as_str), Some("OK"), "{wide_tags:#?}");
+    assert_eq!(wide_tags.get("ExifImageWidth").map(String::as_str), Some(&*LONG.to_string()), "{wide_tags:#?}");
+    assert_eq!(wide_tags.get("ExifImageHeight").map(String::as_str), Some(&*SHORT.to_string()), "{wide_tags:#?}");
+
+    let tall_tags = tags_of(&tall_source);
+    assert_eq!(tall_tags.get("Validate").map(String::as_str), Some("OK"), "{tall_tags:#?}");
+    assert_eq!(tall_tags.get("ExifImageWidth").map(String::as_str), Some(&*SHORT.to_string()), "{tall_tags:#?}");
+    assert_eq!(tall_tags.get("ExifImageHeight").map(String::as_str), Some(&*LONG.to_string()), "{tall_tags:#?}");
 }
 
 #[test]
