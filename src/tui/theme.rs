@@ -405,6 +405,8 @@ pub mod glyph {
 /// Both the alpha blend and the 256-color snap are hand-rolled: ratatui has no translucency
 /// primitive and no color-distance API (ratatui-patterns limitations.md: "alpha-blend /
 /// translucency" and "xterm-256 nearest-color quantization" are both listed gaps).
+///
+/// **The catch-all arm takes `Color::Indexed` with it, so on the `compatible` tier this blends against the base and nothing else.** That tier paints every background as an index, which is exactly where a toast sits, so the one tier whose flat palette makes the glass effect worth having is the one that never gets it. Stated rather than fixed, and the reason is NOT that it cannot be done: every index this palette paints is ≥ 75, so all of them sit in the 6×6×6 cube or the grayscale ramp and invert to RGB exactly. What stops it being a fix is that it is a decision first. The contract is silent here and its own reference implementation punts the same way, an inverse would still need an answer for the system indices 0-15 that no process can resolve (their RGB is terminal-configurable) even though this palette uses none of them, and a real blend on `compatible` would then re-snap through [`nearest_xterm256`] and land back on an index anyway, so the visible gain is unmeasured. Pinned as-is by `toast_bg_treats_non_rgb_underlay_as_unknown_full_tier` and its compatible twin, which fix `Color::Indexed(42)` to the `BG` fallback on both tiers against literal values, so this arm reds if it changes without the decision being taken.
 pub fn toast_bg(tier: Tier, under: Option<Color>) -> Color {
     let (under_r, under_g, under_b) = match under {
         Some(Color::Rgb(r, g, b)) => (r, g, b),
