@@ -132,8 +132,9 @@ fn a_payload_flag_exits_zero_when_its_reader_has_left() {
 
 #[test]
 fn version_wins_over_help_and_help_wins_over_everything_after_it() {
-    // The precedence is fixed rather than first-in-argv, so both orderings print the version.
-    for args in [["--version", "--help"], ["--help", "--version"]] {
+    // The precedence is fixed rather than first-in-argv, so both orderings print the version, and
+    // the bare word is read with the other help spellings rather than ahead of them.
+    for args in [["--version", "--help"], ["--help", "--version"], ["--version", "help"]] {
         let output = run(&args);
         assert!(output.status.success(), "{args:?} must exit 0, got {:?}", output.status);
         let stdout = stdout(&output);
@@ -160,6 +161,45 @@ fn a_malformed_version_value_is_reported_even_when_help_is_asked_for() {
     assert!(stderr(&output).contains("--version takes no value"), "the version error must survive --help, got {:?}", stderr(&output));
     assert!(!output.status.success(), "--version=<value> must fail even beside --help, got {:?}", output.status);
     assert!(!stdout(&output).contains("Usage: exportsnap"), "help must not print over a rejected flag, got {:?}", stdout(&output));
+}
+
+/// `terminal-ux` §6's fourth help spelling, which decision 57 deliberately left alone until now: the
+/// bare word is a bare argument, so it fell through to `ratatui::try_init` and exited 1 with the
+/// terminal message, having leaked the alternate-screen escape to a piped stdout on the way.
+///
+/// The usage assertion comes first for that same reason — with the word unread the run fails on the
+/// terminal, so an exit-code or stderr assertion placed ahead of it would abort the body and bank the
+/// kill against a line that says nothing about help.
+#[test]
+fn the_bare_word_help_prints_usage_the_way_the_flag_does() {
+    // §6: once help is seen the rest of the command line is ignored, and it is read after `--version`
+    // rather than before, so an argument that would otherwise parse does not change the answer.
+    for args in [["help"].as_slice(), ["help", "extra-junk"].as_slice(), ["--source=/tmp/export", "help"].as_slice()] {
+        let output = run(args);
+
+        let stdout = stdout(&output);
+        assert!(stdout.contains("Usage: exportsnap"), "{args:?} must print the usage, got {stdout:?}");
+        assert!(output.status.success(), "{args:?} must exit 0, got {:?}: {}", output.status, stderr(&output));
+        assert!(!stderr(&output).contains(TOOK_OVER), "{args:?} must print before the terminal is touched, got {:?}", stderr(&output));
+        assert!(output.stderr.is_empty(), "{args:?} must leave stderr clean, got {:?}", stderr(&output));
+    }
+}
+
+/// The scope of that exception, which is one exact word and nothing beside it. The fixture carries
+/// `--print-source` so a word that is not help lands on a report at exit 0 instead of on the terminal
+/// takeover: what is checked is then what the run PRINTED, not how it happened to die.
+#[test]
+fn only_the_exact_word_help_escapes_the_bare_argument_convention() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = format!("--source={}", dir.path().display());
+    for bare in ["Help", "HELP", "helpx", "hel", "help/", " help"] {
+        let output = run(&["--print-source", &source, bare]);
+
+        let stdout = stdout(&output);
+        assert!(!stdout.contains("Usage: exportsnap"), "{bare:?} must not be read as help, got {stdout:?}");
+        assert!(stdout.starts_with("source="), "{bare:?} must be left alone like any other bare argument, got {stdout:?}");
+        assert!(output.status.success(), "{bare:?} must not fail the run, got {:?}: {}", output.status, stderr(&output));
+    }
 }
 
 #[test]

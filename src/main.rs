@@ -42,7 +42,7 @@ pub const HELP_TEXT: &str = concat!(
     "  --theme=<tier>   full or compatible; detected from the environment when absent\n",
     "  --print-source   print what exportsnap was launched against, then exit; takes no value\n",
     "  --version        print the version and the third-party attribution, then exit; takes no value\n",
-    "  -h, --help       print this text, then exit\n",
+    "  -h, --help       print this text, then exit; the bare word help does the same\n",
     "\n",
     "With no options exportsnap opens its terminal ui against the dir you ran it from.\n",
 );
@@ -207,9 +207,9 @@ fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>> {
 }
 
 /// Hand-parses `--theme=full` / `--theme=compatible`, last one wins. A real CLI with
-/// subcommands is phase 5 and brings its own argument parser then; a bare argument is left alone
-/// until it exists, while any dash-led one other than `-h` is refused by [`reject_unknown_args`]
-/// (decision 57).
+/// subcommands is phase 5 and brings its own argument parser then; a bare argument other than the
+/// word `help` is left alone until it exists, while any dash-led one other than `-h` is refused by
+/// [`reject_unknown_args`] (decision 57).
 fn parse_theme_arg(args: impl IntoIterator<Item = String>) -> Result<Option<Tier>> {
     let mut tier = None;
     for arg in args {
@@ -289,11 +289,20 @@ fn wants_version_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
     Ok(version)
 }
 
-/// Hand-parses `-h` / `--help`: any occurrence wins and a `--help=` value is a hard error, both for
-/// [`wants_version_arg`]'s reasons — the flag carries no state, and a value is a user believing it
-/// takes one. `-h` is the only single-dash spelling this crate reads, and since decision 57 it is the
-/// only one it accepts at all: `-h=1` matches nothing here and is then refused by
-/// [`reject_unknown_args`] rather than opening the ui.
+/// Hand-parses `-h` / `--help` / the bare word `help`: any occurrence wins and a `--help=` value is a
+/// hard error, both for [`wants_version_arg`]'s reasons — the flag carries no state, and a value is a
+/// user believing it takes one. `-h` is the only single-dash spelling this crate reads, and since
+/// decision 57 it is the only one it accepts at all: `-h=1` matches nothing here and is then refused
+/// by [`reject_unknown_args`] rather than opening the ui.
+///
+/// **The bare word `help` is the one exception to "a bare argument is left alone", and it is the
+/// whole of that exception**: every other bare argument is still ignored, `Help`, `HELP` and `helpx`
+/// included, since the match is the exact word. `terminal-ux` §6 names all four spellings (`exportsnap`,
+/// `--help`, `-h`, `help`), phase 5's argument parser wants `help` as a subcommand anyway so landing it
+/// here is what that parser will keep, and the crate reads no positional argument at all, so no input
+/// that worked before this means something else now. Ordering is unchanged: this is read with the other
+/// help spellings, after `--version` and ahead of every parse, so `exportsnap --version help` still
+/// prints the version and `exportsnap help --bogus` still prints the usage at exit 0.
 ///
 /// Landing help before phase 5's argument parser is decision 56b: phase 5 is gated behind phases
 /// 2-4, while `-h`/`--help` is reserved by convention and reachable today — without this arm it
@@ -301,7 +310,7 @@ fn wants_version_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
 fn wants_help_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
     let mut help = false;
     for arg in args {
-        if arg == "--help" || arg == "-h" {
+        if arg == "--help" || arg == "-h" || arg == "help" {
             help = true;
         } else if arg.starts_with("--help=") {
             bail!("--help takes no value; pass --help alone");
@@ -312,7 +321,9 @@ fn wants_help_arg(args: impl IntoIterator<Item = String>) -> Result<bool> {
 
 /// Refuses an argument that starts with `-`, is not `-h`, and is not one of [`KNOWN_FLAGS`]
 /// (decision 57). A BARE argument keeps the "anything else on the command line is left alone"
-/// convention, so nothing that works today breaks; every dash-led shape is superseded.
+/// convention, so nothing that works today breaks; every dash-led shape is superseded. The one bare
+/// word that escapes the convention is `help`, which [`wants_help_arg`] answers before this scan is
+/// reached — nothing else is excepted, and this scan is not where that exception lives.
 ///
 /// **Decision 57 widened this from decision 56c's `--`-only scope, because the one-dash half was the
 /// worse of the two.** `--print-sourc` at least failed loudly. `exportsnap --print-source
@@ -556,15 +567,22 @@ mod tests {
     }
 
     #[test]
-    fn help_flag_is_read_in_both_of_its_spellings() {
+    fn help_is_read_in_every_spelling_it_answers_to() {
         assert!(parse_help(&["--help"]).unwrap());
         assert!(parse_help(&["-h"]).unwrap());
+        assert!(parse_help(&["help"]).unwrap());
         assert!(parse_help(&["--source=/tmp/export", "-h"]).unwrap());
+        assert!(parse_help(&["--source=/tmp/export", "help", "extra-junk"]).unwrap());
         assert!(!parse_help(&[]).unwrap());
         // No other single-dash argument is help, `-h=1` included — since decision 57 those are
         // refused by `reject_unknown_args` rather than reaching a parser at all.
         assert!(!parse_help(&["-x", "some/path"]).unwrap());
         assert!(!parse_help(&["-h=1"]).unwrap());
+        // The bare-word exception is the exact word and nothing beside it: every other bare argument
+        // is still left alone, so a case variant or a near miss opens the ui as it always did.
+        for bare in ["Help", "HELP", "helpx", "hel", "some/path", "elsewhere"] {
+            assert!(!parse_help(&[bare]).unwrap(), "{bare} must not be read as help");
+        }
     }
 
     #[test]
