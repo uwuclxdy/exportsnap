@@ -779,6 +779,14 @@ fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Char(' '));
     assert!(!app.chat_media().is_transcode_on());
+
+    // This screen's SECOND call into the shared form-row widget, and unobserved until this line: the
+    // cycle row above covers the first, and a frame taken with the caret anywhere else renders this
+    // label BLURRED, where the promoted and flattened treatments agree. Same wiring guard and same
+    // reason as the memories twin; the tier axis stays pinned once, on the widget.
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    assert_run_fg(terminal.backend().buffer(), 6, "transcode", Palette::new(Tier::Full).text, "focus-promoted toggle label");
+
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Char(' '));
     assert!(!app.chat_media().is_transcode_on(), "space on the start chip must not reach the toggle");

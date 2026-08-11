@@ -30,6 +30,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 use tempfile::TempDir;
 
 const EXPORT_ID: &str = "1784667002819";
@@ -481,9 +482,41 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     assert!(cell_run(buffer, 12).contains("↵"), "{:?}", cell_run(buffer, 12));
     // The footer hint bar advertises the shell keys.
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));
+
+    // The toggle row's label, blurred — the caret is still on `source`. This and the promoted half
+    // below are this screen's WIRING guard on the shared form-row widget, NOT a second tier pin:
+    // the tier axis is pinned once, on the widget, by `the_focus_promoted_form_label_holds_both_tiers`.
+    // `transcode` starts at column 4, after the panel's border, its padding cell and the caret gutter.
+    let palette = Palette::new(Tier::Full);
+    for x in 4..13 {
+        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text_dim), "blurred toggle label, cell ({x}, 5)");
+    }
+
     assert_eq!(app.active(), exportsnap::app::Tab::Memories);
     assert!(!app.is_quit_armed());
     assert!(!app.memories().descended());
+
+    // …and promoted once the caret lands on it, which is the half a flattened palette kills.
+    //
+    // **What this catches is the CALL, and swapping it back is not what reds it.** Re-inlining a
+    // copy of the widget here leaves the whole suite green, because that copy is byte-identical
+    // today — measured at 725/725, not assumed. It is an equivalent mutant for the tests, and what
+    // it really costs is every LATER edit to the widget. That part IS observable, and is what these
+    // two lines are for: flattening the widget reds them while the screen calls it, and stops
+    // reddening them the moment the screen carries its own copy (measured, both directions).
+    //
+    // The swap-back does red the LINT, since it orphans the `form_label` import under `-D warnings`.
+    // Do not lean on that — it is a reachability artifact that goes silent the moment this screen
+    // gains a second call site, which is exactly the state the chat twin is already in.
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+    }
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    for x in 4..13 {
+        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text), "focus-promoted toggle label, cell ({x}, 5)");
+        assert!(buffer[(x, 5)].style().add_modifier.contains(Modifier::BOLD), "focus-promoted toggle label, cell ({x}, 5)");
+    }
 }
 
 #[test]
