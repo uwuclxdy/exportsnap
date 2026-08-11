@@ -46,7 +46,7 @@ use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::Palette;
 use crate::tui::widgets::{
     self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, disk_free_value, empty_state,
-    overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
+    form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -601,12 +601,7 @@ fn form_row(palette: &Palette, memories: &Memories, row: FormRow, index: usize, 
             static_row(palette, caret, row.label(), value, selected, width)
         }
         FormRow::Transcode => {
-            let label = if focused {
-                Span::styled(row.label(), Style::new().fg(palette.text).bold())
-            } else {
-                Span::styled(row.label(), Style::new().fg(palette.text_dim))
-            };
-            let mut spans = vec![caret, label, Span::raw("  ")];
+            let mut spans = vec![caret, form_label(palette, row.label(), focused), Span::raw("  ")];
             spans.extend(palette.toggle(memories.transcode));
             let line = Line::from(spans);
             if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }

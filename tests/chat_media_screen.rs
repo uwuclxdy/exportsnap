@@ -858,7 +858,7 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
 //
 // Every other render test on this screen drives `Tier::Full`. Nothing in the widget code branches on
 // the tier — `Palette` keeps its own `tier` field private so that it cannot — which makes the two
-// tiers agreeing the expected result rather than a discovery. The two frames below capture it
+// tiers agreeing the expected result rather than a discovery. The frames below capture it
 // anyway, because low-by-construction is exactly the claim a frame either confirms or kills, and the
 // overview screen's tier work is what established that the two tiers can disagree at all.
 //
@@ -868,11 +868,14 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
 // glyphs alone would read identically whatever the palette resolved to, while a palette that
 // flattened the two tiers into one column reds on one of the two passes.
 //
-// The focused row's `BG_HOVER` is the one expectation that is NOT a literal — it derives from
-// `Palette::new(tier)`, so it cannot detect a flattening. Measured: moving `compatible::BG_HOVER`
-// from 236 to 240 leaves both tests here green and reds `tests/theme.rs`'s two literal pins instead.
-// It earns its place as the landing guard below rather than as a colour pin, and the literal for
-// that constant is `tests/theme.rs`'s job, which it holds.
+// Two expectations here are deliberately NOT literals — the focused row's `BG_HOVER` and the
+// promoted label's `TEXT` — because both derive from `Palette::new(tier)` and so cannot detect a
+// flattening at all. Measured on the first: moving `compatible::BG_HOVER` from 236 to 240 leaves
+// every test here green and reds `tests/theme.rs`'s two literal pins instead. Each earns its place
+// by guarding something no colour literal can see — the `BG_HOVER` guards which half of
+// `row_focused` held, the `TEXT` guards whether this screen still routes its interactive labels
+// through the shared widget — and the literal for each constant is held elsewhere, in
+// `tests/theme.rs` and in `widgets`'s own `the_focus_promoted_form_label_holds_both_tiers`.
 
 /// The cycle row's `[brackets]` and its `ACCENT`/`TEXT_FAINT` split, on both tiers.
 ///
@@ -940,6 +943,51 @@ fn the_counts_lines_lower_bound_qualifier_survives_the_compatible_tier() {
         assert!(line.contains(&format!("{QUALIFIER} · 2 overlays unmatched")), "{tier:?}: {line}");
         assert_run_fg(buffer, 2, QUALIFIER, warning, &format!("{tier:?} lower-bound qualifier"));
         assert_run_fg(buffer, 2, "2 overlays unmatched", dim, &format!("{tier:?} ordinary clause"));
+    }
+}
+
+/// The stacked and form-only layout arms, on both tiers.
+///
+/// **Both arms render in this file alone, and every frame either had ever been taken at was
+/// `Tier::Full`.** The two privacy sweeps are what drive them, through `app_on_export`, which runs a
+/// real worker end to end — so crossing the tier there would double a slow test to cover a property
+/// no run touches. This fixture takes the same two sizes with no run behind it at all.
+///
+/// The arms are asserted by where the table panel LANDS rather than by a size, because a size alone
+/// proves nothing about which branch of the ladder ran: stacked puts `PROGRESS` below the form and
+/// side by side puts it on the same row, so a width that quietly stopped being narrow enough would
+/// otherwise pass here as a stacked frame.
+///
+/// **The label expectation is a WIRING guard and not a second tier pin**, per the section note
+/// above: it derives from `Palette::new(tier)`, so a palette that flattened `TEXT` into `TEXT_DIM`
+/// passes it. That flattening is `widgets`'s `the_focus_promoted_form_label_holds_both_tiers`'s job,
+/// once, on the widget itself. What this catches instead is the screen ceasing to route its
+/// interactive labels through that widget, which no colour literal anywhere would notice.
+#[test]
+fn the_stacked_and_form_only_arms_render_on_both_tiers() {
+    for tier in [Tier::Full, Tier::Compatible] {
+        let palette = Palette::new(tier);
+        let mut app = app_on_fixed_source(tier);
+        // Onto the overlay row, so the form carries a focus-promoted interactive label at all.
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
+
+        // Stacked: too narrow to hold both panels side by side, tall enough for the table's floor.
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(row(buffer, 1).starts_with("╭─ SETUP ─"), "{tier:?}: {:?}", row(buffer, 1));
+        assert!(!row(buffer, 1).contains("PROGRESS"), "{tier:?}: the arm is stacked, not side by side: {:?}", row(buffer, 1));
+        assert!(screen_text(buffer).contains("PROGRESS"), "{tier:?}: the table panel sits below the form, not nowhere");
+        assert_run_fg(buffer, 5, "overlay mode", palette.text, &format!("{tier:?} focus-promoted label"));
+
+        // Form-only: narrower than one form panel's own floor, so the table is dropped outright.
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(row(buffer, 1).starts_with("╭─ SETUP ─"), "{tier:?}: {:?}", row(buffer, 1));
+        assert!(!screen_text(buffer).contains("PROGRESS"), "{tier:?}: the form-only arm draws no table panel");
     }
 }
 

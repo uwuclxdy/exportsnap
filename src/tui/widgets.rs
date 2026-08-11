@@ -117,6 +117,17 @@ pub(crate) fn static_row(
     if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
 }
 
+/// An INTERACTIVE row's label: `TEXT_DIM` blurred, promoted to `TEXT + bold` when the row is
+/// focused (contract: Forms — the focused row's label promotes).
+///
+/// The sibling of [`static_row`]'s key and deliberately not the same span: a static key is
+/// `TEXT_DIM + bold` at all times, where the bold is a fixed anchor, and here the bold IS the
+/// current-row cue. Rendering either one in the other's treatment is a contract bug, which is why
+/// the two spellings live side by side rather than one taking a flag.
+pub(crate) fn form_label(palette: &Palette, label: &'static str, focused: bool) -> Span<'static> {
+    if focused { Span::styled(label, Style::new().fg(palette.text).bold()) } else { Span::styled(label, Style::new().fg(palette.text_dim)) }
+}
+
 /// The bare glyph run of a determinate bar: `█` fill in `fill_style`, `░` track in `LINE`.
 pub(crate) fn bar_run(palette: &Palette, fill: usize, total: usize, fill_style: Style) -> Vec<Span<'static>> {
     let fill = fill.min(total);
@@ -345,9 +356,41 @@ pub(crate) fn tooltip(palette: &Palette, reason: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use ratatui::layout::Rect;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
     use crate::tui::theme::Tier;
+
+    /// The focus promotion holds on both tiers, against per-tier colour literals.
+    ///
+    /// Nothing in [`form_label`] branches on the tier — `Palette` keeps its own `tier` field private
+    /// so that it cannot — which makes the two tiers agreeing the expected result rather than a
+    /// discovery, exactly as the overview's tier work found. The value is the pin, not the finding: a
+    /// palette that flattened `TEXT` into `TEXT_DIM` on one column, or a promotion that stopped
+    /// moving between the two roles, reds here on one of the two passes. Written as literals for
+    /// that reason — `Palette::new(tier).text` would agree with itself whatever the palette
+    /// resolved to, and could not tell a flattening from a match.
+    ///
+    /// **This is the one place the tier axis sits on the form-row grammar.** Both screens reach this
+    /// span through this call, so a per-screen copy would pin the same bytes twice and drift apart
+    /// on whichever one nobody edited.
+    #[test]
+    fn the_focus_promoted_form_label_holds_both_tiers() {
+        for (tier, text, dim) in [
+            (Tier::Full, Color::Rgb(205, 214, 244), Color::Rgb(166, 173, 200)),
+            (Tier::Compatible, Color::Indexed(189), Color::Indexed(145)),
+        ] {
+            let palette = Palette::new(tier);
+
+            let focused = form_label(&palette, "transcode", true);
+            assert_eq!(focused.style.fg, Some(text), "{tier:?}: the focused label promotes to TEXT");
+            assert!(focused.style.add_modifier.contains(Modifier::BOLD), "{tier:?}: bold is the current-row cue");
+
+            let blurred = form_label(&palette, "transcode", false);
+            assert_eq!(blurred.style.fg, Some(dim), "{tier:?}: a blurred interactive label stays TEXT_DIM");
+            assert!(!blurred.style.add_modifier.contains(Modifier::BOLD), "{tier:?}: bold here would read as a static key's anchor");
+        }
+    }
 
     #[test]
     fn a_panel_border_costs_exactly_the_rows_the_constant_names() {

@@ -51,7 +51,7 @@ use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
     self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, disk_free_value, empty_state,
-    overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
+    form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -660,12 +660,6 @@ fn form_row(palette: &Palette, chat: &ChatMedia, row: FormRow, index: usize, wid
         }
         FormRow::Start => Line::from(vec![caret, action_chip(palette, row.label(), chat.start_enabled(), focused)]),
     }
-}
-
-/// An interactive row's label: `TEXT_DIM` blurred, promoted to `TEXT + bold` when the row is
-/// focused. Distinct from a static key, which is `TEXT_DIM + bold` at all times.
-fn form_label(palette: &Palette, label: &'static str, focused: bool) -> Span<'static> {
-    if focused { Span::styled(label, Style::new().fg(palette.text).bold()) } else { Span::styled(label, Style::new().fg(palette.text_dim)) }
 }
 
 /// The overlay-mode cycle control (contract: Cycle row).
