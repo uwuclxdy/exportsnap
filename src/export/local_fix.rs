@@ -1779,6 +1779,13 @@ pub enum FixError {
     /// arm for, which is why the shipped set can hold no such member and a unit-test one does. Kept
     /// as a per-item failure like every variant here: one format nobody wrote an encoder for must not
     /// stop a run over the formats it did.
+    ///
+    /// **Two coverage gaps the unit-test-only view of the constant leaves open.** No test pins that a
+    /// `NoEncoder` raised inside a run reaches the manifest's failure record: the `FixError`-to-`RunError`
+    /// wrapping is shared with every other variant and pinned for those, so this one rides coverage it
+    /// does not have of its own. No planner in either build can produce an item that reaches this arm
+    /// (`IMAGE_EXTENSIONS` admits no `webp`), so the plan-to-fix seam is unpinned in both. Both close
+    /// the day `IMAGE_EXTENSIONS` grows a format with no encoder: production refuses that item by name.
     NoEncoder {
         /// The export's own file, which is what a user recognises. Never the OUTPUT path — that is
         /// the one carrying a conversation key on the chat leg (see [`Failure::reason`]), and a
