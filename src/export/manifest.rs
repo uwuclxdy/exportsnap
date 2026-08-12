@@ -1184,6 +1184,8 @@ impl Manifest {
     /// Every finished item is re-hashed in full and demoted if its bytes disagree with what was
     /// recorded; see the module docs for what happens to the other statuses.
     ///
+    /// **A recorded path is re-verified against the file at that path, and a planned path this run would derive instead is deliberately not compared against it.** The two can disagree after a build-level format change — task 45's alpha-capable ruling is the kind that moves a `.jpg` main to `.png` — and per-item demotion is the wrong granularity for a build-level event: the file at the recorded path still passes verification, an item that passes is never re-planned, and re-doing it would orphan a good file the new build merely prefers another way. The escape hatch is a `SCHEMA_VERSION` bump that triggers a full re-verify, a separate task the existing version gate already exists to serve.
+    ///
     /// # Errors
     ///
     /// Returns [`ManifestError::Sqlite`] when a read or write fails and

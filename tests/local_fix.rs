@@ -1847,6 +1847,36 @@ fn a_finished_video_is_not_transcoded_again_on_a_resume() {
     assert_eq!(fs::read(&plan.items[0].output).unwrap(), finished);
 }
 
+/// A Done item whose recorded `output_path` has an extension the current build would not plan stays
+/// Done on resume, because `resume` verifies the recorded path and never compares it against a
+/// planned one.
+///
+/// Pins the ruling that a planned path disagreeing with a recorded one is deliberately ignored: the
+/// resume is manifest-only, it hashes the file at the recorded path, and a build-level format change
+/// (like task 45's alpha-capable ruling) leaves Done items untouched. The escape hatch is a
+/// `SCHEMA_VERSION` bump.
+#[test]
+fn a_done_item_stays_done_when_the_recorded_extension_differs_from_what_the_planner_would_derive() {
+    let dir = TempDir::new().unwrap();
+    let memories = entries(&[(&at("2021-01-15", "13:30:05"), "Image", PARIS)]);
+    let file = write_main(dir.path(), "2021-01-15", 1);
+    let reconciliation = reconciled(&memories, vec![file]);
+    let mut manifest = manifest(&dir, &reconciliation);
+    let plan = first_run(&memories, &reconciliation, dir.path().join("out"));
+    let source_id = plan.items[0].source_id.clone();
+
+    // Record the item Done under a path the planner did not derive. The planner would put this
+    // under `<out>/2021/01/…`, but mark_done accepts any path whose file exists, and resume
+    // verifies THAT path rather than comparing it against one the planner would build now.
+    let elsewhere = dir.path().join("elsewhere.jpg");
+    fs::write(&elsewhere, [0u8; 64]).unwrap();
+    manifest.mark_done(ItemKind::Memory, &source_id, &elsewhere).unwrap();
+
+    let report = manifest.resume(ItemKind::Memory).unwrap();
+    assert_eq!(report.verified, 1, "a Done item with a matching file stays Done");
+    assert!(report.demoted.is_empty(), "no demotion: the recorded path was not compared against a planned one");
+}
+
 /// The container-level tags `ffprobe` reports, keyed by name.
 fn ffprobe_format(path: &Path) -> BTreeMap<String, String> {
     let output = Command::new("ffprobe")
