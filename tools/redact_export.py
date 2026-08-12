@@ -1126,6 +1126,9 @@ def synth_extension_word(value: str, ctx: Ctx, path: str) -> str | None:
 def synth_digit_string(value: str, ctx: Ctx, path: str) -> str | None:
     if not value.isdigit():
         return None
+    if value == "0":
+        ctx.stats.value_classes["zero (kept)"] += 1
+        return "0"
     shifted = shift_epoch(int(value), ctx.shift_seconds)
     if shifted is not None and len(str(shifted)) == len(value):
         ctx.stats.note_generated(str(shifted))

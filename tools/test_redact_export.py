@@ -433,6 +433,12 @@ class TestFormatPreserving(RedactorCase):
     def test_digit_string_epoch_shifts_and_stays_a_string(self):
         self.assertEqual(self.redact_one("1610742374"), str(1610742374 - 400 * 86400))
 
+    def test_a_zero_digit_string_survives_the_round_trip_as_a_zero(self):
+        """The int path preserves 0 (task 68); the digit-string path must agree,
+        since the rust side reads both spellings as absence."""
+        self.assertEqual(self.redact_one("0"), "0")
+        self.assertEqual(self.report()["totals"]["value_classes"]["zero (kept)"], 1)
+
     def test_non_epoch_digit_string_keeps_its_width_but_not_its_value(self):
         out = self.redact_one("5551234")
         self.assertRegex(out, r"^\d{7}$")
