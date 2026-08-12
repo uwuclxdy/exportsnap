@@ -120,6 +120,14 @@ fn composite(main: &Path, overlay: &Path) -> Result<RgbaImage, OverlayError> {
         let scale = (base.width() as f64 / drawn.width() as f64).min(base.height() as f64 / drawn.height() as f64);
         let scaled_w = (drawn.width() as f64 * scale).round().max(1.0) as u32;
         let scaled_h = (drawn.height() as f64 * scale).round().max(1.0) as u32;
+        // Deliberate quality choice: `Lanczos3` for sharp edges on photographic content. Nothing in
+        // the suite observes which kernel ran — the fixtures are flat-region enough that `Nearest`
+        // produces byte-identical composites — so a swap to a cheaper filter, or an `image` upgrade
+        // that changes the default, lands silently. Pinned by the four block-mean transparency
+        // assertions and the `> 200` opaque siblings only as far as "a composite happened at all";
+        // the kernel itself is free. A fixture that separates the kernels needs high-frequency
+        // content near the resize boundary where Lanczos rings and Nearest aliases, which the
+        // current flat fixtures do not provide.
         imageops::resize(&drawn, scaled_w, scaled_h, FilterType::Lanczos3)
     };
     // The scaled layer fits within the base by construction, so these cannot underflow.
