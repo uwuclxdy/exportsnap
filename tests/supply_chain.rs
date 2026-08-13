@@ -45,9 +45,9 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// A small JPEG with enough detail that the encoder cannot collapse it.
-fn encoded_jpeg() -> Vec<u8> {
-    let mut pixels = RgbImage::new(8, 8);
+/// A JPEG at `width` x `height` with enough detail that the encoder cannot collapse it.
+fn encoded_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = RgbImage::new(width, height);
     for (x, y, pixel) in pixels.enumerate_pixels_mut() {
         *pixel = image::Rgb([(x * 31) as u8, (y * 29) as u8, 40]);
     }
@@ -68,26 +68,29 @@ fn a_jpeg_round_trips_through_the_only_route_this_crate_has_into_little_exif() {
     // Both are one-line edits inside a twenty-line module, and both red here.
     //
     // **Its bound, stated so nobody grows it instead of reading this**: a CONDITIONAL inside
-    // `library::write` — say keyed on `stamp.width` — beats a two-row fixture exactly the way
-    // review's attack 1 beat the four-row one, and a five-row fixture would lose to a condition on
-    // the sixth dimension. Enumerating inputs cannot prove a property about branches. If that
+    // `Jpeg::stamp` — say keyed on `stamp.width` — beats a two-row fixture exactly the way
+    // review's attack 1 beat the four-row one, and a six-row fixture would lose to a condition on
+    // the seventh dimension. Enumerating inputs cannot prove a property about branches. If that
     // becomes a real worry the answer is fewer branches in `library`, not more rows here.
     //
-    // The 8x8 is a real ceiling, not a detail: no test in this repo varies image dimension, so read
-    // nothing here as covering large images. Carried in `docs/todo.md`, and inert only while
-    // nothing in the pipeline branches on size.
+    // The dimensions are a canary against size-conditional branches, not a claim about image size:
+    // the rows run at 8x8 plus one 64x64, which spans multiple MCU rows under both 4:4:4 (8x8
+    // MCUs) and 4:2:0 (16x16 MCUs) subsampling. Nothing larger is covered, and a branch keyed above
+    // 64 beats this fixture exactly as the bound paragraph says an enumeration is beaten — which is
+    // why the fixture grows by one dimension only, never a ladder of sizes.
     let paris = LocationPoint::parse(Field::Location, "Latitude, Longitude: 48.858844, 2.294351").unwrap();
     let local = NaiveDate::from_ymd_opt(2021, 1, 15).unwrap().and_hms_opt(14, 30, 5).unwrap();
 
-    // The third and fourth rows execute the attribution branch, which the first two do not reach at
-    // all. `embedded_time` is the discriminator and it needs no external tool: it reads back through
-    // `little_exif`, so a write that burst the APP1 segment cannot answer it. That makes the last row
-    // a real pin on the tag-length cap rather than a length assertion, which would pass just as well
-    // with the Exif SubIFD destroyed.
+    // The fourth and fifth rows execute the attribution branch, which the first three do not reach
+    // at all. `embedded_time` is the discriminator and it needs no external tool: it reads back
+    // through `little_exif`, so a write that burst the APP1 segment cannot answer it. That makes
+    // the last row a real pin on the tag-length cap rather than a length assertion, which would
+    // pass just as well with the Exif SubIFD destroyed.
     let attributed = Attribution { sender: Username::new("sender-handle"), conversation: Some(ConversationId::new("friend-handle")) };
     let oversized = Attribution { sender: Username::new("sender-handle"), conversation: Some(ConversationId::new("z".repeat(70_000))) };
     for (label, stamp) in [
         ("bare", Stamp { local, offset: None, location: None, width: 8, height: 8, attribution: None }),
+        ("bare, 64x64", Stamp { local, offset: None, location: None, width: 64, height: 64, attribution: None }),
         (
             "located and offset",
             Stamp { local, offset: FixedOffset::east_opt(3600), location: Some(paris), width: 8, height: 8, attribution: None },
@@ -98,7 +101,7 @@ fn a_jpeg_round_trips_through_the_only_route_this_crate_has_into_little_exif() {
             Stamp { local, offset: None, location: None, width: 8, height: 8, attribution: Some(&oversized) },
         ),
     ] {
-        let mut jpeg = Jpeg::new(encoded_jpeg()).expect("the encoder's own output is a jpeg");
+        let mut jpeg = Jpeg::new(encoded_jpeg(stamp.width, stamp.height)).expect("the encoder's own output is a jpeg");
         jpeg.stamp(&stamp).unwrap_or_else(|error| panic!("{label}: stamping a jpeg failed ({error}); check `exif.rs`'s library module"));
         assert_eq!(jpeg.embedded_time(), Some(local), "{label}: the stamp did not survive a read back through the library");
         assert_eq!(&jpeg.as_bytes()[..2], &[0xff, 0xd8], "{label}: the container came back as something other than a jpeg");
