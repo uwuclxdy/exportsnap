@@ -3,5 +3,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod app;
+pub mod config;
 pub mod export;
 pub mod tui;

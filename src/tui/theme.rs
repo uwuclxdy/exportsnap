@@ -13,16 +13,23 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// The lowercase word a config `[theme] name` value or a `--theme=` argument spells;
+    /// [`Self::from_name`] parses it back. One spelling of the two names, so the config
+    /// writer and the parser cannot drift apart.
+    #[must_use]
+    pub const fn as_name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Compatible => "compatible",
+        }
+    }
+
     /// Maps a `--theme=` argument or a config `[theme] name` value to a tier. `None` for
     /// anything else, so a caller reports an unrecognized value instead of silently falling
     /// back to a tier the user didn't ask for.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "full" => Some(Self::Full),
-            "compatible" => Some(Self::Compatible),
-            _ => None,
-        }
+        [Self::Full, Self::Compatible].into_iter().find(|tier| tier.as_name() == name)
     }
 }
 
@@ -33,7 +40,9 @@ impl Tier {
 pub struct TierSources<'a> {
     /// `--theme=full | compatible`. Highest precedence.
     pub cli: Option<Tier>,
-    /// `[theme] name = "..."`. No config loader exists yet, so callers pass `None`.
+    /// `[theme] name = "..."`, loaded from the config file by the binary (decision 66) and
+    /// parsed through [`Tier::from_name`]. `None` when there is no file, no key, or a
+    /// print-and-exit path that reads no settings.
     pub config: Option<Tier>,
     /// `$COLORTERM`. Lowest precedence.
     pub colorterm: Option<&'a str>,

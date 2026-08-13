@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use exportsnap::app::App;
+use exportsnap::config;
 use exportsnap::tui::theme::{self, Tier};
 
 /// The `--version` text, four lines: the binary name and version, the
@@ -96,8 +97,19 @@ fn main() -> Result<()> {
     let print_source = wants_print_source_arg(args.iter().cloned())?;
 
     let cli_tier = parse_theme_arg(args.iter().cloned())?;
-    // The config precedence level has no loader yet; `detect_from_env` still orders it.
-    let tier = theme::detect_from_env(cli_tier, None);
+    // The config file fills the resolver's middle slot (decision 66: flag > config > env), and it
+    // loads on the TUI path only: `--version` and `--help` returned above, and `--print-source`
+    // reports what the app found — not what settings say — so it skips the file too, and a broken
+    // config can never block a report. No home dir means no config file: defaults.
+    let config_theme = if print_source {
+        None
+    } else {
+        match config::config_dir() {
+            Some(dir) => config::load(&dir)?.theme,
+            None => None,
+        }
+    };
+    let tier = theme::detect_from_env(cli_tier, config_theme);
 
     // The dir the user points at, or the one they ran from. Parsed before the terminal is taken
     // over, so a bad argument is a plain message on a plain terminal rather than a flash of

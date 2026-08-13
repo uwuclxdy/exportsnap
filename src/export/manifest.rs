@@ -120,10 +120,12 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::export::model::DownloadUrl;
 use crate::export::walk::UnreadableDir;
 
-/// Reverse-domain parts handed to [`ProjectDirs`]; only the last is used on linux.
-const QUALIFIER: &str = "dev";
-const ORGANIZATION: &str = "uwuclxdy";
-const APPLICATION: &str = "exportsnap";
+/// Reverse-domain parts handed to [`ProjectDirs`]; only the last is used on linux. Shared
+/// with `crate::config`, whose file lives one dir over from the manifest's — the two must
+/// resolve through one identity or a rename desyncs the pair silently.
+pub(crate) const QUALIFIER: &str = "dev";
+pub(crate) const ORGANIZATION: &str = "uwuclxdy";
+pub(crate) const APPLICATION: &str = "exportsnap";
 
 /// Manifests get their own subdir of the data dir so a future config or cache file cannot be
 /// mistaken for one export's state.
@@ -1746,9 +1748,10 @@ fn redact_note(note: &str, url: Option<&str>) -> String {
     out
 }
 
-/// Creates `dir` and its parents, owner-only where the platform has modes.
+/// Creates `dir` and its parents, owner-only where the platform has modes. Also the config
+/// dir's writer (`crate::config::write`), which needs the same posture for the same reason.
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     use std::fs::Permissions;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -1757,7 +1760,8 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(OWNER_ONLY).create(dir)?;
     // Tightening an existing dir mirrors what `reserve_private` does for an existing file; the two
     // halves of one control disagreeing is how a gap survives review. What a loose dir leaks is the
-    // set of export ids in its filenames rather than any url, since the databases inside stay 0600.
+    // names of the files inside rather than their contents, since those stay 0600 — the manifest
+    // databases here, the config file in `crate::config`.
     if fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
         fs::set_permissions(dir, Permissions::from_mode(OWNER_ONLY))?;
     }
@@ -1765,7 +1769,7 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
