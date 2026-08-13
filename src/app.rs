@@ -11,6 +11,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use crate::export::env::{Environment, Tool, locate, probe_target};
 use crate::export::local_fix::default_out_root;
 use crate::tui::alert::RunAlert;
+use crate::tui::screens::account::Account;
 use crate::tui::screens::chat_media::ChatMedia;
 use crate::tui::screens::history::History;
 use crate::tui::screens::memories::Memories;
@@ -117,6 +118,7 @@ pub struct App {
     memories: Memories,
     chat_media: ChatMedia,
     history: History,
+    account: Account,
 }
 
 impl App {
@@ -138,6 +140,7 @@ impl App {
             memories: Memories::with_environment(PathBuf::new(), None, Environment::default()),
             chat_media: ChatMedia::with_environment(PathBuf::new(), None, Environment::default()),
             history: History::with_environment(PathBuf::new(), None),
+            account: Account::with_environment(PathBuf::new()),
         }
     }
 
@@ -180,7 +183,8 @@ impl App {
     }
 
     /// Hands the run screens their run context: the source dir, the output root — `--out`'s
-    /// value or the default — and the machine probe [`Self::start`] already made.
+    /// value or the default — and the machine probe [`Self::start`] already made. The account
+    /// screen takes the source alone: it is read-only and writes nothing.
     ///
     /// One call rather than one per screen: the legs read one export and write under one output
     /// root, so a caller handing them different sources would be describing a state that cannot
@@ -190,7 +194,8 @@ impl App {
     pub fn with_source_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
         self.memories = Memories::with_environment(source.clone(), out_root.clone(), environment.clone());
         self.chat_media = ChatMedia::with_environment(source.clone(), out_root.clone(), environment);
-        self.history = History::with_environment(source, out_root);
+        self.history = History::with_environment(source.clone(), out_root);
+        self.account = Account::with_environment(source);
         self
     }
 
@@ -214,11 +219,11 @@ impl App {
     /// against, as `key=value` lines, `\n`-terminated. Machine-first — the flag exists to be read by
     /// something other than a human, so no alignment, no glyphs, no color.
     ///
-    /// **Assembled from all four screens, not from one.** [`Self::start`] hands the source to the
-    /// overview's read, to the space probe, and to the three run screens, and those are five
-    /// separate deliveries of one argument. A report observing only the overview left the other
-    /// three able to take `PathBuf::new()` with the whole suite green — measured 2026-08-11, and it
-    /// is why the keys below are per-screen rather than one `source=`.
+    /// **Assembled from all five screens, not from one.** [`Self::start`] hands the source to the
+    /// overview's read, to the space probe, to the three run screens, and to the account screen,
+    /// and those are six separate deliveries of one argument. A report observing only the overview
+    /// left the other four able to take `PathBuf::new()` with the whole suite green — measured
+    /// 2026-08-11, and it is why the keys below are per-screen rather than one `source=`.
     ///
     /// **Every path value is quoted and escaped** ([`std::path::Path`]'s `Debug`), because a path is
     /// user-supplied bytes going into a line-oriented format: a source dir whose name contains a
@@ -238,8 +243,9 @@ impl App {
         let (memories_source, memories_out) = self.memories.run_paths();
         let (chat_source, chat_out) = self.chat_media.run_paths();
         let (history_source, history_out) = self.history.run_paths();
+        let account_source = self.account.source();
         format!(
-            "{}memories-source={memories_source:?}\nmemories-out={memories_out:?}\nchat-source={chat_source:?}\nchat-out={chat_out:?}\nhistory-source={history_source:?}\nhistory-out={history_out:?}\n",
+            "{}memories-source={memories_source:?}\nmemories-out={memories_out:?}\nchat-source={chat_source:?}\nchat-out={chat_out:?}\nhistory-source={history_source:?}\nhistory-out={history_out:?}\naccount-source={account_source:?}\n",
             self.overview.report()
         )
     }
@@ -285,6 +291,16 @@ impl App {
         &mut self.history
     }
 
+    #[must_use]
+    pub const fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// The account screen's mutable half — the shell borrows it to render the stateful list.
+    pub fn account_mut(&mut self) -> &mut Account {
+        &mut self.account
+    }
+
     /// The alert the footer row is showing this frame: the ACTIVE screen's, or none.
     ///
     /// The single source for both the footer and the `x` key, so the row and the dismissal can never
@@ -308,7 +324,8 @@ impl App {
             Tab::Memories => self.memories.descended(),
             Tab::ChatMedia => self.chat_media.descended(),
             Tab::History => self.history.descended(),
-            Tab::Overview | Tab::Account | Tab::Settings => false,
+            Tab::Account => self.account.descended(),
+            Tab::Overview | Tab::Settings => false,
         }
     }
 
@@ -321,7 +338,8 @@ impl App {
             Tab::Memories => self.memories.ascend(),
             Tab::ChatMedia => self.chat_media.ascend(),
             Tab::History => self.history.ascend(),
-            Tab::Overview | Tab::Account | Tab::Settings => {}
+            Tab::Account => self.account.ascend(),
+            Tab::Overview | Tab::Settings => {}
         }
     }
 
@@ -461,7 +479,8 @@ impl App {
             Tab::Memories => self.memories.handle_key(key),
             Tab::ChatMedia => self.chat_media.handle_key(key),
             Tab::History => self.history.handle_key(key),
-            Tab::Overview | Tab::Account | Tab::Settings => false,
+            Tab::Account => self.account.handle_key(key),
+            Tab::Overview | Tab::Settings => false,
         };
         if consumed {
             return;

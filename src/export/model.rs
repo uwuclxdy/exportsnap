@@ -787,6 +787,11 @@ pub struct UserProfile {
     pub time_spent_breakdown: Vec<String>,
     pub web_interactions: Vec<String>,
     pub mobile_ad_id: Option<String>,
+    /// The count of `Subscriptions` entries (`docs/design.md`: that section earns a typed model
+    /// when the account screen lands). The one observed export holds an empty list, so the
+    /// element shape is unobserved, and the empty-section rule forbids guessing one — a
+    /// validated count is the whole typed model.
+    pub subscriptions: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -815,6 +820,7 @@ impl TryFrom<schema::UserProfile> for UserProfile {
             time_spent_breakdown: raw.time_spent_breakdown,
             web_interactions: raw.interactions.web,
             mobile_ad_id: optional_text(raw.mobile_ad_id),
+            subscriptions: raw.subscriptions.len(),
         })
     }
 }

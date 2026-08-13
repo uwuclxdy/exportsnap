@@ -416,7 +416,12 @@ impl ExportJson {
     }
 }
 
-fn read_schema<T: DeserializeOwned>(dir: &Path, file: &'static str) -> Result<Option<T>, LoadError> {
+/// Reads one file: `None` when it is not there, `LoadError` when it is present and broken.
+///
+/// `pub(crate)` for the account screen's per-file reads: `ExportJson::load_dir` is fail-fast at
+/// file granularity, and the screen needs each of its five files to fail independently so a
+/// broken one lands as an absent section, never an error surface.
+pub(crate) fn read_schema<T: DeserializeOwned>(dir: &Path, file: &'static str) -> Result<Option<T>, LoadError> {
     let bytes = match fs::read(dir.join(file)) {
         Ok(bytes) => bytes,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -425,7 +430,9 @@ fn read_schema<T: DeserializeOwned>(dir: &Path, file: &'static str) -> Result<Op
     serde_json::from_slice(&bytes).map(Some).map_err(|source| LoadError::Json { file, source })
 }
 
-fn read_model<S, M>(dir: &Path, file: &'static str) -> Result<Option<M>, LoadError>
+/// [`read_schema`] with the schema value validated into its domain model. The account screen's
+/// reads call this the same way [`ExportJson::load_dir`] does.
+pub(crate) fn read_model<S, M>(dir: &Path, file: &'static str) -> Result<Option<M>, LoadError>
 where
     S: DeserializeOwned,
     M: TryFrom<S, Error = ParseError>,

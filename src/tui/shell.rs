@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 
-use super::screens::{chat_media, history, memories, overview};
+use super::screens::{account, chat_media, history, memories, overview};
 use super::theme::{Palette, glyph};
 use super::widgets::{PanelStyle, panel};
 use super::{footer, header};
@@ -87,10 +87,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Tab::Memories => memories::render(frame, &palette, app.memories_mut(), panel_area),
         Tab::ChatMedia => chat_media::render(frame, &palette, app.chat_media_mut(), panel_area),
         Tab::History => history::render(frame, &palette, app.history_mut(), panel_area),
-        // The other two tabs are still the empty shell: one placeholder panel named after the
-        // tab. It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the
-        // cursor) and, being the first panel on the body, an `ACCENT_2` title.
-        tab => frame.render_widget(panel(&palette, tab.label(), PanelStyle { first: true, focused: true }), panel_area),
+        Tab::Account => account::render(frame, &palette, app.account_mut(), panel_area),
+        // The settings tab is still the empty shell: one placeholder panel named after the tab.
+        // It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the cursor)
+        // and, being the first panel on the body, an `ACCENT_2` title.
+        Tab::Settings => frame.render_widget(panel(&palette, Tab::Settings.label(), PanelStyle { first: true, focused: true }), panel_area),
     }
 }
 

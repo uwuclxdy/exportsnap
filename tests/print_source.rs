@@ -9,10 +9,11 @@
 //! `Command::output()`, the same shape `tests/attribution.rs` uses for `--version`: no pty, no new
 //! dependency.
 //!
-//! **One argument, five deliveries, and the report observes all of them.** `App::start` hands the
-//! source to the overview's read of the dir, to the `statvfs` probe, and to each of the three run
-//! screens. A first cut of this file watched only the overview, and the other three then survived
-//! `PathBuf::new()` with all 694 tests green. The keys are per-screen for that reason.
+//! **One argument, six deliveries, and the report observes all of them.** `App::start` hands the
+//! source to the overview's read of the dir, to the `statvfs` probe, to each of the three run
+//! screens, and to the account screen. A first cut of this file watched only the overview, and the
+//! other four then survived `PathBuf::new()` with all 694 tests green. The keys are per-screen for
+//! that reason.
 //!
 //! **What the flag prints comes off the composed `App`, never off `main`'s locals.** `main` can
 //! print the path byte-identically, so the path alone would pin nothing; the part counts, the space
@@ -116,7 +117,8 @@ fn the_launched_binary_reports_the_export_in_the_source_dir_it_was_given() {
             "chat-source",
             "chat-out",
             "history-source",
-            "history-out"
+            "history-out",
+            "account-source"
         ]
     );
     assert_eq!(value(&fields, "source"), quoted(source));
@@ -133,6 +135,8 @@ fn the_launched_binary_reports_the_export_in_the_source_dir_it_was_given() {
     assert_eq!(value(&fields, "memories-out"), quoted(&source.join(OUT_DIR)));
     assert_eq!(value(&fields, "chat-out"), quoted(&source.join(OUT_DIR)));
     assert_eq!(value(&fields, "history-out"), quoted(&source.join(OUT_DIR)));
+    // The account screen is read-only, so it carries the source alone.
+    assert_eq!(value(&fields, "account-source"), quoted(source));
 
     // The probe is measured on the source's own filesystem, so its figures are the fourth delivery
     // of the argument. A blanked probe path measures nothing and drops both keys, which the key-set
@@ -190,7 +194,17 @@ fn a_hostile_source_path_cannot_forge_a_key() {
     assert_eq!(value(&fields, "parts"), "missing");
     assert_eq!(
         keys(&fields),
-        ["source", "parts", "memories-source", "memories-out", "chat-source", "chat-out", "history-source", "history-out"]
+        [
+            "source",
+            "parts",
+            "memories-source",
+            "memories-out",
+            "chat-source",
+            "chat-out",
+            "history-source",
+            "history-out",
+            "account-source"
+        ]
     );
 
     // Spelled out rather than derived, so a toolchain that moves any of these four escapes reds here
@@ -198,6 +212,7 @@ fn a_hostile_source_path_cannot_forge_a_key() {
     let escaped = format!("\"{}/x\\nparts=one\\tq\\\"w\\\\e=r\"", dir.path().display());
     assert_eq!(value(&fields, "source"), escaped);
     assert_eq!(value(&fields, "memories-source"), escaped);
+    assert_eq!(value(&fields, "account-source"), escaped);
     // The `=` is data inside the value, not a separator: the split takes the first one only.
     assert!(escaped.contains("e=r"), "an `=` inside a path must survive unescaped: {escaped:?}");
 }
@@ -253,7 +268,8 @@ fn several_deliveries_in_one_dir_report_how_many_rather_than_picking_one() {
             "chat-source",
             "chat-out",
             "history-source",
-            "history-out"
+            "history-out",
+            "account-source"
         ]
     );
 }
@@ -274,7 +290,17 @@ fn a_source_dir_that_is_not_there_is_reported_rather_than_refused() {
     // figures appear. A `zips=0` here would be a confident wrong answer.
     assert_eq!(
         keys(&fields),
-        ["source", "parts", "memories-source", "memories-out", "chat-source", "chat-out", "history-source", "history-out"]
+        [
+            "source",
+            "parts",
+            "memories-source",
+            "memories-out",
+            "chat-source",
+            "chat-out",
+            "history-source",
+            "history-out",
+            "account-source"
+        ]
     );
 }
 
@@ -288,7 +314,19 @@ fn an_empty_source_dir_reports_no_export_rather_than_a_missing_one() {
     // The dir is there, so unlike the case above the filesystem does measure.
     assert_eq!(
         keys(&fields),
-        ["source", "parts", "free", "total", "memories-source", "memories-out", "chat-source", "chat-out", "history-source", "history-out"]
+        [
+            "source",
+            "parts",
+            "free",
+            "total",
+            "memories-source",
+            "memories-out",
+            "chat-source",
+            "chat-out",
+            "history-source",
+            "history-out",
+            "account-source"
+        ]
     );
 }
 
