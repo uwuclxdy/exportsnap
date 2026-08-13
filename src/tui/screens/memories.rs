@@ -37,7 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListState, Paragraph};
 
 use crate::export::env::Environment;
-use crate::export::local_fix::{VideoOptions, default_out_root};
+use crate::export::local_fix::VideoOptions;
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::memories_run::{self, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
 use crate::tui::alert::RunAlert;
@@ -175,21 +175,23 @@ struct TablePane {
 
 impl Memories {
     /// The state before any run: the source the app was pointed at, the output root the run will
-    /// write into, and what the machine can do. `out_root` resolves to [`default_out_root`] when no
-    /// `--out` was passed.
+    /// write into, what the machine can do, and the transcode default the run starts at.
+    ///
+    /// `out_root` and `transcode` arrive RESOLVED — `--out` else the file's `out_dir` else the
+    /// source-derived default, and the file's `transcode` else on (decision 66, in
+    /// [`crate::app::RunDefaults::resolve`]) — decided once at startup and never re-derived here.
     ///
     /// The environment is handed in rather than probed here — `App::start` probes once and hands
     /// the answer to every screen, where a constructor that probed for itself cost a whole walk of
     /// `PATH` per screen. It is also the seam a render test uses to pin the disk-free row without
     /// reaching for the real filesystem.
     #[must_use]
-    pub fn with_environment(source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
-        let out_root = out_root.unwrap_or_else(|| default_out_root(&source));
+    pub fn with_environment(source: PathBuf, out_root: PathBuf, environment: Environment, transcode: bool) -> Self {
         Self {
             source,
             out_root,
             environment,
-            transcode: true,
+            transcode,
             run: Run::Idle,
             receiver: None,
             manifest_dir_override: None,
@@ -306,8 +308,9 @@ impl Memories {
             source: self.source.clone(),
             out_root: self.out_root.clone(),
             manifest_dir,
-            // `probe` answers where ffmpeg is; the toggle decides whether it is used at all.
-            video: VideoOptions { transcode: self.transcode, ..VideoOptions::probe() },
+            // The startup snapshot answers where ffmpeg is — the file's `ffmpeg_path` or the PATH
+            // probe (decision 66); the toggle decides whether it is used at all.
+            video: VideoOptions { transcode: self.transcode, ffmpeg: self.environment.ffmpeg.clone() },
         };
         std::thread::spawn(move || {
             // `run` sends Finished on every path, errors included; the catch turns a genuine bug

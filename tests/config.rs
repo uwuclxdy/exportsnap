@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use exportsnap::app::RunDefaults;
 use exportsnap::config::{self, Config, ConfigError};
 use exportsnap::export::chat_fix::OverlayMode;
 use exportsnap::tui::theme::{Tier, detect_from_env};
@@ -54,6 +55,53 @@ fn a_cli_flag_beats_the_same_key_in_the_config() {
     let config = load_text(dir.path(), "[theme]\nname = \"compatible\"\n").unwrap();
     assert_eq!(config.theme, Some(Tier::Compatible));
     assert_eq!(detect_from_env(Some(Tier::Full), config.theme), Tier::Full);
+}
+
+#[test]
+fn a_config_out_dir_is_honoured_through_the_real_wiring() {
+    let dir = tempdir().unwrap();
+    let config = load_text(dir.path(), "out_dir = \"/tmp/fixed\"\n").unwrap();
+    assert_eq!(config.out_dir.as_deref(), Some(Path::new("/tmp/fixed")));
+    // Through `RunDefaults::resolve` itself, with no flag set: the file's dir must beat the
+    // source-derived default.
+    let defaults = RunDefaults::resolve(None, &config, Path::new("/export"));
+    assert_eq!(defaults.out_root, PathBuf::from("/tmp/fixed"));
+}
+
+#[test]
+fn a_cli_out_flag_beats_the_same_key_in_the_config() {
+    let dir = tempdir().unwrap();
+    let config = load_text(dir.path(), "out_dir = \"/tmp/fixed\"\n").unwrap();
+    let defaults = RunDefaults::resolve(Some(Path::new("/tmp/flag")), &config, Path::new("/export"));
+    assert_eq!(defaults.out_root, PathBuf::from("/tmp/flag"));
+}
+
+#[test]
+fn the_out_root_defaults_to_the_source_dir_under_exportsnap_out() {
+    // The last layer of the precedence: no flag, no file — the source-derived default stands
+    // (decision 33).
+    let defaults = RunDefaults::resolve(None, &Config::default(), Path::new("/export"));
+    assert_eq!(defaults.out_root, PathBuf::from("/export/exportsnap-out"));
+}
+
+#[test]
+fn a_config_transcode_is_the_memories_default_else_on() {
+    let dir = tempdir().unwrap();
+    let config = load_text(dir.path(), "transcode = false\n").unwrap();
+    assert_eq!(config.transcode, Some(false));
+    assert!(!RunDefaults::resolve(None, &config, Path::new("/export")).transcode);
+    // Absent, the run starts on — the default the decisions fixed.
+    assert!(RunDefaults::resolve(None, &Config::default(), Path::new("/export")).transcode);
+}
+
+#[test]
+fn a_config_overlay_mode_is_the_chat_default_else_both() {
+    let dir = tempdir().unwrap();
+    let config = load_text(dir.path(), "overlay_mode = \"merged\"\n").unwrap();
+    assert_eq!(config.overlay_mode, Some(OverlayMode::Merged));
+    assert_eq!(RunDefaults::resolve(None, &config, Path::new("/export")).overlay_mode, OverlayMode::Merged);
+    // Absent, the run starts at `both` — [`OverlayMode::default`].
+    assert_eq!(RunDefaults::resolve(None, &Config::default(), Path::new("/export")).overlay_mode, OverlayMode::Both);
 }
 
 #[test]

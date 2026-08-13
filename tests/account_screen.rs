@@ -11,7 +11,8 @@
 use std::fs;
 use std::path::Path;
 
-use exportsnap::app::{App, Tab};
+use exportsnap::app::{App, RunDefaults, Tab};
+use exportsnap::config::Config;
 use exportsnap::export::env::Environment;
 use exportsnap::tui::shell;
 use exportsnap::tui::theme::{Palette, Tier};
@@ -139,7 +140,11 @@ fn export_tree() -> TempDir {
 
 /// The app on the account tab against a real export tree.
 fn app_on_account(dir: &Path) -> App {
-    let mut app = App::new(Tier::Full).with_source_environment(dir.to_path_buf(), Some(dir.join("out")), Environment::default());
+    let mut app = App::new(Tier::Full).with_source_environment(
+        dir.to_path_buf(),
+        RunDefaults { out_root: dir.join("out"), ..RunDefaults::resolve(None, &Config::default(), dir) },
+        Environment::default(),
+    );
     for _ in 0..=Tab::ALL.len() {
         press(&mut app, KeyCode::Right);
         if app.active() == Tab::Account {

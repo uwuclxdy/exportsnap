@@ -311,8 +311,9 @@ fn exiftool(path: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Transcoding on with a real ffmpeg, which is what [`VideoOptions::probe`] resolves to on the box
-/// this repo is gated on. Built explicitly rather than probed so a test says which branch it is in.
+/// Transcoding on with a real ffmpeg, which is what the startup composition answers when ffmpeg
+/// is on `PATH` and no config `ffmpeg_path` overrides it (decision 66). Built explicitly rather
+/// than probed so a test says which branch it is in.
 fn transcoding() -> VideoOptions {
     VideoOptions { transcode: true, ffmpeg: Some(PathBuf::from("ffmpeg")) }
 }

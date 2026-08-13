@@ -349,8 +349,9 @@ fn copying() -> VideoOptions {
     VideoOptions { transcode: false, ffmpeg: None }
 }
 
-/// Transcoding on with a real ffmpeg, which is what `VideoOptions::probe` resolves to on the box
-/// this repo is gated on. Built explicitly rather than probed so a test says which branch it is in.
+/// Transcoding on with a real ffmpeg, which is what the startup composition answers when ffmpeg
+/// is on `PATH` and no config `ffmpeg_path` overrides it (decision 66). Built explicitly rather
+/// than probed so a test says which branch it is in.
 ///
 /// The only options a caption burn is reachable under: `fix_video` draws the overlay inside
 /// `ffmpeg::transcode` and nowhere else, so a run holding [`copying`] draws none whatever the mode

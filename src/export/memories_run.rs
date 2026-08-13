@@ -41,8 +41,8 @@ use crate::export::{ExportJson, LoadError};
 pub struct RunInputs {
     /// The dir holding the export's parts (or the parts themselves).
     pub source: PathBuf,
-    /// Where the fixed memories land. Decision 33: `--out=<dir>` or
-    /// [`crate::export::local_fix::default_out_root`].
+    /// Where the fixed memories land, resolved once at startup (decision 66: `--out` else the
+    /// file's `out_dir` else [`crate::export::local_fix::default_out_root`]).
     pub out_root: PathBuf,
     /// Where the manifest lives. `None` resolves the platform's per-user data dir; a test passes
     /// its own tempdir so the real data dir is never touched.

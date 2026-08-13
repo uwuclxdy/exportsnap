@@ -16,9 +16,10 @@
 //! ```
 //!
 //! The key set is exactly what task §6's settings rows consume — output dir, theme, ffmpeg
-//! path, and the two run defaults (transcode, overlay mode) — and nothing more. `[theme] name`
-//! is the only key a consumer reads today (decision 66 wires it into the tier resolver); the
-//! rest is the shape the settings screen's write-back rounds through.
+//! path, and the two run defaults (transcode, overlay mode) — and nothing more. Every key is
+//! read at startup: the tier resolver takes `[theme] name`, and `app::RunDefaults::resolve`
+//! plus the startup probe take the rest (decision 66, wired as task 85). The file is the raw
+//! layer the settings screen's write-back rounds through and task 86's provenance reads.
 //!
 //! # Contract
 //!
@@ -38,8 +39,9 @@
 //!
 //! # Precedence
 //!
-//! flag > config > env is implemented by `tui::theme::detect`, which the file's theme value
-//! feeds (decision 66). [`load`] and [`write`] take the config dir as a **parameter** and
+//! flag > config > detection > default, implemented per key: `tui::theme::detect` for the tier,
+//! and `app::RunDefaults::resolve` plus the startup probe for out root, ffmpeg, transcode and
+//! overlay mode (decision 66). [`load`] and [`write`] take the config dir as a **parameter** and
 //! never resolve it themselves: on windows `directories` answers via `SHGetKnownFolderPath`,
 //! so a test calling the resolver in-process would read the operator's real tree. The binary
 //! resolves it once via [`config_dir`]; tests pass scratch dirs.

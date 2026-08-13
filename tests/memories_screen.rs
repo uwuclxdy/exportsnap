@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use exportsnap::app::App;
+use exportsnap::app::{App, RunDefaults};
+use exportsnap::config::Config;
 use exportsnap::export::env::Environment;
 use exportsnap::export::local_fix::{FixReport, Leg, VideoOptions};
 use exportsnap::export::manifest::{ExportId, ItemKind, Manifest, ResumeReport};
@@ -420,7 +421,7 @@ fn cell_run(buffer: &Buffer, y: u16) -> String {
 fn app_on_memories(dir: &TempDir) -> App {
     let mut app = App::new(Tier::Full).with_source_environment(
         dir.path().to_path_buf(),
-        Some(dir.path().join("out")),
+        RunDefaults { out_root: dir.path().join("out"), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
         Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
     );
     on_memories(&mut app);
@@ -434,7 +435,7 @@ fn app_on_memories(dir: &TempDir) -> App {
 fn app_on_fixed_source() -> App {
     let mut app = App::new(Tier::Full).with_source_environment(
         PathBuf::from("/export"),
-        Some(PathBuf::from("/export/out")),
+        RunDefaults { out_root: PathBuf::from("/export/out"), ..RunDefaults::resolve(None, &Config::default(), Path::new("/export")) },
         Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
     );
     on_memories(&mut app);
@@ -999,7 +1000,7 @@ fn the_disk_free_row_fits_its_wide_value_at_the_form_width_floor() {
     // 511.9 GiB free of 1024.0 GiB reads "511.9 GiB" — 50% used, one decimal, a 9-cell value.
     let mut app = App::new(Tier::Full).with_source_environment(
         dir.path().to_path_buf(),
-        Some(dir.path().join("out")),
+        RunDefaults { out_root: dir.path().join("out"), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
         Environment {
             ffmpeg: None,
             vlc: None,
@@ -1093,7 +1094,10 @@ fn every_tab_renders_with_the_memories_screen_at_degenerate_sizes() {
     for (width, height) in sizes {
         let mut app = App::new(Tier::Full).with_source_environment(
             std::path::PathBuf::from("/nope"),
-            Some(std::path::PathBuf::from("/nope/out")),
+            RunDefaults {
+                out_root: std::path::PathBuf::from("/nope/out"),
+                ..RunDefaults::resolve(None, &Config::default(), std::path::Path::new("/nope"))
+            },
             Environment::default(),
         );
         on_memories(&mut app);

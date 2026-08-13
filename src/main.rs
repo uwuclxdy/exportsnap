@@ -6,8 +6,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
-use exportsnap::app::App;
-use exportsnap::config;
+use exportsnap::app::{App, RunDefaults};
+use exportsnap::config::{self, Config};
 use exportsnap::tui::theme::{self, Tier};
 
 /// The `--version` text, four lines: the binary name and version, the
@@ -97,19 +97,17 @@ fn main() -> Result<()> {
     let print_source = wants_print_source_arg(args.iter().cloned())?;
 
     let cli_tier = parse_theme_arg(args.iter().cloned())?;
-    // The config file fills the resolver's middle slot (decision 66: flag > config > env), and it
-    // loads on the TUI path only: `--version` and `--help` returned above, and `--print-source`
-    // reports what the app found — not what settings say — so it skips the file too, and a broken
-    // config can never block a report. No home dir means no config file: defaults.
-    let config_theme = if print_source {
-        None
-    } else {
-        match config::config_dir() {
-            Some(dir) => config::load(&dir)?.theme,
-            None => None,
-        }
+    // The config file fills the resolver's middle slot (decision 66: flag > config > detection >
+    // default) on EVERY app path — `--print-source` included. The report reads the composed app,
+    // and the composition now includes the file's `out_dir`, so a report printed without it would
+    // describe a different root than the run uses, exit 0; a broken config fails both paths
+    // identically. Only `--version` and `--help` still skip the file, returning above. No home dir
+    // means no config file: defaults.
+    let config = match config::config_dir() {
+        Some(dir) => config::load(&dir)?,
+        None => Config::default(),
     };
-    let tier = theme::detect_from_env(cli_tier, config_theme);
+    let tier = theme::detect_from_env(cli_tier, config.theme);
 
     // The dir the user points at, or the one they ran from. Parsed before the terminal is taken
     // over, so a bad argument is a plain message on a plain terminal rather than a flash of
@@ -118,9 +116,12 @@ fn main() -> Result<()> {
         Some(dir) => dir,
         None => std::env::current_dir().context("could not read the working dir; pass --source=<dir> instead")?,
     };
-    // `--out=<dir>` names where a memories run writes (decision 33); absent, the run uses
-    // `default_out_root(source)`. Parsed before the terminal is taken over, like the source.
+    // `--out=<dir>` names where a memories run writes (decision 33); absent, the file's `out_dir`
+    // or the source-derived default decides (decision 66). Parsed before the terminal is taken
+    // over, like the source. The raw layers — the flag and the file — stay locals here, which is
+    // what the settings screen's provenance will read (task 86).
     let out = parse_out_arg(args)?;
+    let defaults = RunDefaults::resolve(out.as_deref(), &config, &source);
 
     // Every screen is built here, before the terminal is taken over, and the reads never fail: an
     // absent or unreadable export is a state the overview has words for.
@@ -128,7 +129,7 @@ fn main() -> Result<()> {
     // Deliberate ceiling: this is blocking, so a large `json/` delays the first frame with nothing
     // on screen to say why. The upgrade path is the phase-2 tokio runtime plus the overview's own
     // loading state, which needs the tick timer no screen has earned yet.
-    let mut app = App::start(tier, source, out);
+    let mut app = App::start(tier, source, defaults);
 
     // Read off the COMPOSED app rather than off the `source` local above. `main` could print the
     // path byte-identically — its own M2 mutation proved that — so what makes this a pin is the rest

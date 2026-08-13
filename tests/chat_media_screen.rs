@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use exportsnap::app::{App, Tab};
+use exportsnap::app::{App, RunDefaults, Tab};
+use exportsnap::config::Config;
 use exportsnap::export::LoadError;
 use exportsnap::export::chat_fix::OverlayMode;
 use exportsnap::export::chat_run::{self, HistoryOutcome, PlanCounts, PlanRow, PlanSnapshot, RunError, RunEvent, RunOutcome};
@@ -685,13 +686,21 @@ fn environment() -> Environment {
 /// `tier` is a parameter rather than a second helper because the tier decides only which colour
 /// column the palette resolves to; every other property this fixture exists for is the same on both.
 fn app_on_fixed_source(tier: Tier) -> App {
-    let mut app = App::new(tier).with_source_environment(PathBuf::from("/export"), Some(PathBuf::from("/export/out")), environment());
+    let mut app = App::new(tier).with_source_environment(
+        PathBuf::from("/export"),
+        RunDefaults { out_root: PathBuf::from("/export/out"), ..RunDefaults::resolve(None, &Config::default(), Path::new("/export")) },
+        environment(),
+    );
     on_tab(&mut app, Tab::ChatMedia);
     app
 }
 
 fn app_on_export(dir: &TempDir) -> App {
-    let mut app = App::new(Tier::Full).with_source_environment(dir.path().to_path_buf(), Some(dir.path().join("out")), environment());
+    let mut app = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: dir.path().join("out"), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        environment(),
+    );
     on_tab(&mut app, Tab::ChatMedia);
     app
 }
@@ -1460,8 +1469,11 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
 fn every_tab_renders_with_the_chat_media_screen_at_degenerate_sizes() {
     let sizes = [(0, 0), (1, 1), (4, 4), (16, 3), (17, 2), (255, 1), (1, 255), (500, 3), (45, 14)];
     for (width, height) in sizes {
-        let mut app =
-            App::new(Tier::Full).with_source_environment(PathBuf::from("/nope"), Some(PathBuf::from("/nope/out")), Environment::default());
+        let mut app = App::new(Tier::Full).with_source_environment(
+            PathBuf::from("/nope"),
+            RunDefaults { out_root: PathBuf::from("/nope/out"), ..RunDefaults::resolve(None, &Config::default(), Path::new("/nope")) },
+            Environment::default(),
+        );
         on_tab(&mut app, Tab::ChatMedia);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap_or_else(|error| panic!("at {width}x{height}: {error}"));

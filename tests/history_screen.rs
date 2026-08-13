@@ -17,7 +17,8 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use exportsnap::app::{App, Tab};
+use exportsnap::app::{App, RunDefaults, Tab};
+use exportsnap::config::Config;
 use exportsnap::export::env::Environment;
 use exportsnap::export::history::HtmlLinks;
 use exportsnap::export::history_run::{HistoryFormat, HistoryReport, PlanSnapshot, RunEvent, RunOutcome};
@@ -112,8 +113,11 @@ fn on_history(app: &mut App) {
 /// reads no machine probe, so the environment handed through is the default "nothing found,
 /// nothing measured".
 fn app_on_history(dir: &TempDir) -> App {
-    let mut app =
-        App::new(Tier::Full).with_source_environment(dir.path().to_path_buf(), Some(dir.path().join("out")), Environment::default());
+    let mut app = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: dir.path().join("out"), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        Environment::default(),
+    );
     on_history(&mut app);
     app
 }

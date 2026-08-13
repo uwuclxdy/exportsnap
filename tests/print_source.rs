@@ -18,6 +18,9 @@
 //! **What the flag prints comes off the composed `App`, never off `main`'s locals.** `main` can
 //! print the path byte-identically, so the path alone would pin nothing; the part counts, the space
 //! figures and each screen's own copy are what a build with a dropped argument cannot produce.
+//! Since task 85 (2026-08-13) the composition also includes the config file, so the flag reads it
+//! like the TUI does — the report and the run describe the same root or neither can start
+//! (`a_config_out_dir_reaches_every_out_key` pins it).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
@@ -32,8 +35,28 @@ use tempfile::TempDir;
 const OUT_DIR: &str = "exportsnap-out";
 
 /// Launches the built binary with `--print-source` and hands back its whole run.
+///
+/// Every spawn is sandboxed against the operator's real config: the flag reads the config file now
+/// (the report is the composed app), so a real `out_dir` on the box would red every default-root
+/// assertion below. The scratch home is empty, so the sandbox itself adds no key. The config dir
+/// is spelled per platform — linux reads `XDG_CONFIG_HOME`, mac reads `HOME` — and both point at
+/// the scratch dir; on windows neither env var redirects `directories`, which reads the shell
+/// folders, so that leg stays unsandboxed (the CI box has no config).
 fn print_source(args: &[String]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_exportsnap")).args(args).arg("--print-source").output().unwrap()
+    let home = tempfile::tempdir().unwrap();
+    print_source_at(home.path(), args)
+}
+
+/// The spawn itself, with the sandbox home handed in: the caller writes the config file into that
+/// dir before the child reads it, so the child and the writer must share one home.
+fn print_source_at(home: &Path, args: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_exportsnap"))
+        .args(args)
+        .arg("--print-source")
+        .env("XDG_CONFIG_HOME", home)
+        .env("HOME", home)
+        .output()
+        .unwrap()
 }
 
 /// The report for a source dir, with the run required to have succeeded.
@@ -171,6 +194,37 @@ fn the_out_root_the_binary_was_given_reaches_both_media_screens() {
     assert_eq!(value(&fields, "chat-out"), quoted(&out));
     assert_eq!(value(&fields, "history-out"), quoted(&out));
     // `--out` moves where the run writes and nothing else; the source keys must not follow it.
+    assert_eq!(value(&fields, "memories-source"), quoted(dir.path()));
+}
+
+/// Unix only, because the sandbox's config dir is spelled per platform and the platform answer
+/// decides which one the binary reads. Linux reads `$XDG_CONFIG_HOME/exportsnap` and mac reads
+/// `$HOME/Library/Application Support/exportsnap`; writing both spellings keeps one test body on
+/// both legs, with the unread one inert. Windows reads the shell folders that no env var can
+/// redirect, so it has no sandbox to write into — the same split `tests/config.rs` documents.
+#[cfg(unix)]
+#[test]
+fn a_config_out_dir_reaches_every_out_key() {
+    let dir = export_tree();
+    let home = tempfile::tempdir().unwrap();
+    let out = dir.path().join("elsewhere");
+    for config_dir in [home.path().join("exportsnap"), home.path().join("Library/Application Support/exportsnap")] {
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("config.toml"), format!("out_dir = {}\n", quoted(&out))).unwrap();
+    }
+
+    // The spawn must read THIS home — the one the config was written into — or it sees an empty
+    // scratch dir and prints the default root with the file unread, which is the failure this test
+    // exists to catch, not a test-harness artifact.
+    let output = print_source_at(home.path(), &[format!("--source={}", dir.path().display())]);
+    assert!(output.status.success(), "--print-source must exit 0, got {:?}", output.status);
+    let report = String::from_utf8(output.stdout).unwrap();
+    let fields = fields(&report);
+
+    assert_eq!(value(&fields, "memories-out"), quoted(&out));
+    assert_eq!(value(&fields, "chat-out"), quoted(&out));
+    assert_eq!(value(&fields, "history-out"), quoted(&out));
+    // The file moves the out root and nothing else; the source keys must not follow it.
     assert_eq!(value(&fields, "memories-source"), quoted(dir.path()));
 }
 

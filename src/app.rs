@@ -2,12 +2,14 @@
 //! grammar; the frame itself is composed by [`crate::tui::shell`].
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::config::Config;
+use crate::export::chat_fix::OverlayMode;
 use crate::export::env::{Environment, Tool, locate, probe_target};
 use crate::export::local_fix::default_out_root;
 use crate::tui::alert::RunAlert;
@@ -88,6 +90,42 @@ impl Tab {
     }
 }
 
+/// The run inputs the startup composition settled, once, in decision 66's order (flag > config >
+/// detection > default). The config file is the raw layer, kept reachable in `main` so the
+/// settings screen can state provenance; this is the effective answer a run reads, the way the
+/// resolved tier is the only layer the screens see.
+///
+/// Deliberately no `Default` impl, for the reason [`crate::export::local_fix::VideoOptions`]
+/// documents: one would have to answer an out root without resolving it, which reads as the
+/// flag's answer while behaving as a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunDefaults {
+    /// Where every leg writes: `--out` when it was passed, else the file's `out_dir`, else
+    /// [`default_out_root`].
+    pub out_root: PathBuf,
+    /// The file's `ffmpeg_path`, or `None` to let detection decide. Not yet the final answer —
+    /// [`App::start_with`] replaces the probe's finding with this when it is set, which is where
+    /// the merge lives because the locate seam does.
+    pub ffmpeg: Option<PathBuf>,
+    /// The memories leg's transcode default — the file's `transcode`, else on.
+    pub transcode: bool,
+    /// The chat leg's overlay mode — the file's `overlay_mode`, else [`OverlayMode::Both`].
+    pub overlay_mode: OverlayMode,
+}
+
+impl RunDefaults {
+    /// Decision 66's order for every key, each resolved exactly once at startup.
+    #[must_use]
+    pub fn resolve(cli_out: Option<&Path>, config: &Config, source: &Path) -> Self {
+        Self {
+            out_root: cli_out.map(Path::to_path_buf).or_else(|| config.out_dir.clone()).unwrap_or_else(|| default_out_root(source)),
+            ffmpeg: config.ffmpeg_path.clone(),
+            transcode: config.transcode.unwrap_or(true),
+            overlay_mode: config.overlay_mode.unwrap_or_default(),
+        }
+    }
+}
+
 /// Top-level app state: which screen is active, whether the 2-step quit is armed, and whether
 /// the event loop should keep running.
 ///
@@ -128,24 +166,34 @@ impl App {
     /// Every screen starts on [`Environment::default`] rather than on a probe of its own. Nothing
     /// here knows which dir the run is about yet, so a probe would measure a path the user never
     /// named and be thrown away by [`Self::start`] a moment later — which is what it used to do,
-    /// twice.
+    /// twice. The run defaults resolve the same way: nothing given — no flag, no config, no
+    /// source — which is [`RunDefaults::resolve`] with an empty source, and `start_with` replaces
+    /// every one of those fields before the first frame.
     #[must_use]
     pub fn new(tier: Tier) -> Self {
+        let defaults = RunDefaults::resolve(None, &Config::default(), Path::new(""));
         Self {
             palette: Palette::new(tier),
             active: Tab::Overview,
             quit_armed: false,
             running: true,
             overview: Overview::unloaded(),
-            memories: Memories::with_environment(PathBuf::new(), None, Environment::default()),
-            chat_media: ChatMedia::with_environment(PathBuf::new(), None, Environment::default()),
-            history: History::with_environment(PathBuf::new(), None),
+            memories: Memories::with_environment(PathBuf::new(), defaults.out_root.clone(), Environment::default(), defaults.transcode),
+            chat_media: ChatMedia::with_environment(
+                PathBuf::new(),
+                defaults.out_root.clone(),
+                Environment::default(),
+                defaults.transcode,
+                defaults.overlay_mode,
+            ),
+            history: History::with_environment(PathBuf::new(), defaults.out_root),
             account: Account::with_environment(PathBuf::new()),
         }
     }
 
     /// The whole startup composition, and the only thing `main` builds a running app with: read the
-    /// source dir once, probe the machine once, hand every screen the result.
+    /// source dir once, probe the machine once, settle the run defaults once (decision 66, in
+    /// [`RunDefaults::resolve`]), hand every screen the result.
     ///
     /// **`PATH` is walked once per [`Tool`], not once per screen.** Where a tool sits does not
     /// depend on the path being measured, so the media screens take the overview's answers with
@@ -158,20 +206,23 @@ impl App {
     /// clear it. A snapshot taken per startup carries the same staleness the screens already have
     /// and stays a value a test can hand in.
     #[must_use]
-    pub fn start(tier: Tier, source: PathBuf, out_root: Option<PathBuf>) -> Self {
-        Self::start_with(tier, source, out_root, locate)
+    pub fn start(tier: Tier, source: PathBuf, defaults: RunDefaults) -> Self {
+        Self::start_with(tier, source, defaults, locate)
     }
 
     /// [`Self::start`] against an explicit locator — the seam that makes the walk count above
     /// observable, since the real [`locate`] cannot be made to report its calls.
-    fn start_with(tier: Tier, source: PathBuf, out_root: Option<PathBuf>, locate: impl Fn(Tool) -> Option<PathBuf>) -> Self {
-        // Resolved here rather than left to each screen so the probe below measures the filesystem
-        // the run will actually write to.
-        let out_root = out_root.unwrap_or_else(|| default_out_root(&source));
-        let environment = Environment::probe_with(locate, &source);
-        let media = environment.measured_at(probe_target(&out_root));
+    fn start_with(tier: Tier, source: PathBuf, defaults: RunDefaults, locate: impl Fn(Tool) -> Option<PathBuf>) -> Self {
+        let mut environment = Environment::probe_with(locate, &source);
+        // The file's `ffmpeg_path` beats detection (decision 66: config > detection). The probe
+        // still ran first, so the once-per-tool walk stays counted and `vlc` keeps its own answer;
+        // the overview and the media screens then see the same composed machine.
+        if let Some(ffmpeg) = &defaults.ffmpeg {
+            environment.ffmpeg = Some(ffmpeg.clone());
+        }
+        let media = environment.measured_at(probe_target(&defaults.out_root));
 
-        Self::new(tier).with_overview(Overview::load_with(&source, environment)).with_source_environment(source, Some(out_root), media)
+        Self::new(tier).with_overview(Overview::load_with(&source, environment)).with_source_environment(source, defaults, media)
     }
 
     /// Hands the overview screen a real read of the source dir. [`Self::start`] calls this before
@@ -182,19 +233,20 @@ impl App {
         self
     }
 
-    /// Hands the run screens their run context: the source dir, the output root — `--out`'s
-    /// value or the default — and the machine probe [`Self::start`] already made. The account
-    /// screen takes the source alone: it is read-only and writes nothing.
+    /// Hands the run screens their run context: the source dir, the resolved run defaults
+    /// ([`RunDefaults`], decision 66) and the machine probe [`Self::start`] already made. The
+    /// account screen takes the source alone: it is read-only and writes nothing.
     ///
-    /// One call rather than one per screen: the legs read one export and write under one output
-    /// root, so a caller handing them different sources would be describing a state that cannot
-    /// arise from the command line. It is also the seam a render test uses to pin the disk-free
-    /// rows without reaching for the real filesystem.
+    /// One call rather than one per screen: the legs read one export and write under one resolved
+    /// output root, so a caller handing them different sources or different defaults would be
+    /// describing a state that cannot arise from the command line. It is also the seam a render
+    /// test uses to pin the disk-free rows without reaching for the real filesystem.
     #[must_use]
-    pub fn with_source_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
-        self.memories = Memories::with_environment(source.clone(), out_root.clone(), environment.clone());
-        self.chat_media = ChatMedia::with_environment(source.clone(), out_root.clone(), environment);
-        self.history = History::with_environment(source.clone(), out_root);
+    pub fn with_source_environment(mut self, source: PathBuf, defaults: RunDefaults, environment: Environment) -> Self {
+        self.memories = Memories::with_environment(source.clone(), defaults.out_root.clone(), environment.clone(), defaults.transcode);
+        self.chat_media =
+            ChatMedia::with_environment(source.clone(), defaults.out_root.clone(), environment, defaults.transcode, defaults.overlay_mode);
+        self.history = History::with_environment(source.clone(), defaults.out_root);
         self.account = Account::with_environment(source);
         self
     }
@@ -521,11 +573,17 @@ mod tests {
         // screen count. It read five walks per tool before this was the composition.
         let walks = RefCell::new(Vec::new());
         // A source dir that is not there: the export read answers "missing" off one failed listing,
-        // which leaves the probes as the only thing this drives.
-        let app = App::start_with(Tier::Full, PathBuf::from("/nope"), None, |tool| {
-            walks.borrow_mut().push(tool);
-            Some(PathBuf::from(format!("/located/{}", tool.command())))
-        });
+        // which leaves the probes as the only thing this drives. An empty config leaves every key
+        // to its default, so `resolve` cannot shadow the locator's answers.
+        let app = App::start_with(
+            Tier::Full,
+            PathBuf::from("/nope"),
+            RunDefaults::resolve(None, &Config::default(), Path::new("/nope")),
+            |tool| {
+                walks.borrow_mut().push(tool);
+                Some(PathBuf::from(format!("/located/{}", tool.command())))
+            },
+        );
 
         // Tied to the tool roster but deliberately NOT to its order: `Tool::ALL` is declared as
         // report order, a display concern, and reordering it for a display reason must not red a
@@ -549,5 +607,32 @@ mod tests {
         assert_eq!(app.overview().environment().available_space, None, "the overview measures the source dir, which is absent");
         assert!(app.memories().environment().available_space.is_some(), "the media screens measure the output root");
         assert!(app.chat_media().environment().available_space.is_some(), "the media screens measure the output root");
+    }
+
+    #[test]
+    fn a_config_ffmpeg_path_beats_the_probe() {
+        // The config's answer must win over where the locator found the tool, and every screen
+        // must see the same winner — the overview's machine panel included. The probe still runs,
+        // so the walk count stays once per tool (the test above pins it).
+        let walks = RefCell::new(Vec::new());
+        let defaults = RunDefaults {
+            out_root: PathBuf::from("/nope/exportsnap-out"),
+            ffmpeg: Some(PathBuf::from("/usr/bin/ffmpeg")),
+            transcode: true,
+            overlay_mode: OverlayMode::Both,
+        };
+        let app = App::start_with(Tier::Full, PathBuf::from("/nope"), defaults, |tool| {
+            walks.borrow_mut().push(tool);
+            Some(PathBuf::from(format!("/probed/{}", tool.command())))
+        });
+
+        for environment in [app.overview().environment(), app.memories().environment(), app.chat_media().environment()] {
+            assert_eq!(
+                environment.ffmpeg.as_deref(),
+                Some(Path::new("/usr/bin/ffmpeg")),
+                "the config's ffmpeg_path must beat the probe on every screen"
+            );
+        }
+        assert_eq!(walks.into_inner().len(), Tool::ALL.len(), "the probe still runs once per tool");
     }
 }

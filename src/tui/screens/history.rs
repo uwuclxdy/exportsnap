@@ -42,7 +42,6 @@ use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Pa
 
 use crate::export::history::conversation_title;
 use crate::export::history_run::{self, HistoryFormat, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
-use crate::export::local_fix::default_out_root;
 use crate::export::model::ConversationId;
 use crate::tui::alert::RunAlert;
 use crate::tui::format::{cells, grouped, middle_ellipsis, plural, truncate_prose};
@@ -227,12 +226,13 @@ impl History {
     /// The state against a real source: the picker loaded eagerly through the run's own
     /// parse/merge path ([`history_run::load_threads`]), so the conversation list exists before
     /// any run starts (decision 61) and the load failure is a state the pane has words for —
-    /// the overview's never-fail pattern. `out_root` resolves to [`default_out_root`] when no
-    /// `--out` was passed. This screen has no [`crate::export::env::Environment`]: it reads no
-    /// machine probe and shows no disk-free row.
+    /// the overview's never-fail pattern. `out_root` arrives RESOLVED — `--out` else the file's
+    /// `out_dir` else the source-derived default (decision 66, in
+    /// [`crate::app::RunDefaults::resolve`]) — decided once at startup and never re-derived here.
+    /// This screen has no [`crate::export::env::Environment`]: it reads no machine probe and
+    /// shows no disk-free row.
     #[must_use]
-    pub fn with_environment(source: PathBuf, out_root: Option<PathBuf>) -> Self {
-        let out_root = out_root.unwrap_or_else(|| default_out_root(&source));
+    pub fn with_environment(source: PathBuf, out_root: PathBuf) -> Self {
         let (picker, selected) = match history_run::load_threads(&source) {
             Ok(loaded) => {
                 let mut rows: Vec<PickerRow> = loaded

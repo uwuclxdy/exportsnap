@@ -65,7 +65,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 
-use crate::export::env::{self, Tool};
 use crate::export::exif::{ExifError, Jpeg, Stamp};
 use crate::export::ffmpeg::{self, FfmpegError};
 use crate::export::manifest::{Item, ItemKind, Manifest, ManifestError, ResumeReport};
@@ -362,30 +361,27 @@ impl fmt::Display for Leg {
 /// Not a CLI flag: nothing invokes this pass from `main.rs` yet, and a parsed flag with no consumer
 /// is dead code. This is the seam the memories screen wires a toggle into when it lands, which is
 /// the same call already recorded for `--out=<dir>`.
+///
+/// The values arrive RESOLVED from the startup composition — `app::RunDefaults` and the machine
+/// probe (decision 66) — and are never re-derived here. There is deliberately no `Default` impl:
+/// one would have to answer `None` for ffmpeg without resolving it, which reads as "transcoding
+/// on" while behaving as "transcoding off" — the exact trap this pass exists to report rather
+/// than hide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoOptions {
-    /// Whether to re-encode HEVC into H.264. **On in [`Self::probe`]**, because every memory video
-    /// in the observed export is `hvc1` and Windows plus older players routinely will not decode
-    /// it, so the default has to produce files that play. Turning it off means no video pixel is
-    /// re-encoded at all — and therefore that no overlay is burned in, since burning one is a
-    /// re-encode.
+    /// Whether to re-encode HEVC into H.264. **On by default** (decision 66: the file's
+    /// `transcode` else on), because every memory video in the observed export is `hvc1` and
+    /// Windows plus older players routinely will not decode it, so the default has to produce
+    /// files that play. Turning it off means no video pixel is re-encoded at all — and therefore
+    /// that no overlay is burned in, since burning one is a re-encode.
     pub transcode: bool,
-    /// Where ffmpeg is, from [`crate::export::env::locate`]. `None` degrades exactly like
-    /// [`Self::transcode`] being off, and the run says which of the two it was.
+    /// Where ffmpeg is: the startup snapshot, the config's `ffmpeg_path` when it sets one else
+    /// where detection found it (decision 66). `None` degrades exactly like [`Self::transcode`]
+    /// being off, and the run says which of the two it was.
     pub ffmpeg: Option<PathBuf>,
 }
 
 impl VideoOptions {
-    /// The defaults a real run uses: transcoding on, ffmpeg looked up on `PATH`.
-    ///
-    /// There is deliberately no `Default` impl. One would have to answer `None` for ffmpeg without
-    /// probing, which reads as "transcoding on" while behaving as "transcoding off" — the exact
-    /// trap this pass exists to report rather than hide.
-    #[must_use]
-    pub fn probe() -> Self {
-        Self { transcode: true, ffmpeg: env::locate(Tool::Ffmpeg) }
-    }
-
     /// The ffmpeg to run, or why there will not be one.
     fn transcoder(&self) -> Result<&Path, TranscodeSkip> {
         match (self.transcode, self.ffmpeg.as_deref()) {

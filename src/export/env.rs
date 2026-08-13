@@ -128,7 +128,9 @@ pub fn total_space(path: impl AsRef<Path>) -> Result<u64, SpaceError> {
 /// `PATH`. [`Self::default`] is "nothing found, nothing measured".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Environment {
-    /// Where `ffmpeg` was found, or `None` when it is not on `PATH`.
+    /// The ffmpeg a run uses: the config file's `ffmpeg_path` when it sets one, else where
+    /// detection found it on `PATH` — the startup composition's merge (decision 66). `None` when
+    /// neither names one.
     pub ffmpeg: Option<PathBuf>,
     /// Where `vlc` was found, or `None` when it is not on `PATH`.
     pub vlc: Option<PathBuf>,
