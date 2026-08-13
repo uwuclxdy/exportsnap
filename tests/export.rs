@@ -557,6 +557,81 @@ fn schema_files_and_the_redactors_real_schema_filenames_agree() {
     );
 }
 
+/// Reads the redactor's `NAME_VOCABULARY` frozenset out of `tools/redact_export.py` by text, via
+/// `CARGO_MANIFEST_DIR` (`tools/` is tracked, so this reaches the file in CI too, unlike anything
+/// gated on `fixtures/`). The scan is line-oriented and section-scoped the same way
+/// [`real_schema_filenames`] scopes to its tuple, adapted to the frozenset shape: it reads a
+/// literal only when trimming a line leaves `"word",` on it, between the line where
+/// `NAME_VOCABULARY = frozenset(` starts and the line that is exactly `}` — the set body's `{`
+/// opener and its `# comment` lines match neither shape and are skipped.
+///
+/// The empty-guard in `schema_words_stay_inside_the_redactors_vocabulary` is what turns an
+/// unreadable file into a red instead of a silent "agrees with nothing". One boundary this scan
+/// does not close, same class as the first one [`real_schema_filenames`] names: if the frozenset
+/// ever collapses onto fewer lines (a member sharing the anchor line or the `}`), the scan misses
+/// words or reads past the real close, which the empty-guard can then only sometimes catch.
+fn name_vocabulary() -> Vec<String> {
+    let body = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/redact_export.py")).unwrap();
+    let mut inside = false;
+    let mut words = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            inside = trimmed.starts_with("NAME_VOCABULARY = frozenset(");
+            continue;
+        }
+        if trimmed == "}" {
+            break;
+        }
+        if let Some(word) = trimmed.strip_prefix('"').and_then(|rest| rest.strip_suffix("\",").or_else(|| rest.strip_suffix('"'))) {
+            words.push(word.to_owned());
+        }
+    }
+    words
+}
+
+#[test]
+fn schema_words_stay_inside_the_redactors_vocabulary() {
+    // Task 82: the test above pins the FILENAME-level mirror, and it does not catch the word-level
+    // drift this one exists for — a new schema name added to both `SCHEMA_FILES` and
+    // `REAL_SCHEMA_FILENAMES` whose underscore-separated words leave `NAME_VOCABULARY` still passes
+    // it, while the redactor renames the file on its way into fixtures and the parser then never
+    // finds it. The redactor's own suite pins that behavior, but it runs only via
+    // `python3 -m unittest discover -s tools -p 'test*.py'`, which `cargo.sh` never invokes and CI
+    // does not run — the same fact that put the filename mirror in the rust suite.
+    //
+    // Pinned is the COVERAGE direction (every rust-side word must sit in the python set), never the
+    // vocabulary list itself: a word added to `NAME_VOCABULARY` with no consumer is the redactor's
+    // business, not this test's.
+    let scraped = name_vocabulary();
+    // Guards the SCRAPE, not the content: if the frozenset gets renamed, reformatted, or the file
+    // moves, this is what turns "found nothing, so nothing disagreed" into a red instead of a
+    // silent green that only means the extraction broke.
+    assert!(
+        !scraped.is_empty(),
+        "found no NAME_VOCABULARY words in tools/redact_export.py: either \
+         `NAME_VOCABULARY = frozenset(` was not found verbatim, or the set closed before any \
+         quoted word was read"
+    );
+
+    let vocabulary: std::collections::BTreeSet<&str> = scraped.iter().map(String::as_str).collect();
+    for name in SCHEMA_FILES {
+        // The split matches the redactor's word tokenizer for these names: the `sep` class
+        // (`NAME_TOKEN_RE`) splits on `-`, `_` and `.`, and every run between them is one word
+        // (`[A-Za-z][A-Za-z0-9]*`, checked lowercased, and every name below is already lowercase).
+        // The extension is asserted too, not just the stem: the literal `json/` dir segment goes
+        // through the same vocabulary gate as a filename.
+        for word in name.split(['-', '.', '_']) {
+            assert!(
+                vocabulary.contains(word),
+                "the word `{word}` in schema file `{name}` is missing from NAME_VOCABULARY \
+                 (tools/redact_export.py): the redactor would mask it on its way into fixtures, \
+                 and the parser would never find the file — add the word, per decision 22"
+            );
+        }
+    }
+}
+
 // ---- the loader's own failure modes (no fixtures needed) ----
 
 #[test]
