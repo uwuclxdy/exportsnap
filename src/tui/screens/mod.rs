@@ -2,5 +2,6 @@
 //! [`crate::tui::shell`] owns the frame around them.
 
 pub mod chat_media;
+pub mod history;
 pub mod memories;
 pub mod overview;

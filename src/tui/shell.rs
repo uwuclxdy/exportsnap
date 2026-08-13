@@ -7,11 +7,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 
-use super::screens::{chat_media, memories, overview};
+use super::screens::{chat_media, history, memories, overview};
 use super::theme::{Palette, glyph};
 use super::widgets::{PanelStyle, panel};
 use super::{footer, header};
 use crate::app::{App, Tab};
+use crate::tui::format::truncate_prose;
 
 /// Below this height the layout stops fitting (cloudy-tui skill: Patterns → Density).
 pub(crate) const COMPACT_HEIGHT: u16 = 14;
@@ -54,10 +55,21 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         frame.render_widget(compact_banner(&palette, header_area.width), header_area);
     }
-    // The alert and the descended flag are the ACTIVE screen's — two screens can each hold one and
-    // there is one footer row, so `App` answers both off the same tab rather than the footer
-    // guessing. See `App`'s own docs for why the active screen wins.
-    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), app.descended()), footer_area);
+    // The hint set is the ACTIVE screen's, like the alert and the descended flag: two screens
+    // can each hold one and there is one footer row, so `App` answers all three off the same tab
+    // rather than the footer guessing. The history tab's top-level hints name its own keys
+    // (`t toggle all`, `space toggle`) and derive them off the picker's state; the descended set
+    // is universal, so it is chosen off `descended` rather than per tab. See `App`'s own docs
+    // for why the active screen wins.
+    let hints = if app.descended() {
+        footer::descended_hints(&palette, footer_area.width)
+    } else {
+        match app.active() {
+            Tab::History => footer::history_hints(&palette, app.history().picker_has_rows(), footer_area.width),
+            _ => footer::plain_hints(&palette, footer_area.width),
+        }
+    };
+    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), hints), footer_area);
 
     // Recomputed from the live frame size every draw, so it self-clears on resize rather than
     // living on as a stored notification. At most one banner per frame (skill: Banner), so a
@@ -74,7 +86,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Tab::Overview => overview::render(frame, &palette, app.overview(), panel_area),
         Tab::Memories => memories::render(frame, &palette, app.memories_mut(), panel_area),
         Tab::ChatMedia => chat_media::render(frame, &palette, app.chat_media_mut(), panel_area),
-        // The other three tabs are still the empty shell: one placeholder panel named after the
+        Tab::History => history::render(frame, &palette, app.history_mut(), panel_area),
+        // The other two tabs are still the empty shell: one placeholder panel named after the
         // tab. It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the
         // cursor) and, being the first panel on the body, an `ACCENT_2` title.
         tab => frame.render_widget(panel(&palette, tab.label(), PanelStyle { first: true, focused: true }), panel_area),
@@ -102,29 +115,10 @@ fn compact_banner(palette: &Palette, width: u16) -> Line<'static> {
     Line::from(Span::raw(truncate_prose(&text, width as usize))).style(Style::new().fg(palette.bg).bg(palette.warning))
 }
 
-/// Trailing-ellipsis truncation for prose (cloudy-tui skill: Patterns → Truncation). Without
-/// it the banner clips mid-word on a narrow terminal, which is exactly the terminal it renders
-/// on.
-///
-/// Cuts on `char` boundaries, never byte indices: the copy carries a multi-byte `·`, and a
-/// byte-index slice landing inside it panics. Char count is the cell width here because every
-/// char in the banner copy is one cell wide — this is not a general display-width truncator.
-fn truncate_prose(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-
-    let mut truncated: String = text.chars().take(width - 1).collect();
-    truncated.push(glyph::ELLIPSIS);
-    truncated
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::format::truncate_prose;
 
     /// The exact banner copy, so the boundary cases below name real widths rather than a
     /// stand-in string that might not carry the multi-byte `·`.
@@ -144,13 +138,12 @@ mod tests {
         assert_eq!(text.chars().count(), 47);
         assert_eq!(text.len(), 48);
 
-        // `truncate_prose` counts chars and calls them cells, which holds only while the copy
-        // is one cell per char. Two rows ride on that now: the compact body row and the header
-        // row below its width floor. A wide glyph costs both the trailing `…`, which the
-        // char-count cut pushes past the edge where it is dropped, and the full-width wash,
-        // which holes at the glyph's continuation cell. ratatui resets that cell after writing
-        // the symbol, so the hole lands at any width, not only where the row overruns. Pinned
-        // rather than assumed, since the wash is what separates a banner from a footer alert.
+        // `truncate_prose` measures cells now (it lives in `format.rs`), so a wide glyph in
+        // the copy shortens the kept text instead of holing the wash. The copy is one cell per
+        // char, which is why the char-count cut once needed this pin: keep pinning the copy's
+        // shape so the boundary cases below keep exercising the cut with the real banner text,
+        // multi-byte `·` included, and a future wide glyph in the copy reds here rather than
+        // silently changing every pinned width above.
         assert_eq!(Span::raw(&text).width(), 47);
     }
 

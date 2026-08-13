@@ -1,18 +1,19 @@
 //! The whole history export in one call: what the history screen drives.
 //!
 //! [`super::chat_run`]'s shape, with the work swapped: there is no media walk and no fix pass, only
-//! the merged history the json already holds, planned into directories and written out as four
-//! documents per conversation (decision 58). Discover the export's parts, read its json, merge chat
-//! and snap, plan every document path, enroll one directory-claim row per conversation (decision
-//! 63a), write the documents, report the outcome.
+//! the merged history the json already holds, planned into directories and written out as one
+//! document per selected format per conversation (decision 58). Discover the export's parts, read
+//! its json, merge chat and snap, plan every document path, enroll one directory-claim row per
+//! conversation (decision 63a), write the selected documents, report the outcome.
 //!
 //! # What a caller gets, and when
 //!
 //! [`run`] sends exactly one [`RunEvent::Planned`] — after the plan exists and the claims are
-//! enrolled, before any document is written — and then one [`RunEvent::Finished`] on every path,
-//! setup errors included. There is no per-item manifest poll on this leg: the run is one-shot
-//! idempotent over json that is already local, with no resume and no per-item status (decision 63),
-//! so the screen counts events rather than rows.
+//! enrolled, before any document is written — then one [`RunEvent::Written`] per conversation whose
+//! documents landed, and then one [`RunEvent::Finished`] on every path, setup errors included. There
+//! is no per-item manifest poll on this leg: the run is one-shot idempotent over json that is
+//! already local, with no resume and no per-item status (decision 63), so the screen counts events
+//! rather than rows.
 //!
 //! # The directory claim (decision 63a)
 //!
@@ -47,9 +48,8 @@
 //!
 //! Every state the screen has words for is a [`RunError`] variant with a `Display` a footer alert
 //! can carry verbatim. The one residual is a genuine bug panicking mid-run; [`run`] sends
-//! [`RunEvent::Finished`] on every non-panicking path, and once the history screen's worker lands
-//! it wraps the call in `catch_unwind` exactly as the memories and chat-media screens do — task 80
-//! wires that thread, and until then no caller of this module exists but a test channel.
+//! [`RunEvent::Finished`] on every non-panicking path, and [`crate::tui::screens::history`]'s
+//! worker wraps the call in `catch_unwind` exactly as the memories and chat-media screens do.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -61,7 +61,7 @@ use std::sync::mpsc::Sender;
 
 use crate::export::chat_fix::{CHAT_DIR, Conversations, RecordedDirs};
 use crate::export::chat_media;
-use crate::export::history::{self, Document, Html, HtmlLinks};
+use crate::export::history::{self, Document, Html, HtmlLinks, MergedHistory};
 use crate::export::local_fix::{OutRootError, Outputs};
 use crate::export::manifest::{DirectoryClaim, ExportId, Manifest, ManifestError};
 use crate::export::model::{ChatHistory, ConversationId, SnapHistory};
@@ -78,9 +78,49 @@ pub struct RunInputs {
     /// Where the manifest lives. `None` resolves the platform's per-user data dir; a test passes
     /// its own tempdir so the real data dir is never touched.
     pub manifest_dir: Option<PathBuf>,
+    /// Which conversations to write. A run refuses an empty set ([`RunError::NoSelection`]):
+    /// writing nothing over everything is the refusal decision 59 names for the chip, held again
+    /// here so a caller cannot bypass the screen. Both refusals are pinned by the tests in
+    /// `tests/history.rs` (`a_run_over_a_loadable_export_refuses_an_empty_conversation_selection`
+    /// and `a_run_refuses_an_empty_format_selection_before_reading_the_export`).
+    pub conversations: BTreeSet<ConversationId>,
+    /// Which document formats to write. A run refuses an empty set ([`RunError::NoFormats`]) for
+    /// the same reason: the screen's checkbox state is input, not decoration.
+    pub formats: BTreeSet<HistoryFormat>,
 }
 
-/// The four document paths of one conversation.
+/// One of the four document formats a history run can write (decision 58).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HistoryFormat {
+    /// `history.html`, the browsable document with media links.
+    Html,
+    /// `history.json`, the machine-readable record.
+    Json,
+    /// `history.txt`, the readable transcript.
+    Text,
+    /// `history.csv`, the tabular record.
+    Csv,
+}
+
+impl HistoryFormat {
+    /// Every format, in the order decision 58 lists them.
+    pub const ALL: [Self; 4] = [Self::Html, Self::Json, Self::Text, Self::Csv];
+
+    /// The format's label on the screen's checkbox row.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Json => "json",
+            Self::Text => "text",
+            Self::Csv => "csv",
+        }
+    }
+}
+
+/// The four document paths of one conversation, reserved up front so a later format toggle never
+/// hands a name a recorded path already claims. The run writes a subset of them; the reservation is
+/// a function of the key set, the filtering happens at write time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Documents {
     pub json: PathBuf,
@@ -201,6 +241,8 @@ pub struct PlanSnapshot {
 pub enum RunEvent {
     /// The plan is built and the claims are enrolled.
     Planned(PlanSnapshot),
+    /// One conversation's documents are on disk — the counter's advance (decision 63).
+    Written,
     /// The run is over, however it ended.
     Finished(RunOutcome),
 }
@@ -219,12 +261,16 @@ pub enum RunOutcome {
 pub struct HistoryReport {
     /// Conversations written, one directory each.
     pub conversations: usize,
-    /// Documents written, four per conversation.
+    /// Documents written, one per selected format per conversation.
     pub documents: usize,
     /// What the html media links did (decision 62), stated once here rather than per message: a
     /// run whose source names no `mydata~*` part group had no manifest to read, so every media
     /// reference in its documents renders as a placeholder.
     pub links: HtmlLinks,
+    /// Whether any html was actually written this run. The completion alert's placeholder note
+    /// arms on [`Self::links`] only when this is true: a run that wrote no html has no links to
+    /// be placeholders, and naming a silence would misstate it.
+    pub html_written: bool,
 }
 
 /// Every reason a run does not produce history documents.
@@ -253,6 +299,11 @@ pub enum RunError {
     Manifest(ManifestError),
     /// The plan could not be built.
     Plan(PlanError),
+    /// The screen selected no conversation. The chip's refusal (decision 59) held again here so a
+    /// caller that bypasses the screen still never writes everything over nothing.
+    NoSelection,
+    /// The screen selected no document format.
+    NoFormats,
     /// A document could not be written. **The `io::Error` carries the OS's message and no path**:
     /// the directory a document lands in is derived from a conversation key, and an error message
     /// never echoes the export's own bytes (decision 49).
@@ -285,6 +336,10 @@ impl fmt::Display for RunError {
             Self::Discover(error) => write!(f, "{error}"),
             Self::Manifest(error) => write!(f, "{error}"),
             Self::Plan(error) => write!(f, "{error}"),
+            // One spelling with the chip's tooltip: the screen's disabled-row reason and the
+            // failure alert name the same fix, whichever of the two the user happens to read.
+            Self::NoSelection => write!(f, "pick at least one conversation"),
+            Self::NoFormats => write!(f, "pick at least one format"),
             Self::Write(source) => write!(f, "could not write a history document: {source}"),
             Self::Panicked => write!(f, "the run stopped unexpectedly; this is a bug in exportsnap, not in your data"),
         }
@@ -299,21 +354,28 @@ impl Error for RunError {
             Self::Manifest(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::Write(source) => Some(source),
-            Self::SeveralExports { .. } | Self::NoJsonDir(_) | Self::NoHistory(_) | Self::InvalidExportId(_) | Self::Panicked => None,
+            Self::SeveralExports { .. }
+            | Self::NoJsonDir(_)
+            | Self::NoHistory(_)
+            | Self::InvalidExportId(_)
+            | Self::NoSelection
+            | Self::NoFormats
+            | Self::Panicked => None,
         }
     }
 }
 
 /// Drives one history run, reporting progress over `events`.
 ///
-/// Sends [`RunEvent::Planned`] once the plan exists and the claims are enrolled, then
-/// [`RunEvent::Finished`] on every path. Never returns an error: the outcome travels in the
-/// events, so a caller's worker thread has one thing to forward and nothing to map.
+/// Sends [`RunEvent::Planned`] once the plan exists and the claims are enrolled, one
+/// [`RunEvent::Written`] per conversation whose documents landed, then [`RunEvent::Finished`] on
+/// every path. Never returns an error: the outcome travels in the events, so a caller's worker
+/// thread has one thing to forward and nothing to map.
 pub fn run(inputs: &RunInputs, events: &Sender<RunEvent>) {
     let outcome = match prepare(inputs) {
         Ok(prepared) => {
             let _ = events.send(RunEvent::Planned(prepared.snapshot));
-            match write(&prepared) {
+            match write(&prepared, events) {
                 Ok(report) => RunOutcome::Completed(report),
                 Err(error) => RunOutcome::Failed(error),
             }
@@ -323,6 +385,78 @@ pub fn run(inputs: &RunInputs, events: &Sender<RunEvent>) {
     let _ = events.send(RunEvent::Finished(outcome));
 }
 
+/// What the source holds before any selection: the merged history the picker lists, the export id
+/// when a part group names one, and the raw chat the run's attribution derives from.
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    /// The merged, sorted threads of every conversation the source holds.
+    pub merged: MergedHistory,
+    /// The export id when a part group names one (decision 62's `None` arm).
+    pub export_id: Option<ExportId>,
+    chat: ChatHistory,
+}
+
+/// Reads a source up to the merged history: discover its parts, find the json, load it, and merge
+/// chat and snap (decision 61) — the parse/merge path the screen's picker and the run share, so the
+/// conversation set and its labels have one spelling.
+///
+/// No manifest is opened and no claim is made here: the claims are the RUN's (decision 63a), and
+/// the picker only lists what the json holds.
+///
+/// # Errors
+///
+/// Returns every discovery-and-parse [`RunError`] the run itself would: `SeveralExports`,
+/// `NoJsonDir`, `NoHistory`, `InvalidExportId`, `Json` and `Discover`.
+pub fn load_threads(source: &Path) -> Result<Loaded, RunError> {
+    let groups = discover_parts(source).map_err(RunError::Discover)?;
+    let group = match groups.as_slice() {
+        [] => None,
+        [group] => Some(group),
+        several => return Err(RunError::SeveralExports { source: source.to_path_buf(), count: several.len() }),
+    };
+    let json_dir: PathBuf = match group {
+        Some(group) => group
+            .extracted
+            .iter()
+            .find_map(|part| part.json_dir.as_deref())
+            .ok_or_else(|| RunError::NoJsonDir(source.to_path_buf()))?
+            .to_path_buf(),
+        // No part group: the export was extracted flat into the source (or the part dirs were
+        // renamed away), which is exactly the no-manifest arm decision 62 exists for. The json dir
+        // is the source's own.
+        None => {
+            let candidate = source.join("json");
+            if candidate.is_dir() { candidate } else { return Err(RunError::NoJsonDir(source.to_path_buf())) }
+        }
+    };
+    let export = ExportJson::load_dir(&json_dir).map_err(RunError::Json)?;
+    if export.chat_history.is_none() && export.snap_history.is_none() {
+        return Err(RunError::NoHistory(source.to_path_buf()));
+    }
+    // An absent file is an empty history, the same substitution `chat_run` makes for its own
+    // absent `chat_history.json`.
+    let chat = export.chat_history.unwrap_or(ChatHistory { conversations: Vec::new() });
+    let snap = export.snap_history.unwrap_or(SnapHistory { conversations: Vec::new() });
+    let merged = history::merge(&chat, &snap);
+
+    let export_id = match group {
+        Some(group) => {
+            // A part whose id cannot name a manifest is refused, the same call `chat_run` makes:
+            // the no-manifest arm below is for a source naming NO part group (decision 62), not
+            // for an unusable id — degrading silently here would report a clean run with
+            // placeholder links and no claim rows over a source every other leg refuses. The
+            // picker shows the same refusal, since every run over this source refuses the same
+            // way.
+            let Some(export_id) = ExportId::new(&group.id) else {
+                return Err(RunError::InvalidExportId(source.to_path_buf()));
+            };
+            Some(export_id)
+        }
+        None => None,
+    };
+    Ok(Loaded { merged, export_id, chat })
+}
+
 /// The half of the run before any document is written: the plan, the enrolled claims, and the
 /// documents to write.
 struct Prepared {
@@ -330,59 +464,31 @@ struct Prepared {
     manifest: Option<Manifest>,
     plan: HistoryPlan,
     documents: BTreeMap<ConversationId, Document>,
+    formats: BTreeSet<HistoryFormat>,
 }
 
 /// Everything up to and including the plan and the claim enrollment. Fails with a [`RunError`]
 /// for every state the screen has words for.
 fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
-    // The export id names the manifest, so the first fact a run needs is the delivery's id. For
-    // history the id is optional (decision 62): a source naming no `mydata~*` part group has no
-    // manifest to read links from, and the run degrades to placeholders instead of refusing.
-    let groups = discover_parts(&inputs.source).map_err(RunError::Discover)?;
-    let group = match groups.as_slice() {
-        [] => None,
-        [group] => Some(group),
-        several => return Err(RunError::SeveralExports { source: inputs.source.clone(), count: several.len() }),
-    };
-    let json_dir: PathBuf = match group {
-        Some(group) => group
-            .extracted
-            .iter()
-            .find_map(|part| part.json_dir.as_deref())
-            .ok_or_else(|| RunError::NoJsonDir(inputs.source.clone()))?
-            .to_path_buf(),
-        // No part group: the export was extracted flat into the source (or the part dirs were
-        // renamed away), which is exactly the run decision 62's no-manifest arm exists for. The
-        // json dir is the source's own.
-        None => {
-            let candidate = inputs.source.join("json");
-            if candidate.is_dir() { candidate } else { return Err(RunError::NoJsonDir(inputs.source.clone())) }
-        }
-    };
-    let export = ExportJson::load_dir(&json_dir).map_err(RunError::Json)?;
-    if export.chat_history.is_none() && export.snap_history.is_none() {
-        return Err(RunError::NoHistory(inputs.source.clone()));
+    // The selection guards land before anything is read: an empty format or conversation set is
+    // the screen's state, and refusing it costs nothing. `NoFormats` first because it is
+    // independent of the export; the conversation guard needs the merged history to exist, so it
+    // sits after the filter below.
+    if inputs.formats.is_empty() {
+        return Err(RunError::NoFormats);
     }
-    // An absent file is an empty history, the same substitution `chat_run` makes for its own
-    // absent `chat_history.json`.
-    let chat = export.chat_history.unwrap_or(ChatHistory { conversations: Vec::new() });
-    let snap = export.snap_history.unwrap_or(SnapHistory { conversations: Vec::new() });
-
-    let merged = history::merge(&chat, &snap);
-    let keys: BTreeSet<ConversationId> = merged.threads.iter().map(|thread| thread.id.clone()).collect();
-    let attribution = chat_media::history_attribution(&chat);
+    let loaded = load_threads(&inputs.source)?;
+    let threads: Vec<_> = loaded.merged.threads.into_iter().filter(|thread| inputs.conversations.contains(&thread.id)).collect();
+    let keys: BTreeSet<ConversationId> = threads.iter().map(|thread| thread.id.clone()).collect();
+    if keys.is_empty() {
+        return Err(RunError::NoSelection);
+    }
+    let attribution = chat_media::history_attribution(&loaded.chat);
     let documents: BTreeMap<ConversationId, Document> =
-        merged.threads.into_iter().map(|thread| (thread.id.clone(), Document::from_thread(thread))).collect();
+        threads.into_iter().map(|thread| (thread.id.clone(), Document::from_thread(thread))).collect();
 
-    let mut manifest = match group {
-        Some(group) => {
-            // A part whose id cannot name a manifest is refused, the same call `chat_run` makes:
-            // the no-manifest arm below is for a source naming NO part group (decision 62), not
-            // for an unusable id — degrading silently here would report a clean run with
-            // placeholder links and no claim rows over a source every other leg refuses.
-            let Some(export_id) = ExportId::new(&group.id) else {
-                return Err(RunError::InvalidExportId(inputs.source.clone()));
-            };
+    let mut manifest = match loaded.export_id {
+        Some(export_id) => {
             let manifest_dir = match &inputs.manifest_dir {
                 Some(dir) => dir.clone(),
                 None => crate::export::manifest::manifest_dir().map_err(RunError::Manifest)?,
@@ -401,11 +507,18 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
         manifest.claim_directories(&claims).map_err(RunError::Manifest)?;
     }
 
-    Ok(Prepared { snapshot: PlanSnapshot { conversations: plan.entries.len() }, manifest, plan, documents })
+    Ok(Prepared {
+        snapshot: PlanSnapshot { conversations: plan.entries.len() },
+        manifest,
+        plan,
+        documents,
+        formats: inputs.formats.clone(),
+    })
 }
 
-/// The documents' half of the run: render and land every one of the plan's documents.
-fn write(prepared: &Prepared) -> Result<HistoryReport, RunError> {
+/// The documents' half of the run: render and land every selected format of every plan entry, one
+/// [`RunEvent::Written`] per conversation once its documents are on disk.
+fn write(prepared: &Prepared, events: &Sender<RunEvent>) -> Result<HistoryReport, RunError> {
     let mut links = None;
     for entry in &prepared.plan.entries {
         // Both the plan and the map are built from the same merged history in `prepare`, so a miss
@@ -415,17 +528,35 @@ fn write(prepared: &Prepared) -> Result<HistoryReport, RunError> {
         };
         fs::create_dir_all(&entry.directory).map_err(RunError::Write)?;
 
-        let json = history::write_json(document).map_err(|source| RunError::Write(io::Error::other(source)))?;
-        fs::write(&entry.documents.json, json).map_err(RunError::Write)?;
-        fs::write(&entry.documents.text, history::write_text(document)).map_err(RunError::Write)?;
-        fs::write(&entry.documents.csv, history::write_csv(document)).map_err(RunError::Write)?;
-        let Html { html, links: rendered } = history::write_html(document, prepared.manifest.as_ref()).map_err(RunError::Manifest)?;
-        fs::write(&entry.documents.html, html).map_err(RunError::Write)?;
-        links = Some(rendered);
+        if prepared.formats.contains(&HistoryFormat::Html) {
+            let Html { html, links: rendered } = history::write_html(document, prepared.manifest.as_ref()).map_err(RunError::Manifest)?;
+            fs::write(&entry.documents.html, html).map_err(RunError::Write)?;
+            links = Some(rendered);
+        }
+        if prepared.formats.contains(&HistoryFormat::Json) {
+            let json = history::write_json(document).map_err(|source| RunError::Write(io::Error::other(source)))?;
+            fs::write(&entry.documents.json, json).map_err(RunError::Write)?;
+        }
+        if prepared.formats.contains(&HistoryFormat::Text) {
+            fs::write(&entry.documents.text, history::write_text(document)).map_err(RunError::Write)?;
+        }
+        if prepared.formats.contains(&HistoryFormat::Csv) {
+            fs::write(&entry.documents.csv, history::write_csv(document)).map_err(RunError::Write)?;
+        }
+        // One advance per conversation, after its documents are on disk — the counter's unit
+        // (decision 63). A send that fails means the screen's channel is gone, and the outcome
+        // still reaches `Finished` below.
+        let _ = events.send(RunEvent::Written);
     }
     // Every document in one run shares the manifest, so every render answers the same links value.
     // With nothing to render, `write_html`'s own rule answers for the run: manifest present means
     // links resolve where a row is done.
+    let html_written = links.is_some();
     let links = links.unwrap_or(if prepared.manifest.is_some() { HtmlLinks::Manifest } else { HtmlLinks::NoManifest });
-    Ok(HistoryReport { conversations: prepared.plan.entries.len(), documents: prepared.plan.entries.len() * 4, links })
+    Ok(HistoryReport {
+        conversations: prepared.plan.entries.len(),
+        documents: prepared.plan.entries.len() * prepared.formats.len(),
+        links,
+        html_written,
+    })
 }

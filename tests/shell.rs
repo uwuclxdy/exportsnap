@@ -62,7 +62,12 @@ fn press(app: &mut App, code: KeyCode) {
     app.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
 }
 
-/// A fresh app walked to `tab`. [`on_tab_in`] carries the bound and the reason for it.
+/// A fresh app on `tab`, walked there with `→`. [`on_tab_in`] carries the bound and the reason
+/// for it.
+///
+/// The walk arrives at every tab: no screen consumes `→` at top level. The history picker
+/// descends with `enter` (`src/tui/screens/history.rs`'s picker keys), so `→` stays the shell's
+/// tab key there like everywhere else.
 fn on_tab(tab: Tab) -> App {
     let mut app = App::new(Tier::Full);
     on_tab_in(&mut app, tab);
@@ -71,7 +76,7 @@ fn on_tab(tab: Tab) -> App {
 
 /// Walks `app` to `tab` with `→`, bounded by the tab count — the twin of `tests/chat_media_screen.rs`'s `on_tab` and `tests/memories_screen.rs`'s `on_memories`.
 ///
-/// The bound is not decoration. `→` is INERT while a pane is descended: `Memories` and `ChatMedia` consume it and answer `true` (`src/tui/screens/memories.rs:431`, `src/tui/screens/chat_media.rs:472`), so the shell's own `Right` arm never runs and an unbounded walk from a descended app spins forever. That is the screen behaving correctly and the helper behaving badly, and this crate configures no nextest `terminate-after`, so the result is not a slow test but a wedged suite with no failing assertion to read. Until 2026-08-11 this helper was the unbounded `while` its two twins were written to warn about.
+/// The bound is not decoration. `→` is INERT while a pane is descended: `Memories` and `ChatMedia` consume it and answer `true` (`src/tui/screens/memories.rs:431`, `src/tui/screens/chat_media.rs:472`), and the history formats pane does the same — so the shell's own `Right` arm never runs once any pane is descended and an unbounded walk from a descended app spins forever. That is the screen behaving correctly and the helper behaving badly, and this crate configures no nextest `terminate-after`, so the result is not a slow test but a wedged suite with no failing assertion to read. Until 2026-08-11 this helper was the unbounded `while` its two twins were written to warn about.
 ///
 /// **Only one caller in this file reaches that state, and it does so on purpose.** [`on_tab`] and the tier loop in `the_panel_border_and_title_follow_the_tier_too` both build an `App::new` sitting on `Overview` with no run planned, `descended()` is `false` for all six tabs there (`src/app.rs:252`), and `Tab::next` wraps (`src/app.rs:66`), so every tab is at most five presses away and neither can trip the bound. The third caller is [`walking_off_a_descended_pane_panics_instead_of_spinning`], which descends a pane deliberately in order to trip it. Enumerate the callers before trusting that split — it has already gone stale once, when the pin below was added and this paragraph still said there were two.
 ///
@@ -134,16 +139,16 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
 
 #[test]
 fn renders_header_body_panel_and_hint_bar() {
-    // Driven on `history` rather than `overview`, `memories` or `chat media`: those three tabs own
-    // their own panels now, so the shell's placeholder panel — the thing this pins — only survives
-    // on the other three.
-    let terminal = draw(&mut on_tab(Tab::History), 52, 6);
+    // Driven on `account` rather than `overview`, `memories`, `chat media` or `history`: those
+    // four tabs own their own panels now, so the shell's placeholder panel — the thing this pins
+    // — only survives on the other two.
+    let terminal = draw(&mut on_tab(Tab::Account), 52, 6);
     assert_eq!(
         grid(terminal.backend().buffer()),
         [
-            " exportsnap  •  ‹   history   ›                     ",
+            " exportsnap  •  ‹   account   ›                     ",
             " ! terminal too small · enlarge for full layout     ",
-            "╭─ HISTORY ────────────────────────────────────────╮",
+            "╭─ ACCOUNT ────────────────────────────────────────╮",
             "│                                                  │",
             "╰──────────────────────────────────────────────────╯",
             " ←→ switch   q quit                                 ",
@@ -194,8 +199,8 @@ fn the_underline_moves_with_the_active_tab() {
 #[test]
 fn no_underline_row_sits_beneath_the_tab_bar() {
     // The active label carries the underline as a text attribute; row 1 is already the panel.
-    let terminal = draw(&mut on_tab(Tab::History), 100, 20);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ HISTORY "));
+    let terminal = draw(&mut on_tab(Tab::Account), 100, 20);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ ACCOUNT "));
 }
 
 // ---- header: right-edge suppression (skill: App shell → right-edge suppression priority) ----
@@ -273,11 +278,11 @@ fn every_active_label_renders_whole_at_the_floor() {
 fn the_banner_takes_the_header_row_one_cell_below_the_floor() {
     // A clipped active label would name the wrong tab, so the row says the terminal is too
     // small instead. The body is untouched — the panel still owns row 1.
-    let terminal = draw(&mut on_tab(Tab::History), 29, 20);
+    let terminal = draw(&mut on_tab(Tab::Account), 29, 20);
     let buffer = terminal.backend().buffer();
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
-    assert!(row(buffer, 1).starts_with("╭─ HISTORY "), "{:?}", row(buffer, 1));
+    assert!(row(buffer, 1).starts_with("╭─ ACCOUNT "), "{:?}", row(buffer, 1));
 }
 
 #[test]
@@ -299,7 +304,7 @@ fn the_header_banner_tints_its_whole_row() {
 fn a_frame_under_both_floors_carries_exactly_one_banner() {
     // Width below the header floor and height below the compact floor at once. The header row
     // is the one already lost, so it says it, and the body keeps every row it has.
-    let terminal = draw(&mut on_tab(Tab::History), 29, 13);
+    let terminal = draw(&mut on_tab(Tab::Account), 29, 13);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
@@ -308,7 +313,7 @@ fn a_frame_under_both_floors_carries_exactly_one_banner() {
     assert_eq!(washed, [0], "rows carrying the banner wash");
 
     assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
-    assert!(row(buffer, 1).starts_with("╭─ HISTORY "), "{:?}", row(buffer, 1));
+    assert!(row(buffer, 1).starts_with("╭─ ACCOUNT "), "{:?}", row(buffer, 1));
 }
 
 #[test]
@@ -336,13 +341,13 @@ fn overflow_markers_are_text_faint() {
 
 #[test]
 fn the_panel_title_names_the_active_tab_in_uppercase() {
-    // `overview`, `memories` and `chat media` are absent on purpose: those three own real screens
-    // now, and their own panel titles are pinned in `tests/overview.rs`, `tests/memories_screen.rs`
-    // and `tests/chat_media_screen.rs`. The three below are still the shell's placeholder panel,
-    // which is the thing that names itself after its tab — and this list shrinks by one every time
-    // a screen lands, so it is worth checking it still matches the `match` in `shell::render`.
-    for (tab, title) in [(Tab::History, "╭─ HISTORY ─"), (Tab::Account, "╭─ ACCOUNT ─"), (Tab::Settings, "╭─ SETTINGS ─")]
-    {
+    // `overview`, `memories`, `chat media` and `history` are absent on purpose: those four own
+    // real screens now, and their own panel titles are pinned in `tests/overview.rs`,
+    // `tests/memories_screen.rs`, `tests/chat_media_screen.rs` and `tests/history_screen.rs`. The
+    // two below are still the shell's placeholder panel, which is the thing that names itself
+    // after its tab — and this list shrinks by one every time a screen lands, so it is worth
+    // checking it still matches the `match` in `shell::render`.
+    for (tab, title) in [(Tab::Account, "╭─ ACCOUNT ─"), (Tab::Settings, "╭─ SETTINGS ─")] {
         let terminal = draw(&mut on_tab(tab), 60, 20);
         assert!(row(terminal.backend().buffer(), 1).starts_with(title), "{tab:?} should render {title}");
     }
@@ -350,12 +355,12 @@ fn the_panel_title_names_the_active_tab_in_uppercase() {
 
 #[test]
 fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
-    let terminal = draw(&mut on_tab(Tab::History), 60, 20);
+    let terminal = draw(&mut on_tab(Tab::Account), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
     let title = buffer[(PANEL_TITLE_COLUMN + 1, 1)].style();
-    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "H");
+    assert_eq!(buffer[(PANEL_TITLE_COLUMN + 1, 1)].symbol(), "A");
     assert_eq!(title.fg, Some(palette.accent_2));
     assert!(title.add_modifier.contains(Modifier::BOLD));
     assert!(title.add_modifier.contains(Modifier::ITALIC));
@@ -367,15 +372,16 @@ fn the_sole_panel_title_is_accent_2_bold_italic_on_a_line_strong_border() {
 
 #[test]
 fn the_title_style_never_bleeds_into_the_border_break_dashes() {
-    // Chrome owns every `─` cell: the dash before ` HISTORY ` and the first one after it both carry
-    // the border token, with no title color, bold or italic on them. The title occupies its own 9
-    // cells from [`PANEL_TITLE_COLUMN`], so the trailing dash is the cell right after them — derived
-    // from the label rather than written down, since the tab this runs on has moved once already.
-    let terminal = draw(&mut on_tab(Tab::History), 60, 20);
+    // Chrome owns every `─` cell: the dash before ` ACCOUNT ` and the first one after it both
+    // carry the border token, with no title color, bold or italic on them. The title occupies its
+    // own 9 cells from [`PANEL_TITLE_COLUMN`], so the trailing dash is the cell right after them
+    // — derived from the label rather than written down, since the tab this runs on has moved
+    // twice already.
+    let terminal = draw(&mut on_tab(Tab::Account), 60, 20);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
-    let title_cells = u16::try_from(Tab::History.label().chars().count()).unwrap() + 2;
+    let title_cells = u16::try_from(Tab::Account.label().chars().count()).unwrap() + 2;
     for x in [PANEL_TITLE_COLUMN - 1, PANEL_TITLE_COLUMN + title_cells] {
         let cell = &buffer[(x, 1)];
         assert_eq!(cell.symbol(), "─", "column {x}");
@@ -450,8 +456,8 @@ fn the_compact_banner_appears_below_fourteen_rows() {
 
 #[test]
 fn the_compact_banner_is_gone_at_fourteen_rows() {
-    let terminal = draw(&mut on_tab(Tab::History), 60, 14);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ HISTORY "));
+    let terminal = draw(&mut on_tab(Tab::Account), 60, 14);
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ ACCOUNT "));
 }
 
 #[test]

@@ -12,6 +12,7 @@ use crate::export::env::{Environment, Tool, locate, probe_target};
 use crate::export::local_fix::default_out_root;
 use crate::tui::alert::RunAlert;
 use crate::tui::screens::chat_media::ChatMedia;
+use crate::tui::screens::history::History;
 use crate::tui::screens::memories::Memories;
 use crate::tui::screens::overview::Overview;
 use crate::tui::shell;
@@ -89,7 +90,7 @@ impl Tab {
 /// Top-level app state: which screen is active, whether the 2-step quit is armed, and whether
 /// the event loop should keep running.
 ///
-/// # Two screens now drive runs, and every branch that used to name the memories one was decided
+/// # Three screens now drive runs, and every branch that used to name the memories one was decided
 /// per consumer
 ///
 /// - **The footer alert belongs to the ACTIVE screen** ([`Self::alert`]). A footer row is screen
@@ -104,8 +105,8 @@ impl Tab {
 /// - **`q`, the key routing and the `⌥` jump's implicit ascend all address the active screen**
 ///   ([`Self::descended`], [`Self::ascend_active`]). Ascending a screen the user is not on would
 ///   silently reset a pane they left descended.
-/// - **The tick drives BOTH screens** ([`Self::tick`]), because a run keeps running when its tab is
-///   not in view and its manifest poll has to keep up with it.
+/// - **The tick drives all three screens** ([`Self::tick`]), because a run keeps running when its
+///   tab is not in view and its poll has to keep up with it.
 #[derive(Debug)]
 pub struct App {
     palette: Palette,
@@ -115,6 +116,7 @@ pub struct App {
     overview: Overview,
     memories: Memories,
     chat_media: ChatMedia,
+    history: History,
 }
 
 impl App {
@@ -135,6 +137,7 @@ impl App {
             overview: Overview::unloaded(),
             memories: Memories::with_environment(PathBuf::new(), None, Environment::default()),
             chat_media: ChatMedia::with_environment(PathBuf::new(), None, Environment::default()),
+            history: History::with_environment(PathBuf::new(), None),
         }
     }
 
@@ -176,17 +179,18 @@ impl App {
         self
     }
 
-    /// Hands both media screens their run context: the source dir, the output root — `--out`'s
+    /// Hands the run screens their run context: the source dir, the output root — `--out`'s
     /// value or the default — and the machine probe [`Self::start`] already made.
     ///
-    /// One call rather than one per screen: the two legs read one export and write under one output
+    /// One call rather than one per screen: the legs read one export and write under one output
     /// root, so a caller handing them different sources would be describing a state that cannot
     /// arise from the command line. It is also the seam a render test uses to pin the disk-free
     /// rows without reaching for the real filesystem.
     #[must_use]
     pub fn with_source_environment(mut self, source: PathBuf, out_root: Option<PathBuf>, environment: Environment) -> Self {
         self.memories = Memories::with_environment(source.clone(), out_root.clone(), environment.clone());
-        self.chat_media = ChatMedia::with_environment(source, out_root, environment);
+        self.chat_media = ChatMedia::with_environment(source.clone(), out_root.clone(), environment);
+        self.history = History::with_environment(source, out_root);
         self
     }
 
@@ -201,15 +205,20 @@ impl App {
         self.chat_media.with_channel(receiver);
     }
 
+    /// [`Self::with_memories_channel`] for the history screen.
+    pub fn with_history_channel(&mut self, receiver: std::sync::mpsc::Receiver<crate::export::history_run::RunEvent>) {
+        self.history.with_channel(receiver);
+    }
+
     /// What `--print-source` prints: every screen's own view of the dir this app was launched
     /// against, as `key=value` lines, `\n`-terminated. Machine-first — the flag exists to be read by
     /// something other than a human, so no alignment, no glyphs, no color.
     ///
-    /// **Assembled from all three screens, not from one.** [`Self::start`] hands the source to the
-    /// overview's read, to the space probe, and to both media screens, and those are four separate
-    /// deliveries of one argument. A report observing only the overview left the other three able to
-    /// take `PathBuf::new()` with the whole suite green — measured 2026-08-11, and it is why the keys
-    /// below are per-screen rather than one `source=`.
+    /// **Assembled from all four screens, not from one.** [`Self::start`] hands the source to the
+    /// overview's read, to the space probe, and to the three run screens, and those are five
+    /// separate deliveries of one argument. A report observing only the overview left the other
+    /// three able to take `PathBuf::new()` with the whole suite green — measured 2026-08-11, and it
+    /// is why the keys below are per-screen rather than one `source=`.
     ///
     /// **Every path value is quoted and escaped** ([`std::path::Path`]'s `Debug`), because a path is
     /// user-supplied bytes going into a line-oriented format: a source dir whose name contains a
@@ -228,8 +237,9 @@ impl App {
     pub fn source_report(&self) -> String {
         let (memories_source, memories_out) = self.memories.run_paths();
         let (chat_source, chat_out) = self.chat_media.run_paths();
+        let (history_source, history_out) = self.history.run_paths();
         format!(
-            "{}memories-source={memories_source:?}\nmemories-out={memories_out:?}\nchat-source={chat_source:?}\nchat-out={chat_out:?}\n",
+            "{}memories-source={memories_source:?}\nmemories-out={memories_out:?}\nchat-source={chat_source:?}\nchat-out={chat_out:?}\nhistory-source={history_source:?}\nhistory-out={history_out:?}\n",
             self.overview.report()
         )
     }
@@ -265,6 +275,16 @@ impl App {
         &mut self.chat_media
     }
 
+    #[must_use]
+    pub const fn history(&self) -> &History {
+        &self.history
+    }
+
+    /// The history screen's mutable half, for the same two reasons as [`Self::memories_mut`].
+    pub fn history_mut(&mut self) -> &mut History {
+        &mut self.history
+    }
+
     /// The alert the footer row is showing this frame: the ACTIVE screen's, or none.
     ///
     /// The single source for both the footer and the `x` key, so the row and the dismissal can never
@@ -275,7 +295,8 @@ impl App {
         match self.active {
             Tab::Memories => self.memories.alert(),
             Tab::ChatMedia => self.chat_media.alert(),
-            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => None,
+            Tab::History => self.history.alert(),
+            Tab::Overview | Tab::Account | Tab::Settings => None,
         }
     }
 
@@ -286,7 +307,8 @@ impl App {
         match self.active {
             Tab::Memories => self.memories.descended(),
             Tab::ChatMedia => self.chat_media.descended(),
-            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => false,
+            Tab::History => self.history.descended(),
+            Tab::Overview | Tab::Account | Tab::Settings => false,
         }
     }
 
@@ -298,7 +320,8 @@ impl App {
         match self.active {
             Tab::Memories => self.memories.ascend(),
             Tab::ChatMedia => self.chat_media.ascend(),
-            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => {}
+            Tab::History => self.history.ascend(),
+            Tab::Overview | Tab::Account | Tab::Settings => {}
         }
     }
 
@@ -308,7 +331,8 @@ impl App {
         match self.active {
             Tab::Memories => self.memories.dismiss_alert(),
             Tab::ChatMedia => self.chat_media.dismiss_alert(),
-            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => false,
+            Tab::History => self.history.dismiss_alert(),
+            Tab::Overview | Tab::Account | Tab::Settings => false,
         }
     }
 
@@ -329,7 +353,7 @@ impl App {
 
     /// Draws, waits for an event, applies it, ticks, repeats.
     ///
-    /// While EITHER screen's run is live the wait is capped at one tick (80 ms), so the spinner
+    /// While ANY screen's run is live the wait is capped at one tick (80 ms), so the spinner
     /// animates and the per-item poll refreshes without input; with no run live there is nothing
     /// to animate, and the loop blocks on input instead of redrawing an identical frame every
     /// 80 ms forever. The gate is a disjunction rather than "the active screen's run" because a run
@@ -345,7 +369,7 @@ impl App {
                 let app = &mut *self;
                 terminal.draw(|frame| shell::render(frame, app))?;
             }
-            if self.memories.run_in_flight() || self.chat_media.run_in_flight() {
+            if self.memories.run_in_flight() || self.chat_media.run_in_flight() || self.history.run_in_flight() {
                 if event::poll(TICK)? {
                     self.handle_event(&event::read()?);
                 }
@@ -358,10 +382,12 @@ impl App {
     }
 
     /// One timer tick: pump each run's channel, poll its statuses, advance its spinner. A screen
-    /// with no run in flight returns immediately, so ticking both costs nothing when one is idle.
+    /// with no run in flight returns immediately, so ticking all three costs nothing when one is
+    /// idle.
     pub fn tick(&mut self) {
         self.memories.tick();
         self.chat_media.tick();
+        self.history.tick();
     }
 
     /// Applies one terminal event. Resizes need no state change — the next draw reads the new
@@ -434,7 +460,8 @@ impl App {
         let consumed = match self.active {
             Tab::Memories => self.memories.handle_key(key),
             Tab::ChatMedia => self.chat_media.handle_key(key),
-            Tab::Overview | Tab::History | Tab::Account | Tab::Settings => false,
+            Tab::History => self.history.handle_key(key),
+            Tab::Overview | Tab::Account | Tab::Settings => false,
         };
         if consumed {
             return;

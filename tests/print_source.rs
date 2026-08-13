@@ -9,8 +9,8 @@
 //! `Command::output()`, the same shape `tests/attribution.rs` uses for `--version`: no pty, no new
 //! dependency.
 //!
-//! **One argument, four deliveries, and the report observes all of them.** `App::start` hands the
-//! source to the overview's read of the dir, to the `statvfs` probe, and to each of the two media
+//! **One argument, five deliveries, and the report observes all of them.** `App::start` hands the
+//! source to the overview's read of the dir, to the `statvfs` probe, and to each of the three run
 //! screens. A first cut of this file watched only the overview, and the other three then survived
 //! `PathBuf::new()` with all 694 tests green. The keys are per-screen for that reason.
 //!
@@ -103,7 +103,21 @@ fn the_launched_binary_reports_the_export_in_the_source_dir_it_was_given() {
     // makes any more.
     assert_eq!(
         keys(&fields),
-        ["source", "parts", "zips", "unpacked", "missing", "free", "total", "memories-source", "memories-out", "chat-source", "chat-out"]
+        [
+            "source",
+            "parts",
+            "zips",
+            "unpacked",
+            "missing",
+            "free",
+            "total",
+            "memories-source",
+            "memories-out",
+            "chat-source",
+            "chat-out",
+            "history-source",
+            "history-out"
+        ]
     );
     assert_eq!(value(&fields, "source"), quoted(source));
     assert_eq!(value(&fields, "parts"), "one");
@@ -111,12 +125,14 @@ fn the_launched_binary_reports_the_export_in_the_source_dir_it_was_given() {
     assert_eq!(value(&fields, "unpacked"), "1");
     assert_eq!(value(&fields, "missing"), "2");
 
-    // The two media screens read the export and write files, so each carries its own copy of the
+    // The three run screens read the export and write files, so each carries its own copy of the
     // argument and each is observed. One can be blanked without the other.
     assert_eq!(value(&fields, "memories-source"), quoted(source));
     assert_eq!(value(&fields, "chat-source"), quoted(source));
+    assert_eq!(value(&fields, "history-source"), quoted(source));
     assert_eq!(value(&fields, "memories-out"), quoted(&source.join(OUT_DIR)));
     assert_eq!(value(&fields, "chat-out"), quoted(&source.join(OUT_DIR)));
+    assert_eq!(value(&fields, "history-out"), quoted(&source.join(OUT_DIR)));
 
     // The probe is measured on the source's own filesystem, so its figures are the fourth delivery
     // of the argument. A blanked probe path measures nothing and drops both keys, which the key-set
@@ -149,6 +165,7 @@ fn the_out_root_the_binary_was_given_reaches_both_media_screens() {
 
     assert_eq!(value(&fields, "memories-out"), quoted(&out));
     assert_eq!(value(&fields, "chat-out"), quoted(&out));
+    assert_eq!(value(&fields, "history-out"), quoted(&out));
     // `--out` moves where the run writes and nothing else; the source keys must not follow it.
     assert_eq!(value(&fields, "memories-source"), quoted(dir.path()));
 }
@@ -171,7 +188,10 @@ fn a_hostile_source_path_cannot_forge_a_key() {
     // `value` already refuses a duplicate key, so this is the forgery caught from the other side:
     // the injected `parts=one` must not exist at all, and the real verdict must be the only one.
     assert_eq!(value(&fields, "parts"), "missing");
-    assert_eq!(keys(&fields), ["source", "parts", "memories-source", "memories-out", "chat-source", "chat-out"]);
+    assert_eq!(
+        keys(&fields),
+        ["source", "parts", "memories-source", "memories-out", "chat-source", "chat-out", "history-source", "history-out"]
+    );
 
     // Spelled out rather than derived, so a toolchain that moves any of these four escapes reds here
     // instead of shipping a changed output format. Each pair below is two characters in the value.
@@ -222,7 +242,19 @@ fn several_deliveries_in_one_dir_report_how_many_rather_than_picking_one() {
     assert_eq!(value(&fields, "exports"), "3");
     assert_eq!(
         keys(&fields),
-        ["source", "parts", "exports", "free", "total", "memories-source", "memories-out", "chat-source", "chat-out"]
+        [
+            "source",
+            "parts",
+            "exports",
+            "free",
+            "total",
+            "memories-source",
+            "memories-out",
+            "chat-source",
+            "chat-out",
+            "history-source",
+            "history-out"
+        ]
     );
 }
 
@@ -240,7 +272,10 @@ fn a_source_dir_that_is_not_there_is_reported_rather_than_refused() {
     assert_eq!(value(&fields, "source"), quoted(&source));
     // Nothing was counted and nothing was measured, so neither the part numbers nor the space
     // figures appear. A `zips=0` here would be a confident wrong answer.
-    assert_eq!(keys(&fields), ["source", "parts", "memories-source", "memories-out", "chat-source", "chat-out"]);
+    assert_eq!(
+        keys(&fields),
+        ["source", "parts", "memories-source", "memories-out", "chat-source", "chat-out", "history-source", "history-out"]
+    );
 }
 
 #[test]
@@ -251,7 +286,10 @@ fn an_empty_source_dir_reports_no_export_rather_than_a_missing_one() {
 
     assert_eq!(value(&fields, "parts"), "none");
     // The dir is there, so unlike the case above the filesystem does measure.
-    assert_eq!(keys(&fields), ["source", "parts", "free", "total", "memories-source", "memories-out", "chat-source", "chat-out"]);
+    assert_eq!(
+        keys(&fields),
+        ["source", "parts", "free", "total", "memories-source", "memories-out", "chat-source", "chat-out", "history-source", "history-out"]
+    );
 }
 
 #[test]

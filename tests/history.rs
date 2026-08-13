@@ -18,7 +18,7 @@ use exportsnap::export::ExportJson;
 use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs};
 use exportsnap::export::chat_media::{self, ChatMedia, ChatMediaFile, ChatMediaItem, Join, Message, MessageRef, Reconciliation};
 use exportsnap::export::history::{Document, HtmlLinks, Record, RecordKind, merge, write_csv, write_html, write_json, write_text};
-use exportsnap::export::history_run::{self, HistoryReport, RunEvent, RunInputs, RunOutcome};
+use exportsnap::export::history_run::{self, HistoryFormat, HistoryReport, RunEvent, RunInputs, RunOutcome};
 use exportsnap::export::manifest::{DirectoryClaim, ExportId, ItemKind, Manifest, NewItem, ResumeReport};
 use exportsnap::export::model::{ChatHistory, ConversationId, MessageText, SnapHistory};
 use exportsnap::export::schema;
@@ -686,10 +686,24 @@ fn flat_tree(conversations: &[(&str, &[(&str, &str)])]) -> TempDir {
     dir
 }
 
+/// A run input selecting every conversation and every format — what the screen ships when the
+/// user changes nothing. The conversation set comes from the run's own load, so a fixture needs
+/// no second spelling of its key list.
+fn full_inputs(source: &Path, out_root: &Path, state: &Path) -> RunInputs {
+    let loaded = history_run::load_threads(source).expect("the fixture export loads");
+    let conversations: BTreeSet<ConversationId> = loaded.merged.threads.iter().map(|thread| thread.id.clone()).collect();
+    RunInputs {
+        source: source.to_path_buf(),
+        out_root: out_root.to_path_buf(),
+        manifest_dir: Some(state.to_path_buf()),
+        conversations,
+        formats: BTreeSet::from(HistoryFormat::ALL),
+    }
+}
+
 fn inputs(dir: &TempDir) -> (RunInputs, TempDir) {
     let state = TempDir::new().unwrap();
-    let inputs =
-        RunInputs { source: dir.path().to_path_buf(), out_root: dir.path().join("out"), manifest_dir: Some(state.path().to_path_buf()) };
+    let inputs = full_inputs(dir.path(), &dir.path().join("out"), state.path());
     (inputs, state)
 }
 
@@ -704,6 +718,7 @@ fn finished(events: &[RunEvent]) -> &RunOutcome {
     match events.last().unwrap() {
         RunEvent::Finished(outcome) => outcome,
         RunEvent::Planned(_) => panic!("no Finished event"),
+        RunEvent::Written => panic!("no Finished event"),
     }
 }
 
@@ -935,7 +950,16 @@ fn a_snap_only_conversation_lands_its_documents_too() {
 fn a_run_over_an_export_holding_neither_history_file_fails_by_name() {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join(format!("mydata~{EXPORT_ID}/json"))).unwrap();
-    let (inputs, _state) = inputs(&dir);
+    // This fixture deliberately does not load, so the selection cannot be derived from it — the
+    // run's own load fails before the empty-selection guard, which is the error this test names.
+    let state = TempDir::new().unwrap();
+    let inputs = RunInputs {
+        source: dir.path().to_path_buf(),
+        out_root: dir.path().join("out"),
+        manifest_dir: Some(state.path().to_path_buf()),
+        conversations: BTreeSet::new(),
+        formats: BTreeSet::from(HistoryFormat::ALL),
+    };
     let events = collect(&inputs);
     match finished(&events) {
         RunOutcome::Failed(history_run::RunError::NoHistory(_)) => {}
@@ -950,13 +974,125 @@ fn a_run_over_an_export_holding_neither_history_file_fails_by_name() {
 fn a_part_whose_id_cannot_name_a_manifest_is_refused_not_silently_degraded() {
     let dir = TempDir::new().unwrap();
     write_chat_history(&dir.path().join("mydata~bad..id/json"), &[("k", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
-    let (inputs, state) = inputs(&dir);
+    // This fixture deliberately does not load, so the selection cannot be derived from it — the
+    // run's own load fails before the empty-selection guard, which is the error this test names.
+    let state = TempDir::new().unwrap();
+    let inputs = RunInputs {
+        source: dir.path().to_path_buf(),
+        out_root: dir.path().join("out"),
+        manifest_dir: Some(state.path().to_path_buf()),
+        conversations: BTreeSet::new(),
+        formats: BTreeSet::from(HistoryFormat::ALL),
+    };
     let events = collect(&inputs);
     match finished(&events) {
         RunOutcome::Failed(history_run::RunError::InvalidExportId(_)) => {}
         other => panic!("expected the invalid-id refusal, got {other:?}"),
     }
     assert!(!state_touched(&state), "nothing to claim into, nothing enrolled");
+}
+
+// ---- the run's own selection guards (decision 59, held against a caller bypassing the screen) ----
+
+/// The screen's empty-selection refusal is held again here, run-side: an empty conversation set
+/// over a LOADABLE export must refuse with the named error rather than run as "everything" — the
+/// screen's load defaults the selection to every conversation, so an empty set is a deliberate
+/// deselect the run cannot mistake for "nothing chosen yet". This is the test the [`RunInputs`]
+/// `conversations` doc's "held again here so a caller cannot bypass the screen" points at.
+#[test]
+fn a_run_over_a_loadable_export_refuses_an_empty_conversation_selection() {
+    let dir = export_tree(&[("alice", &[("2021-03-04 09:00:00 UTC", "b~tokA")]), ("bob", &[("2021-03-04 10:00:00 UTC", "b~tokB")])]);
+    let state = TempDir::new().unwrap();
+    let inputs = RunInputs {
+        source: dir.path().to_path_buf(),
+        out_root: dir.path().join("out"),
+        manifest_dir: Some(state.path().to_path_buf()),
+        conversations: BTreeSet::new(),
+        formats: BTreeSet::from(HistoryFormat::ALL),
+    };
+    let events = collect(&inputs);
+    match finished(&events) {
+        RunOutcome::Failed(history_run::RunError::NoSelection) => {}
+        other => panic!("expected the empty-selection refusal, got {other:?}"),
+    }
+    assert!(!state_touched(&state), "nothing to claim into, nothing enrolled");
+}
+
+/// An empty format set refuses BEFORE anything is read — the guard's position is its contract: it
+/// is independent of the export, so even a source that cannot load refuses with the format reason
+/// rather than the load's. Removing the guard's position (moving it after the load) reds this: a
+/// source with no history files would then answer `NoHistory` first.
+#[test]
+fn a_run_refuses_an_empty_format_selection_before_reading_the_export() {
+    let dir = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let inputs = RunInputs {
+        source: dir.path().to_path_buf(),
+        out_root: dir.path().join("out"),
+        manifest_dir: Some(state.path().to_path_buf()),
+        conversations: BTreeSet::new(),
+        formats: BTreeSet::new(),
+    };
+    let events = collect(&inputs);
+    match finished(&events) {
+        RunOutcome::Failed(history_run::RunError::NoFormats) => {}
+        other => panic!("expected the empty-format refusal, got {other:?}"),
+    }
+    assert!(!state_touched(&state), "nothing to claim into, nothing enrolled");
+}
+
+/// The conversation filter's slice of the run: a partial selection writes exactly the selected
+/// conversations in exactly the selected formats, and the unselected conversation's directory is
+/// never created. Removing the filter in `history_run`'s `prepare` reds this — the run then
+/// writes everything, which is the refusal's own bug.
+#[test]
+fn a_run_writes_only_the_selected_conversations_and_formats() {
+    let dir = export_tree(&[("alice", &[("2021-03-04 09:00:00 UTC", "b~tokA")]), ("bob", &[("2021-03-04 10:00:00 UTC", "b~tokB")])]);
+    let state = TempDir::new().unwrap();
+    let loaded = history_run::load_threads(dir.path()).expect("the fixture export loads");
+    let alice: ConversationId = loaded.merged.threads.iter().find(|thread| thread.id.as_str() == "alice").expect("alice loads").id.clone();
+    let inputs = RunInputs {
+        source: dir.path().to_path_buf(),
+        out_root: dir.path().join("out"),
+        manifest_dir: Some(state.path().to_path_buf()),
+        conversations: BTreeSet::from([alice]),
+        formats: BTreeSet::from([HistoryFormat::Json, HistoryFormat::Csv]),
+    };
+    let events = collect(&inputs);
+    let outcome = report(finished(&events));
+    assert_eq!(outcome.conversations, 1);
+    assert_eq!(outcome.documents, 2, "one conversation times the two selected formats");
+
+    assert!(dir.path().join("out/chat/alice/history.json").is_file());
+    assert!(dir.path().join("out/chat/alice/history.csv").is_file());
+    assert!(!dir.path().join("out/chat/alice/history.html").exists(), "an unselected format is not written");
+    assert!(!dir.path().join("out/chat/alice/history.txt").exists());
+    assert!(!dir.path().join("out/chat/bob").exists(), "the unselected conversation's directory is never created");
+}
+
+/// The report names whether html was actually written: a run over a no-manifest source with html
+/// NOT selected has no links at all — [`HistoryReport::html_written`] is the run half of the
+/// alert's "media links are placeholders" clause, which must not arm over a silence.
+#[test]
+fn a_run_without_html_reports_that_no_html_was_written() {
+    let dir = flat_tree(&[("k", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let state = TempDir::new().unwrap();
+    let loaded = history_run::load_threads(dir.path()).expect("the fixture export loads");
+    let conversations: BTreeSet<ConversationId> = loaded.merged.threads.iter().map(|thread| thread.id.clone()).collect();
+    let inputs = RunInputs {
+        source: dir.path().to_path_buf(),
+        out_root: dir.path().join("out"),
+        manifest_dir: Some(state.path().to_path_buf()),
+        conversations,
+        formats: BTreeSet::from([HistoryFormat::Json]),
+    };
+    let events = collect(&inputs);
+    let outcome = report(finished(&events));
+    assert_eq!(outcome.links, HtmlLinks::NoManifest);
+    assert!(!outcome.html_written, "html was never written");
+    assert_eq!(outcome.documents, 1);
+    assert!(dir.path().join("out/chat/k/history.json").is_file());
+    assert!(!dir.path().join("out/chat/k/history.html").exists());
 }
 
 /// The attribution map the run derives from `chat_history.json` alone holds exactly the tokens the
@@ -995,7 +1131,7 @@ fn a_run_over_the_real_export_lands_four_documents_per_conversation() {
     };
     let state = TempDir::new().unwrap();
     let out = TempDir::new().unwrap();
-    let inputs = RunInputs { source: root.clone(), out_root: out.path().to_path_buf(), manifest_dir: Some(state.path().to_path_buf()) };
+    let inputs = full_inputs(&root, out.path(), state.path());
     let events = collect(&inputs);
     let outcome = report(finished(&events));
     assert_eq!(outcome.links, HtmlLinks::Manifest, "the fixture's part id names a manifest");

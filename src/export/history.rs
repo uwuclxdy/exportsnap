@@ -224,6 +224,16 @@ pub struct MergedHistory {
     pub threads: Vec<Thread>,
 }
 
+/// The conversation's display name (decision 64): the first record that carries one, else none.
+///
+/// A title is written per message, so a renamed group carries two under one key; the first in the
+/// merged order wins, which makes the choice a fact about the render stream rather than a lookup.
+/// The screen's picker row and the html writer's `<title>` share this one spelling of the rule.
+#[must_use]
+pub fn conversation_title(records: &[Record]) -> Option<&str> {
+    records.iter().find_map(Record::conversation_title)
+}
+
 /// Unions the two histories into one per-conversation timeline (decision 61).
 ///
 /// A conversation key present in only one source keeps that source's records, sorted by the
@@ -505,12 +515,10 @@ pub fn write_html(document: &Document, manifest: Option<&Manifest>) -> Result<Ht
     Ok(Html { html, links: if manifest.is_some() { HtmlLinks::Manifest } else { HtmlLinks::NoManifest } })
 }
 
-/// The document's `<title>`: the conversation title where any record carries one, else the key.
-///
-/// A title is written per message, so a renamed group carries two under one key; the first in the
-/// merged order wins, which makes the choice a fact about the render stream rather than a lookup.
+/// The document's `<title>`: the conversation title where any record carries one, else the key
+/// (decision 64, through the shared [`conversation_title`]).
 fn document_title(document: &Document) -> String {
-    document.records.iter().find_map(Record::conversation_title).map(ToOwned::to_owned).unwrap_or_else(|| document.key.as_str().to_owned())
+    conversation_title(&document.records).map(ToOwned::to_owned).unwrap_or_else(|| document.key.as_str().to_owned())
 }
 
 /// One record as an `<article>`, the html analogue of [`text_block`]: the header line both render,

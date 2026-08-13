@@ -1,0 +1,47 @@
+[
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*overview",
+    "send": "\u001b[C",
+    "timeout": 15,
+    "note": "first frame rendered and overview is the active tab; then right arrow. ESCAPE SPELLING: these strings hold the JSON escape \u001b (one backslash), which parses to the real ESC byte; pexpect sends it raw, and Python re matches the raw byte too, so the same spelling serves expects and sends. A double backslash would parse to the SIX-CHARACTER TEXT \u001b: re still converts it in a pattern, but a send would write the literal text and the app would never see the arrow. HARD SIZE FLOOR: width >= 79 and height >= 2 (the same floor as app-shell.json): below width 79 the tab strip collapses to the overflow form and the active-label expects below chop and time out; the history screen's own side-by-side layout needs width >= 64, which the floor implies. Run at 120x30 for headroom. LOADABLE EXPORT REQUIRED: the driver must start the app in a fresh tempdir holding a synthesized `mydata~1784667002819/json/chat_history.json` (two conversations, one titled). The t step's whole evidence is the disabled chip at the end: the picker must have LOADED (the load defaults the selection to every conversation), and the t must have deselected it. From a dir with no export the picker holds the load's refusal, the selection is empty anyway, and the tooltip would render without any t having been pressed. STALE-FRAME TRAP: every expect matches the OLDEST unconsumed bytes in the driver's buffer, so a pattern drawn several frames back matches instantly even while the app has moved on; the steps below expect fresh evidence (a hint bar or tooltip only the keypress in question draws) wherever a step's SEND depends on the app's state."
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*memories",
+    "send": "\u001b[C",
+    "note": "right arrow advanced one tab; arrow again"
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*chat media",
+    "send": "\u001b[C",
+    "note": "right arrow advanced one tab; arrow again - this arrow draws the history frame, which the next step's expect reads"
+  },
+  {
+    "expect": "\u001b\\[(?:(?!38|48|58)[0-9]{1,2};)*4(?:;[0-9;]*)?m(?:\u001b\\[[0-9;:]*m)*history",
+    "send": "t",
+    "delay": 0.3,
+    "note": "the history tab is active: the previous step's arrow drew this frame, and its header label carries the underline. NO arrow here - an arrow would move the app to account before the t arrives. `t` is toggle-all, the contract's hotkey-algorithm letter for 'toggle all' after `a` is reserved for the action menu (the user ruling): it deselects every conversation in one press. The next step's expect reads this keypress's own frame - the only fresh evidence the t can have, because the deselected checkbox cells re-emit as plain `[ ]` (text_dim) with no distinctive word in them."
+  },
+  {
+    "expect": "\u001b\\[[0-9;]*38;5;102[0-9;]*m(?:\u001b\\[[0-9;:]*m| )*export",
+    "send": "\r",
+    "delay": 0.3,
+    "note": "the disabled chip's re-emitted cells are the t frame's fresh evidence: the selection is now empty, so the chip renders faint (xterm-256 102, the compatible tier the driver's `env -u COLORTERM` selects) where it rendered accent before. The load-bearing claim is the FULL pattern, faint chip through 'export': 38;5;102 alone also renders on other tabs (overview placeholders, chat-media labels), and the replay verified the full pattern absent from every pre-t frame, so only the t frame can match. Then enter descends into the formats pane - the master-detail split, roles swapped."
+  },
+  {
+    "expect": "back",
+    "send": "\u001b[B\u001b[B\u001b[B\u001b[B",
+    "delay": 0.3,
+    "note": "the descended hint bar ('up/down move', 'left back', 'esc back', 'q back') is the enter's fresh evidence: it is drawn only by the enter's redraw, and the stale buffer holds only the top-level 'switch' form. Then four downs park the caret on the export chip. The selection is empty, so the chip is disabled - and it stayed disabled through the descent, which is what the next step reads."
+  },
+  {
+    "expect": "pick at least one conversation",
+    "send": "qq",
+    "delay": 0.3,
+    "note": "the refusal is CONTENT, not style: the disabled chip's tooltip spells the fix in words, and it appears exactly while the chip holds focus - and it is the t step's end-to-end evidence: had t not deselected everything, the chip would still be enabled and this row would never render. The empty selection must never run as 'everything'. TWO q's, because the first q is the back key while descended - it ascends and deliberately does NOT arm the quit (the hint bar says 'q back'), and only a top-level q arms. The second q lands at top level, so the next redraw's footer shows the alert. The two-q sequence is not the disarming's PROOF: `q_ascends_from_the_formats_pane_without_arming_the_quit` carries that, because the sequence would pass even under a descended-q-arms regression (the first q's arming lands in the stream, and the tooltip text already arrived with the fourth down's redraw). This step exercises the sequence; the unit pin proves it."
+  },
+  {
+    "expect": " ! (?:\u001b\\[[0-9;:]*m)+press q again to quit",
+    "send": "q",
+    "note": "the hint bar is replaced in place by the footer alert: marker glyph, then a separate SGR, then the copy. The third q exits - the first two q's are the pair `q_ascends_from_the_formats_pane_without_arming_the_quit` pins, and this one is the top-level q that arms and quits. HOW TO GATE THIS RUN: require the printed final line to be exactly EXIT:0 AND stderr to contain no '[step N] TIMEOUT'. Do NOT gate on tui-drive.py's own process exit code - it returns `child.exitstatus or 0`, and a timed-out step only breaks the loop, so a failed flow and an app that never quit both yield process rc 0."
+  }
+]

@@ -86,7 +86,8 @@ pub fn head_ellipsis(text: &str, budget: usize) -> String {
 /// there `cells > budget` implies `chars > keep`.
 ///
 /// Being `pub`, this promises a caller outside the crate none of the above; the convention covers
-/// the crate's one call site, which is the progress table both legs render through.
+/// the crate's two call sites, which are the progress table both legs render through and the
+/// history picker's conversation labels.
 #[must_use]
 pub fn middle_ellipsis(text: &str, budget: usize) -> String {
     if cells(text) <= budget {
@@ -99,6 +100,32 @@ pub fn middle_ellipsis(text: &str, budget: usize) -> String {
     let head: String = text.chars().take(keep / 2).collect();
     let tail: String = text.chars().rev().take(keep - keep / 2).collect::<Vec<_>>().into_iter().rev().collect();
     right_pad(&format!("{head}{}{tail}", glyph::ELLIPSIS), budget)
+}
+
+/// Trailing-ellipsis truncation for prose (Patterns → Truncation): the row keeps the text's
+/// beginning and a `…` names what was cut. This is the right cut for something READ (a banner,
+/// a conversation title), where the identity cuts above serve something IDENTIFIED.
+///
+/// Measured in cells like the other truncators here — prose is user data and can carry a wide
+/// character anywhere — and the char-boundary walk keeps a whole character rather than a clipped
+/// half, at the cost of the last cell when the boundary lands there.
+#[must_use]
+pub fn truncate_prose(text: &str, width: usize) -> String {
+    if cells(text) <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut kept = String::new();
+    for character in text.chars() {
+        if cells(&format!("{kept}{character}")) >= width {
+            break;
+        }
+        kept.push(character);
+    }
+    kept.push(glyph::ELLIPSIS);
+    kept
 }
 
 /// Thousands-separated, the form a detail panel uses (Patterns → Numeric formatting).
@@ -148,6 +175,17 @@ pub fn binary_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_prose_cuts_by_cells_so_a_wide_character_stays_whole() {
+        // `世` is two cells wide: a 5-cell budget holds the ellipsis plus two of them — the
+        // char-count cut would keep four and overrun. The kept text never exceeds the budget.
+        assert_eq!(truncate_prose("世世世", 5), "世世…");
+        assert_eq!(cells(truncate_prose("世世世", 5).as_str()), 5);
+        assert_eq!(truncate_prose("世世世", 3), "世…");
+        assert_eq!(truncate_prose("世世世", 2), "…");
+        assert_eq!(truncate_prose("世世世", 0), "");
+    }
 
     #[test]
     fn grouped_separates_every_third_digit_from_the_right() {

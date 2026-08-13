@@ -124,8 +124,12 @@ pub(crate) fn static_row(
 /// `TEXT_DIM + bold` at all times, where the bold is a fixed anchor, and here the bold IS the
 /// current-row cue. Rendering either one in the other's treatment is a contract bug, which is why
 /// the two spellings live side by side rather than one taking a flag.
-pub(crate) fn form_label(palette: &Palette, label: &'static str, focused: bool) -> Span<'static> {
-    if focused { Span::styled(label, Style::new().fg(palette.text).bold()) } else { Span::styled(label, Style::new().fg(palette.text_dim)) }
+pub(crate) fn form_label(palette: &Palette, label: &str, focused: bool) -> Span<'static> {
+    if focused {
+        Span::styled(label.to_owned(), Style::new().fg(palette.text).bold())
+    } else {
+        Span::styled(label.to_owned(), Style::new().fg(palette.text_dim))
+    }
 }
 
 /// The bare glyph run of a determinate bar: `█` fill in `fill_style`, `░` track in `LINE`.
@@ -280,10 +284,15 @@ pub(crate) fn progress_list(
     let list = List::new(items).highlight_style(Style::new().bg(palette.bg_hover)).scroll_padding(3);
     frame.render_stateful_widget(&list, area, state);
 
-    // The scrollbar lives in the panel's right padding column, so the content never reflows when it
-    // appears (contract: Scrollbar). The List has already settled the offset during render.
     let viewport = usize::from(area.height);
-    if rows.len() > viewport && viewport > 0 {
+    list_scrollbar(frame, palette, rows.len(), state.offset(), viewport, scrollbar_column, area);
+}
+
+/// The scrollbar a scrollable list grows in its panel's right padding column, so the content never
+/// reflows when it appears (contract: Scrollbar). Shared by the progress table and the history
+/// picker's list — one spelling of the thumb/track pattern.
+pub(crate) fn list_scrollbar(frame: &mut Frame, palette: &Palette, rows: usize, offset: usize, viewport: usize, column: u16, area: Rect) {
+    if rows > viewport && viewport > 0 {
         let thumb = glyph::SCROLLBAR_THUMB.to_string();
         let track = glyph::SCROLLBAR_TRACK.to_string();
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -293,8 +302,8 @@ pub(crate) fn progress_list(
             .thumb_symbol(&thumb)
             .style(palette.bar_track())
             .thumb_style(Style::new().fg(palette.text_dim));
-        let mut state = ScrollbarState::new(rows.len()).position(state.offset()).viewport_content_length(viewport);
-        frame.render_stateful_widget(scrollbar, Rect::new(scrollbar_column, area.y, 1, area.height), &mut state);
+        let mut state = ScrollbarState::new(rows).position(offset).viewport_content_length(viewport);
+        frame.render_stateful_widget(scrollbar, Rect::new(column, area.y, 1, area.height), &mut state);
     }
 }
 
