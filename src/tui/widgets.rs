@@ -132,6 +132,35 @@ pub(crate) fn form_label(palette: &Palette, label: &str, focused: bool) -> Span<
     }
 }
 
+/// The cycle control (contract: Cycle row): bare lowercase words in 2-space gaps, the selected
+/// one `ACCENT` — no bold, because the focused row's own label already carries the current-row
+/// bold — wrapped in `[brackets]` **only while the row is focused**. The bracket is the focus
+/// cue and the accent is the selection cue; unselected options are `TEXT_FAINT`.
+///
+/// One spelling of the grammar, so the chat-media and settings forms cannot drift apart on it.
+/// The two-cell widening a focused row's brackets cause is the intended focus signal; each
+/// form's interior budget reserves it (their `CYCLE_CELLS` constants restate the width from
+/// their own rosters, the way the two screens' path rows restate theirs).
+pub(crate) fn cycle_options(palette: &Palette, words: &[&'static str], selected: usize, focused: bool) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(words.len() * 2);
+    for (index, word) in words.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        if index == selected {
+            let style = Style::new().fg(palette.accent);
+            if focused {
+                spans.push(Span::styled(format!("[{word}]"), style));
+            } else {
+                spans.push(Span::styled((*word).to_owned(), style));
+            }
+        } else {
+            spans.push(Span::styled((*word).to_owned(), Style::new().fg(palette.text_faint)));
+        }
+    }
+    spans
+}
+
 /// The bare glyph run of a determinate bar: `█` fill in `fill_style`, `░` track in `LINE`.
 pub(crate) fn bar_run(palette: &Palette, fill: usize, total: usize, fill_style: Style) -> Vec<Span<'static>> {
     let fill = fill.min(total);
@@ -488,6 +517,23 @@ mod tests {
             let width: usize = status_pill(&palette, status).iter().map(Span::width).sum();
             assert_eq!(width, STATUS_CELLS, "{status:?}");
         }
+    }
+
+    #[test]
+    fn the_cycle_grammar_is_one_spelling_for_both_forms() {
+        // The shared control's own pin: brackets only while the row is focused (the focus cue,
+        // +2 cells), the selected word in ACCENT, the rest TEXT_FAINT. Each form's interior
+        // budget re-derives the width from its own roster, so this only pins the grammar.
+        let palette = Palette::new(Tier::Full);
+        let words = ["merged", "both", "originals"];
+        let blurred: usize = cycle_options(&palette, &words, 1, false).iter().map(Span::width).sum();
+        let focused: usize = cycle_options(&palette, &words, 1, true).iter().map(Span::width).sum();
+        assert_eq!(focused, blurred + 2, "the focused bracket pair is the focus signal");
+        let spans = cycle_options(&palette, &words, 1, true);
+        assert_eq!(spans[0].content.as_ref(), "merged");
+        assert_eq!(spans[0].style.fg, Some(palette.text_faint));
+        assert_eq!(spans[2].content.as_ref(), "[both]");
+        assert_eq!(spans[2].style.fg, Some(palette.accent));
     }
 
     #[test]

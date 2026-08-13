@@ -6,3 +6,4 @@ pub mod chat_media;
 pub mod history;
 pub mod memories;
 pub mod overview;
+pub mod settings;

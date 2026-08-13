@@ -50,8 +50,9 @@ use crate::tui::format::{cells, head_ellipsis, plural, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
-    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, disk_free_value, empty_state,
-    form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
+    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, cycle_options,
+    disk_free_value, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row,
+    tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -652,7 +653,9 @@ fn form_row(palette: &Palette, chat: &ChatMedia, row: FormRow, index: usize, wid
         }
         FormRow::Overlay => {
             let mut spans = vec![caret, form_label(palette, row.label(), focused), Span::raw("  ")];
-            spans.extend(cycle_options(palette, chat.overlay, focused));
+            let words = OverlayMode::ALL.map(OverlayMode::as_word);
+            let position = OverlayMode::ALL.iter().position(|mode| *mode == chat.overlay).unwrap_or(0);
+            spans.extend(cycle_options(palette, &words, position, focused));
             let line = Line::from(spans);
             if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
         }
@@ -664,36 +667,6 @@ fn form_row(palette: &Palette, chat: &ChatMedia, row: FormRow, index: usize, wid
         }
         FormRow::Start => Line::from(vec![caret, action_chip(palette, row.label(), chat.start_enabled(), focused)]),
     }
-}
-
-/// The overlay-mode cycle control (contract: Cycle row).
-///
-/// Options are bare lowercase words separated by 2-space gaps, in [`OverlayMode::ALL`] order. The
-/// selected one is `ACCENT` — no bold, because the focused row's own label already carries the
-/// current-row bold — and the `[brackets]` wrap it **only while the row is focused**: the bracket is
-/// the focus cue, the accent is the selection cue. Unselected options are `TEXT_FAINT`.
-///
-/// The two-cell widening a focused row's brackets cause is the intended focus signal, which is why
-/// [`CYCLE_CELLS`] reserves them at every width rather than letting the row reflow into the panel's
-/// padding.
-fn cycle_options(palette: &Palette, selected: OverlayMode, focused: bool) -> Vec<Span<'static>> {
-    let mut spans = Vec::with_capacity(OverlayMode::ALL.len() * 2);
-    for (index, mode) in OverlayMode::ALL.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        if mode == selected {
-            let style = Style::new().fg(palette.accent);
-            if focused {
-                spans.push(Span::styled(format!("[{}]", mode.as_word()), style));
-            } else {
-                spans.push(Span::styled(mode.as_word(), style));
-            }
-        } else {
-            spans.push(Span::styled(mode.as_word(), Style::new().fg(palette.text_faint)));
-        }
-    }
-    spans
 }
 
 fn render_progress(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, area: Rect) {
@@ -830,8 +803,10 @@ mod tests {
         // has to hold the WIDER of the two or the brackets clip into the panel's padding at exactly
         // the moment they appear. Measured from the rendered spans rather than re-derived, since a
         // derivation of the constant would only agree with itself.
-        let blurred: usize = cycle_options(&palette(), OverlayMode::Both, false).iter().map(Span::width).sum();
-        let focused: usize = cycle_options(&palette(), OverlayMode::Both, true).iter().map(Span::width).sum();
+        let words = OverlayMode::ALL.map(OverlayMode::as_word);
+        let position = OverlayMode::ALL.iter().position(|mode| *mode == OverlayMode::Both).unwrap_or(0);
+        let blurred: usize = cycle_options(&palette(), &words, position, false).iter().map(Span::width).sum();
+        let focused: usize = cycle_options(&palette(), &words, position, true).iter().map(Span::width).sum();
         assert_eq!(focused, blurred + 2, "the brackets are the focus cue and cost two cells");
         assert_eq!(focused, CYCLE_CELLS);
         assert!(FORM_INTERIOR >= CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + focused, "the focused cycle row must fit the interior");

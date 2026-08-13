@@ -114,6 +114,16 @@ pub(crate) fn history_hints(palette: &Palette, picker_has_rows: bool, width: u16
     }
 }
 
+/// The settings tab's hint set while a text input is being edited: arrows move the caret
+/// rather than the tab, `↵` commits the draft, `esc` cancels it, and `q` types a letter — so
+/// the switch/quit set would advertise keys that do something else this frame, and the edit
+/// set replaces it (cloudy-tui: a hint advertises only keys that do something).
+pub(crate) fn settings_edit_hints(palette: &Palette, width: u16) -> Line<'static> {
+    let arrows = format!("{}{}", glyph::KEY_LEFT, glyph::KEY_RIGHT);
+    let enter = glyph::KEY_ENTER.to_string();
+    hint_line(palette, &trim_hints(&[(&arrows, "move"), (&enter, "commit"), ("esc", "cancel")], width))
+}
+
 /// The armed 2-step quit prompt: glyph-only line on the base `BG`; the absent background tint is
 /// what tells it apart from a banner.
 fn quit_alert(palette: &Palette) -> Line<'static> {

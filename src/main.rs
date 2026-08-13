@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use exportsnap::app::{App, RunDefaults};
 use exportsnap::config::{self, Config};
+use exportsnap::tui::screens::settings::SettingsLayers;
 use exportsnap::tui::theme::{self, Tier};
 
 /// The `--version` text, four lines: the binary name and version, the
@@ -103,11 +104,15 @@ fn main() -> Result<()> {
     // describe a different root than the run uses, exit 0; a broken config fails both paths
     // identically. Only `--version` and `--help` still skip the file, returning above. No home dir
     // means no config file: defaults.
-    let config = match config::config_dir() {
-        Some(dir) => config::load(&dir)?,
-        None => Config::default(),
+    let (config, config_dir) = match config::config_dir() {
+        Some(dir) => (config::load(&dir)?, Some(dir)),
+        None => (Config::default(), None),
     };
     let tier = theme::detect_from_env(cli_tier, config.theme);
+    // The tier the settings theme row attributes to detection: the pure `$COLORTERM` sniff
+    // with no flag and no file. It reads the environment once more — the two calls are a
+    // startup pair, not a hot loop, and the resolved call above keeps its own read.
+    let detected_tier = theme::detect_from_env(None, None);
 
     // The dir the user points at, or the one they ran from. Parsed before the terminal is taken
     // over, so a bad argument is a plain message on a plain terminal rather than a flash of
@@ -118,8 +123,8 @@ fn main() -> Result<()> {
     };
     // `--out=<dir>` names where a memories run writes (decision 33); absent, the file's `out_dir`
     // or the source-derived default decides (decision 66). Parsed before the terminal is taken
-    // over, like the source. The raw layers — the flag and the file — stay locals here, which is
-    // what the settings screen's provenance will read (task 86).
+    // over, like the source. The raw layers — the flag and the file — go on to the app's settings
+    // screen, which states provenance off them (task 86).
     let out = parse_out_arg(args)?;
     let defaults = RunDefaults::resolve(out.as_deref(), &config, &source);
 
@@ -129,7 +134,16 @@ fn main() -> Result<()> {
     // Deliberate ceiling: this is blocking, so a large `json/` delays the first frame with nothing
     // on screen to say why. The upgrade path is the phase-2 tokio runtime plus the overview's own
     // loading state, which needs the tick timer no screen has earned yet.
-    let mut app = App::start(tier, source, defaults);
+    //
+    // The layers the settings screen reads: the flag and the file as resolved, the detection
+    // answers re-derived, and `detected_ffmpeg` left for the startup probe to fill in `start_with`
+    // — it is the one layer only the composition can answer.
+    let mut app = App::start(
+        tier,
+        source,
+        defaults,
+        SettingsLayers { config_dir, cli_out: out, cli_tier, config, detected_tier, detected_ffmpeg: None },
+    );
 
     // Read off the COMPOSED app rather than off the `source` local above. `main` could print the
     // path byte-identically — its own M2 mutation proved that — so what makes this a pin is the rest

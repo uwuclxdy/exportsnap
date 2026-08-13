@@ -7,9 +7,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 
-use super::screens::{account, chat_media, history, memories, overview};
+use super::screens::{account, chat_media, history, memories, overview, settings};
 use super::theme::{Palette, glyph};
-use super::widgets::{PanelStyle, panel};
 use super::{footer, header};
 use crate::app::{App, Tab};
 use crate::tui::format::truncate_prose;
@@ -66,6 +65,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         match app.active() {
             Tab::History => footer::history_hints(&palette, app.history().picker_has_rows(), footer_area.width),
+            // While a settings text input is being edited, arrows move the caret (not the
+            // tab) and `q` types a letter, so the plain set would advertise keys that do
+            // something else this frame — the edit set replaces it.
+            Tab::Settings if app.settings().is_editing() => footer::settings_edit_hints(&palette, footer_area.width),
             _ => footer::plain_hints(&palette, footer_area.width),
         }
     };
@@ -88,10 +91,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Tab::ChatMedia => chat_media::render(frame, &palette, app.chat_media_mut(), panel_area),
         Tab::History => history::render(frame, &palette, app.history_mut(), panel_area),
         Tab::Account => account::render(frame, &palette, app.account_mut(), panel_area),
-        // The settings tab is still the empty shell: one placeholder panel named after the tab.
-        // It is the screen's sole content panel, so it takes `LINE_STRONG` (it owns the cursor)
-        // and, being the first panel on the body, an `ACCENT_2` title.
-        Tab::Settings => frame.render_widget(panel(&palette, Tab::Settings.label(), PanelStyle { first: true, focused: true }), panel_area),
+        Tab::Settings => settings::render(frame, &palette, app.settings(), panel_area),
+    }
+
+    // The settings screen's DANGER toast renders last, over the finished frame: its glass
+    // blend reads the buffer beneath it, which must be final by the time the toast draws
+    // (cloudy-tui: Toast renders last). It floats on every tab while it lives — the app has
+    // no tab-activity color channel, so the toast is the one notification surface.
+    if let Some(toast) = app.settings().toast() {
+        settings::render_toast(frame, &palette, toast, area);
     }
 }
 

@@ -24,12 +24,25 @@ impl Tier {
         }
     }
 
+    /// The two tiers, in the order the settings theme row cycles them.
+    pub const ALL: [Self; 2] = [Self::Full, Self::Compatible];
+
+    /// The next tier in the settings theme cycle, wrapping (decision 66: the cycle's pick is
+    /// written back as the config layer).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Full => Self::Compatible,
+            Self::Compatible => Self::Full,
+        }
+    }
+
     /// Maps a `--theme=` argument or a config `[theme] name` value to a tier. `None` for
     /// anything else, so a caller reports an unrecognized value instead of silently falling
     /// back to a tier the user didn't ask for.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        [Self::Full, Self::Compatible].into_iter().find(|tier| tier.as_name() == name)
+        Self::ALL.into_iter().find(|tier| tier.as_name() == name)
     }
 }
 
@@ -121,6 +134,15 @@ impl Palette {
             Tier::Full => Some(self.bg),
             Tier::Compatible => None,
         }
+    }
+
+    /// The toast glass blend for a cell this frame will sit over — the tier-resolution
+    /// wrapper around the module's free [`toast_bg`], which takes the tier because the toast
+    /// renders against arbitrary cell backgrounds (the same reason `surface` exists: widget
+    /// code never branches on `Tier`).
+    #[must_use]
+    pub fn toast_bg(self, under: Option<Color>) -> Color {
+        toast_bg(self.tier, under)
     }
 
     /// The usage-role color for a percentage (cloudy-tui skill: Progress bar — usage/quota role,

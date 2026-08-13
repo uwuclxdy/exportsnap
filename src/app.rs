@@ -18,12 +18,14 @@ use crate::tui::screens::chat_media::ChatMedia;
 use crate::tui::screens::history::History;
 use crate::tui::screens::memories::Memories;
 use crate::tui::screens::overview::Overview;
+use crate::tui::screens::settings::{Settings, SettingsLayers};
 use crate::tui::shell;
 use crate::tui::theme::{Palette, Tier};
 
 /// How long the event loop waits for input before ticking. One spinner frame per tick (80 ms),
-/// which is also the rate the run's manifest statuses are polled at.
-const TICK: Duration = Duration::from_millis(80);
+/// which is also the rate the run's manifest statuses are polled at. `pub(crate)` so the
+/// settings screen's toast-lifetime coupling test can hold the 80 ms side of its ratio.
+pub(crate) const TICK: Duration = Duration::from_millis(80);
 
 /// The six top-level screens (design.md: TUI screen map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,8 +146,9 @@ impl RunDefaults {
 /// - **`q`, the key routing and the `⌥` jump's implicit ascend all address the active screen**
 ///   ([`Self::descended`], [`Self::ascend_active`]). Ascending a screen the user is not on would
 ///   silently reset a pane they left descended.
-/// - **The tick drives all three screens** ([`Self::tick`]), because a run keeps running when its
-///   tab is not in view and its poll has to keep up with it.
+/// - **The tick drives all three runs and the settings toast** ([`Self::tick`]), because a run
+///   keeps running when its tab is not in view, its poll has to keep up with it, and the toast's
+///   DANGER lifetime has to elapse with no input in the meantime.
 #[derive(Debug)]
 pub struct App {
     palette: Palette,
@@ -157,6 +160,7 @@ pub struct App {
     chat_media: ChatMedia,
     history: History,
     account: Account,
+    settings: Settings,
 }
 
 impl App {
@@ -188,6 +192,7 @@ impl App {
             ),
             history: History::with_environment(PathBuf::new(), defaults.out_root),
             account: Account::with_environment(PathBuf::new()),
+            settings: Settings::with_layers(SettingsLayers::defaults_for(tier)),
         }
     }
 
@@ -206,14 +211,21 @@ impl App {
     /// clear it. A snapshot taken per startup carries the same staleness the screens already have
     /// and stays a value a test can hand in.
     #[must_use]
-    pub fn start(tier: Tier, source: PathBuf, defaults: RunDefaults) -> Self {
-        Self::start_with(tier, source, defaults, locate)
+    pub fn start(tier: Tier, source: PathBuf, defaults: RunDefaults, layers: SettingsLayers) -> Self {
+        Self::start_with(tier, source, defaults, layers, locate)
     }
 
     /// [`Self::start`] against an explicit locator — the seam that makes the walk count above
     /// observable, since the real [`locate`] cannot be made to report its calls.
-    fn start_with(tier: Tier, source: PathBuf, defaults: RunDefaults, locate: impl Fn(Tool) -> Option<PathBuf>) -> Self {
+    fn start_with(
+        tier: Tier, source: PathBuf, defaults: RunDefaults, layers: SettingsLayers, locate: impl Fn(Tool) -> Option<PathBuf>,
+    ) -> Self {
         let mut environment = Environment::probe_with(locate, &source);
+        // The settings ffmpeg row reads the PROBE's own answer as its detection layer, so the
+        // answer is captured before the file's path replaces it below: a derivation after the
+        // merge would read the merged value as the detection, and a commit would then move the
+        // file layer under it while the row kept mis-stating itself.
+        let detected_ffmpeg = environment.ffmpeg.clone();
         // The file's `ffmpeg_path` beats detection (decision 66: config > detection). The probe
         // still ran first, so the once-per-tool walk stays counted and `vlc` keeps its own answer;
         // the overview and the media screens then see the same composed machine.
@@ -222,7 +234,17 @@ impl App {
         }
         let media = environment.measured_at(probe_target(&defaults.out_root));
 
-        Self::new(tier).with_overview(Overview::load_with(&source, environment)).with_source_environment(source, defaults, media)
+        Self::new(tier)
+            .with_settings(Settings::with_layers(SettingsLayers { detected_ffmpeg, ..layers }))
+            .with_overview(Overview::load_with(&source, environment))
+            .with_source_environment(source, defaults, media)
+    }
+
+    /// Replaces the settings screen's layers — [`Self::start_with`]'s own construction, which
+    /// knows the probe capture the default layers cannot.
+    fn with_settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// Hands the overview screen a real read of the source dir. [`Self::start`] calls this before
@@ -243,6 +265,9 @@ impl App {
     /// test uses to pin the disk-free rows without reaching for the real filesystem.
     #[must_use]
     pub fn with_source_environment(mut self, source: PathBuf, defaults: RunDefaults, environment: Environment) -> Self {
+        // The settings form's out-dir default derives from the same source the run screens
+        // read — one delivery, like every other source consumer.
+        self.settings.set_source(source.clone());
         self.memories = Memories::with_environment(source.clone(), defaults.out_root.clone(), environment.clone(), defaults.transcode);
         self.chat_media =
             ChatMedia::with_environment(source.clone(), defaults.out_root.clone(), environment, defaults.transcode, defaults.overlay_mode);
@@ -353,6 +378,13 @@ impl App {
         &mut self.account
     }
 
+    /// The settings screen. The shell renders it and reads its toast; `handle_key` routes its
+    /// keys from the tab match like every other screen's.
+    #[must_use]
+    pub const fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     /// The alert the footer row is showing this frame: the ACTIVE screen's, or none.
     ///
     /// The single source for both the footer and the `x` key, so the row and the dismissal can never
@@ -423,12 +455,13 @@ impl App {
 
     /// Draws, waits for an event, applies it, ticks, repeats.
     ///
-    /// While ANY screen's run is live the wait is capped at one tick (80 ms), so the spinner
-    /// animates and the per-item poll refreshes without input; with no run live there is nothing
-    /// to animate, and the loop blocks on input instead of redrawing an identical frame every
-    /// 80 ms forever. The gate is a disjunction rather than "the active screen's run" because a run
-    /// keeps running when its tab is not in view, and a poll that stopped there would leave its
-    /// table frozen at whatever the user last saw.
+    /// While ANY screen's run is live — or while the settings toast is — the wait is capped at
+    /// one tick (80 ms), so the spinner animates, the per-item poll refreshes without input, and
+    /// the toast's DANGER lifetime elapses; with nothing live there is nothing to animate, and
+    /// the loop blocks on input instead of redrawing an identical frame every 80 ms forever. The
+    /// gate is a disjunction rather than "the active screen's run" because a run keeps running
+    /// when its tab is not in view, and a poll that stopped there would leave its table frozen at
+    /// whatever the user last saw.
     ///
     /// # Errors
     ///
@@ -439,7 +472,11 @@ impl App {
                 let app = &mut *self;
                 terminal.draw(|frame| shell::render(frame, app))?;
             }
-            if self.memories.run_in_flight() || self.chat_media.run_in_flight() || self.history.run_in_flight() {
+            if self.memories.run_in_flight()
+                || self.chat_media.run_in_flight()
+                || self.history.run_in_flight()
+                || self.settings.toast_live()
+            {
                 if event::poll(TICK)? {
                     self.handle_event(&event::read()?);
                 }
@@ -451,13 +488,15 @@ impl App {
         Ok(())
     }
 
-    /// One timer tick: pump each run's channel, poll its statuses, advance its spinner. A screen
-    /// with no run in flight returns immediately, so ticking all three costs nothing when one is
-    /// idle.
+    /// One timer tick: pump each run's channel, poll its statuses, advance its spinner, age the
+    /// settings toast. A screen with no run in flight returns immediately, so ticking all three
+    /// costs nothing when one is idle — and the toast ages only while the gate above says it is
+    /// live.
     pub fn tick(&mut self) {
         self.memories.tick();
         self.chat_media.tick();
         self.history.tick();
+        self.settings.tick();
     }
 
     /// Applies one terminal event. Resizes need no state change — the next draw reads the new
@@ -504,22 +543,32 @@ impl App {
                 self.quit_armed = false;
                 return;
             }
-            // `q` at the top level arms a 2-step quit and never quits in one press. Hotkeys are
-            // case-insensitive, so caps lock can't strand a user with no way out.
-            if self.quit_armed {
-                self.running = false;
-            } else {
-                self.quit_armed = true;
+            // While a settings text input is being edited, `q` is a letter the field types — the
+            // same suspension a descended pane gets, without the ascend step because the settings
+            // form has no pane. The screen must receive the key, so this falls through.
+            let editing_input = self.active == Tab::Settings && self.settings.is_editing();
+            if !editing_input {
+                // `q` at the top level arms a 2-step quit and never quits in one press. Hotkeys are
+                // case-insensitive, so caps lock can't strand a user with no way out.
+                if self.quit_armed {
+                    self.running = false;
+                } else {
+                    self.quit_armed = true;
+                }
+                return;
             }
-            return;
         }
 
-        // `x` dismisses the run-completion footer alert the row is actually showing — the only
-        // thing it is bound to. With no alert live it is a key like any other (it still disarms an
-        // armed quit below).
-        if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() && self.dismiss_alert()
-        {
-            return;
+        // `x` dismisses whatever the frame is showing: the settings toast floats over every tab,
+        // so it goes first, then the run-completion footer alert the row is actually showing.
+        // With nothing live it is a key like any other (it still disarms an armed quit below), and
+        // while a settings text input is being edited it is a letter the field types — the
+        // dismissal keys are suspended exactly like `q`.
+        if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            let editing_input = self.active == Tab::Settings && self.settings.is_editing();
+            if (!editing_input && self.settings.dismiss_toast()) || self.dismiss_alert() {
+                return;
+            }
         }
 
         self.quit_armed = false;
@@ -532,7 +581,8 @@ impl App {
             Tab::ChatMedia => self.chat_media.handle_key(key),
             Tab::History => self.history.handle_key(key),
             Tab::Account => self.account.handle_key(key),
-            Tab::Overview | Tab::Settings => false,
+            Tab::Settings => self.settings.handle_key(key),
+            Tab::Overview => false,
         };
         if consumed {
             return;
@@ -579,6 +629,7 @@ mod tests {
             Tier::Full,
             PathBuf::from("/nope"),
             RunDefaults::resolve(None, &Config::default(), Path::new("/nope")),
+            SettingsLayers::defaults_for(Tier::Full),
             |tool| {
                 walks.borrow_mut().push(tool);
                 Some(PathBuf::from(format!("/located/{}", tool.command())))
@@ -621,7 +672,7 @@ mod tests {
             transcode: true,
             overlay_mode: OverlayMode::Both,
         };
-        let app = App::start_with(Tier::Full, PathBuf::from("/nope"), defaults, |tool| {
+        let app = App::start_with(Tier::Full, PathBuf::from("/nope"), defaults, SettingsLayers::defaults_for(Tier::Full), |tool| {
             walks.borrow_mut().push(tool);
             Some(PathBuf::from(format!("/probed/{}", tool.command())))
         });

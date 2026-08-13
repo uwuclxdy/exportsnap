@@ -140,8 +140,9 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
 #[test]
 fn renders_header_body_panel_and_hint_bar() {
     // Driven on `settings` rather than `overview`, `memories`, `chat media`, `history` or
-    // `account`: those five own their own screens now, so the shell's placeholder panel — the
-    // thing this pins — survives on this tab alone.
+    // `account`: those five own their own screens now, and the settings form is the sixth. At
+    // 52 cells the panel interior is 48, under the form's 53-cell budget, so the
+    // whole-or-not-at-all gate keeps the interior blank and this grid is the shell's pin.
     let terminal = draw(&mut on_tab(Tab::Settings), 52, 6);
     assert_eq!(
         grid(terminal.backend().buffer()),
@@ -344,11 +345,11 @@ fn the_panel_title_names_the_active_tab_in_uppercase() {
     // `overview`, `memories`, `chat media`, `history` and `account` are absent on purpose: those
     // five own real screens now, and their own panel titles are pinned in `tests/overview.rs`,
     // `tests/memories_screen.rs`, `tests/chat_media_screen.rs`, `tests/history_screen.rs` and
-    // `tests/account_screen.rs`. `settings` is the shell's last placeholder panel, which is the
-    // thing that names itself after its tab — and this list shrinks by one every time a screen
-    // lands, so it is worth checking it still matches the `match` in `shell::render`.
+    // `tests/account_screen.rs`. `settings` names its own panel title the same way, off the same
+    // lowercase label — this is the sixth and last case, so it is worth checking it still matches
+    // the `match` in `shell::render`.
     let terminal = draw(&mut on_tab(Tab::Settings), 60, 20);
-    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ SETTINGS ─"), "settings should render its placeholder panel title");
+    assert!(row(terminal.backend().buffer(), 1).starts_with("╭─ SETTINGS ─"), "settings should render its own panel title");
 }
 
 #[test]
