@@ -112,6 +112,16 @@ const ZIP_INFIX: &str = ".zip.";
 /// export holds 1233.
 const MEDIA_ID_SEPARATOR: char = '|';
 
+/// The tokens a `Media IDs` value names, split by the shared delimiter.
+///
+/// Splitting on the bar and trimming reads the observed `" | "` and any spacing variant of it, and
+/// drops the empty tokens a separator-only row produces. `reconcile`'s join and the history writer's
+/// html links use this same rule through this one function, so the delimiter has one spelling in the
+/// crate rather than two.
+pub fn media_tokens(media_ids: &str) -> impl Iterator<Item = &str> {
+    media_ids.split(MEDIA_ID_SEPARATOR).map(str::trim).filter(|token| !token.is_empty())
+}
+
 // ---- the filename grammar ----
 
 /// The word a chat-media filename spells before the `~`.
@@ -946,7 +956,7 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
         for (conversation, thread) in history.conversations.iter().enumerate() {
             for (message, record) in thread.records.iter().enumerate() {
                 let Some(raw) = record.media_ids.as_deref() else { continue };
-                for raw_token in raw.split(MEDIA_ID_SEPARATOR).map(str::trim).filter(|token| !token.is_empty()) {
+                for raw_token in media_tokens(raw) {
                     let at = MessageRef { conversation, message };
                     // The trust boundary: anything that is not a `b~<id>` spelling never reaches the
                     // manifest as a `source_id`. See `parse_history_token` for what skipping this

@@ -9,7 +9,7 @@
 //! and [`Record::content`]/[`Record::media_ids`] return `None` on the snap arm as a consequence
 //! of what the type holds, not as a convention every call site has to remember.
 //!
-//! Nothing here writes a file, renders a row, or knows a screen exists. This is the document model the four phase-4 writers render over (decision 58), and three of the four writers (json, text, csv) live here as pure functions over that document; the html writer and the `fs::write` that lands any of them on disk are later tasks.
+//! Nothing here writes a file, renders a row, or knows a screen exists. This is the document model the four phase-4 writers render over (decision 58), and the four writers (json, text, csv, html) live here as pure functions over that document; the `fs::write` that lands any of them on disk is a later task.
 //!
 //! # Ordering
 //!
@@ -32,11 +32,11 @@
 //!
 //! # Privacy
 //!
-//! [`Record`], [`Thread`], [`MergedHistory`] and [`Document`] derive `Debug` and `Clone` and nothing else. The bodies they wrap keep [`model::MessageText`]'s redacting `Debug`, so a `{:?}` cannot leak a message body, and nothing here derives `Serialize` — the json writer builds a separate serializable mirror inside the call and drops it before returning (decisions 3, 58). That mirror is `Serialize`-only, with no `Debug`: it holds the plain-text bodies, so a `{:?}` on it would leak exactly what [`model::MessageText`]'s redacting `Debug` exists to keep off a terminal.
+//! [`Record`], [`Thread`], [`MergedHistory`] and [`Document`] derive `Debug` and `Clone` and nothing else. The bodies they wrap keep [`model::MessageText`]'s redacting `Debug`, so a `{:?}` cannot leak a message body, and nothing here derives `Serialize` — the json writer builds a separate serializable mirror inside the call and drops it before returning (decisions 3, 58). That mirror is `Serialize`-only, with no `Debug`: it holds the plain-text bodies, so a `{:?}` on it would leak exactly what [`model::MessageText`]'s redacting `Debug` exists to keep off a terminal. The html writer's [`Html`] holds the whole transcript, so its `Debug` is hand-written to redact the `html` field the way [`model::MessageText`] redacts its body — escaping makes markup inert, not private, and an escaped body is still readable text.
 //!
 //! # The document model and writers
 //!
-//! [`Document`] is one conversation's transcript: the merged records of one [`Thread`], kept in the order [`merge`] produced them. The three writers are pure functions over it, each byte-stable — the same [`Document`] always renders the same bytes — and free of any `HashMap` iteration, timestamp, or randomness, which is what makes the byte-equality tests meaningful.
+//! [`Document`] is one conversation's transcript: the merged records of one [`Thread`], kept in the order [`merge`] produced them. The json, text and csv writers are pure functions over it, each byte-stable — the same [`Document`] always renders the same bytes — and free of any `HashMap` iteration, timestamp, or randomness, which is what makes the byte-equality tests meaningful. The html writer is a pure function of the document and an already-opened [`Manifest`] (decision 62): deterministic for a given pair, and the only writer whose output the manifest's state can change.
 //!
 //! ## json (decision 58's re-import path)
 //!
@@ -49,12 +49,40 @@
 //! ## text (the plain-transcript path)
 //!
 //! One header line per record — `[<created>] <from> (<kind> <media_type>, <sent|received>)`, with `no date` and `unknown` standing in for an absent instant and sender — then the body with every line prefixed `> `, and a blank line between records. The prefix is what keeps the format unambiguous: a reader treats any line starting with `> ` as the current record's body and every other non-blank line as a new record's header, so a multi-line body (an embedded blank line included) can never be read as two records, and a header always starts with `[`, so it can never be mistaken for a continuation. The body renders through `str::lines()`, which normalizes `\r\n` to `\n` and drops a trailing line break — a display choice, since text is for a person to read rather than a byte-exact round trip. An absent body renders as no body lines at all.
+//!
+//! ## html (decision 58's "the format a user reads", decision 62's links)
+//!
+//! A complete, self-contained document a browser opens: a `<!doctype html>` document whose `<title>`
+//! is the conversation title where any record carries one and the conversation key otherwise, and one
+//! `<article>` per record in the merged order, each carrying the same header line the text writer
+//! renders plus the body and the media links. No external assets and no scripts, so the file needs
+//! nothing but itself.
+//!
+//! Every piece of untrusted text is escaped before it is interpolated — the message body, the sender,
+//! the conversation title, and the media type, which [`MediaKind::Other`] can spell with arbitrary
+//! text — and the controlled-vocabulary pieces (the rendered timestamp, the kind word, the direction)
+//! are escaped too, for a uniform rule with no arm to reason about. A body containing markup renders
+//! as text, never as markup.
+//!
+//! A chat record's `Media IDs` splits into tokens with [`crate::export::chat_media::media_tokens`],
+//! the same rule `reconcile` joins with, and each token is read against its manifest row
+//! (decision 62): a `done` row renders a relative link whose `href` is the bare output filename —
+//! the conversation directory is flat (decision 60) and this document sits beside the media — while
+//! every other status, and a missing row, renders an inert placeholder naming the message's own
+//! `Media Type` and nothing else: no token, no id, no path. The manifest lookup is the authority, so
+//! a token is never re-validated — that would be a second spelling of `chat_media`'s private
+//! `parse_history_token` — and a token that is not a `b~<id>` spelling simply has no row and falls to
+//! the placeholder naturally.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::fmt;
 
 use serde::Serialize;
 
+use crate::export::chat_media::media_tokens;
+use crate::export::manifest::{ItemKind, ItemStatus, Manifest, ManifestError};
 use crate::export::model;
 use crate::export::model::{ConversationId, MediaKind, MessageText, Timestamp, Username};
 
@@ -66,7 +94,7 @@ pub enum RecordKind {
 }
 
 impl RecordKind {
-    /// The lowercase word the three writers use for this kind.
+    /// The lowercase word the four writers use for this kind.
     ///
     /// [`RecordKind`] is this crate's own invention — decision 61 merges two files that never name a kind — so the vocabulary is ours and has no wire form: `chat` for a chat message, `snap` for a snap. Named like [`MediaKind::as_wire`] for consistency with that established idiom.
     #[must_use]
@@ -425,6 +453,135 @@ fn text_block(record: &Record) -> String {
             out.push_str("> ");
             out.push_str(line);
             out.push('\n');
+        }
+    }
+    out
+}
+
+// ---- the html writer (decision 58's "the format a user reads", decision 62's links) ----
+
+/// What a rendered document's media links did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HtmlLinks {
+    /// A manifest was read; links resolve where a row is `done`.
+    Manifest,
+    /// No manifest exists (no export id), so every media reference renders as a placeholder.
+    NoManifest,
+}
+
+/// A rendered html document and the state of its media links.
+#[derive(Clone)]
+pub struct Html {
+    pub html: String,
+    pub links: HtmlLinks,
+}
+
+impl fmt::Debug for Html {
+    /// Redacted for the reason [`model::MessageText`]'s own `Debug` is: `html` holds every body's
+    /// text, so a `{:?}` would print a whole transcript. Escaping makes markup inert, not private.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Html").field("links", &self.links).field("html", &"<redacted>").finish()
+    }
+}
+
+/// The html form of a [`Document`] (decision 58's "the format a user reads", decision 62's links).
+///
+/// `manifest` is `None` when the source names no `mydata~*` part group, so there is no `ExportId`
+/// and no manifest to read from; every media reference then renders as a placeholder and
+/// [`Html::links`] is [`HtmlLinks::NoManifest`], so the run that lands the file (task 79) can state
+/// the reason once rather than per message. `Some` is the already-opened manifest that run holds.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] when the manifest read for a media token fails.
+pub fn write_html(document: &Document, manifest: Option<&Manifest>) -> Result<Html, ManifestError> {
+    let title = html_escape(&document_title(document));
+    let body: String = document.records.iter().map(|record| html_block(record, manifest)).collect::<Result<_, _>>()?;
+    let html = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>{title}</title>\n</head>\n<body>\n{body}\n</body>\n</html>\n"
+    );
+    Ok(Html { html, links: if manifest.is_some() { HtmlLinks::Manifest } else { HtmlLinks::NoManifest } })
+}
+
+/// The document's `<title>`: the conversation title where any record carries one, else the key.
+///
+/// A title is written per message, so a renamed group carries two under one key; the first in the
+/// merged order wins, which makes the choice a fact about the render stream rather than a lookup.
+fn document_title(document: &Document) -> String {
+    document.records.iter().find_map(Record::conversation_title).map(ToOwned::to_owned).unwrap_or_else(|| document.key.as_str().to_owned())
+}
+
+/// One record as an `<article>`, the html analogue of [`text_block`]: the header line both render,
+/// then the body, then the media links.
+fn html_block(record: &Record, manifest: Option<&Manifest>) -> Result<String, ManifestError> {
+    let created = html_escape(&record.resolved_created().map(|timestamp| timestamp.to_string()).unwrap_or_default());
+    let from = html_escape(record.from().map(Username::as_str).unwrap_or(""));
+    let direction = html_escape(if record.is_sender() { "sent" } else { "received" });
+    let kind = html_escape(record.kind().as_wire());
+    let media_type = html_escape(record.media_type().as_wire());
+    let mut out = format!(
+        "<article><p><span class=\"time\">{created}</span> {from} (<span class=\"kind\">{kind}</span> <span class=\"media-type\">{media_type}</span>, {direction})</p>"
+    );
+    if let Some(content) = record.content() {
+        // `white-space: pre-wrap` keeps the body's own line breaks, which a browser would otherwise
+        // collapse to spaces — the html is the format a user reads (decision 58), so a multi-line
+        // message reads as the lines it was sent in.
+        out.push_str("<p class=\"body\" style=\"white-space: pre-wrap\">");
+        out.push_str(&html_escape(content.expose()));
+        out.push_str("</p>");
+    }
+    if let Some(media_ids) = record.media_ids() {
+        let media: String = media_tokens(media_ids).map(|token| html_media_token(record, token, manifest)).collect::<Result<_, _>>()?;
+        if !media.is_empty() {
+            out.push_str("<p class=\"media\">");
+            out.push_str(&media);
+            out.push_str("</p>");
+        }
+    }
+    out.push_str("</article>");
+    Ok(out)
+}
+
+/// One `Media IDs` token as html: a link where the manifest row is `done`, else a placeholder.
+///
+/// The module docs hold the reading of decision 62 that drives this; the manifest lookup is the
+/// authority and no token re-validation runs.
+fn html_media_token(record: &Record, token: &str, manifest: Option<&Manifest>) -> Result<String, ManifestError> {
+    let Some(manifest) = manifest else {
+        return Ok(media_placeholder(record));
+    };
+    let Some(item) = manifest.item(ItemKind::ChatMedia, token)? else {
+        return Ok(media_placeholder(record));
+    };
+    if item.status == ItemStatus::Done
+        && let Some(file_name) = item.output_path.as_deref().and_then(|path| path.file_name()).and_then(OsStr::to_str)
+    {
+        let href = html_escape(file_name);
+        Ok(format!("<a href=\"{href}\">{href}</a>"))
+    } else {
+        Ok(media_placeholder(record))
+    }
+}
+
+/// The inert html for a media reference the manifest does not resolve: the record's own `Media Type`
+/// and nothing else (decision 62) — no token, no id, no path.
+fn media_placeholder(record: &Record) -> String {
+    format!("<span class=\"media-placeholder\">{}</span>", html_escape(record.media_type().as_wire()))
+}
+
+/// Escapes the five characters that carry markup meaning, for text and double-quoted attribute
+/// contexts alike. The set is what the html-escape crates escape; hand-rolled so no dependency is
+/// bought for five characters.
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(character),
         }
     }
     out

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use exportsnap::export::chat_media::{
     ChatMedia, ChatMediaFile, ChatMediaItem, Day, Discovery, Family, Join, MediaDate, Message, MessageRef, MissingReason, Reconciliation,
-    Token, UnreadableDir, discover, reconcile,
+    Token, UnreadableDir, discover, media_tokens, reconcile,
 };
 use exportsnap::export::manifest::{ExportId, Item, ItemKind, ItemStatus, Manifest};
 use exportsnap::export::model::{ChatHistory, ConversationId, Field, Timestamp, Username};
@@ -594,6 +594,17 @@ fn an_empty_media_ids_value_names_nothing() {
 
     assert_eq!(join_of(&reconciliation, &format!("b~{}", id(1))), &Join::Unnamed);
     assert!(reconciliation.missing.is_empty(), "{:?}", reconciliation.missing);
+}
+
+/// The splitter is now a public API — the history writer's html links share it with the join — so
+/// its contract is pinned on the function itself, not only through `reconcile`. The two join tests
+/// above would catch a dropped trim or empty-filter anyway, but only as long as `reconcile` keeps
+/// calling this function; a future consumer could stop, and this pin names the shared rule.
+#[test]
+fn media_tokens_splits_trims_and_drops_empties() {
+    assert_eq!(media_tokens("b~a | b~b|b~c").collect::<Vec<_>>(), ["b~a", "b~b", "b~c"]);
+    assert_eq!(media_tokens("").count(), 0, "a value that names nothing names no token");
+    assert_eq!(media_tokens(" | | ").count(), 0, "a separator-only value names no token either");
 }
 
 /// Which message wins decides the file's timestamp, its sender and the conversation a later pass

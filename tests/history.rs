@@ -10,11 +10,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 
 use exportsnap::export::ExportJson;
-use exportsnap::export::history::{Document, Record, RecordKind, merge, write_csv, write_json, write_text};
+use exportsnap::export::history::{Document, HtmlLinks, Record, RecordKind, merge, write_csv, write_html, write_json, write_text};
+use exportsnap::export::manifest::{ExportId, ItemKind, Manifest, NewItem};
 use exportsnap::export::model::{ChatHistory, ConversationId, MessageText, SnapHistory};
 use exportsnap::export::schema;
+use tempfile::TempDir;
 
 /// The crate-level allow is scoped here rather than inside `common`: this crate reads the fixture
 /// half and gates on no tool. See `tests/common/mod.rs` for what that placement keeps measuring.
@@ -49,6 +52,18 @@ fn chat_entry_with_content(created: &str, created_epoch: Option<i64>, content: &
         created_epoch,
         content: Some(content.to_owned()),
         media_type: "TEXT".to_owned(),
+        ..schema::ChatEntry::default()
+    }
+}
+
+/// One chat message naming media. `Media Type` is `MEDIA`, the word the observed export puts on a
+/// row that names a file, and the `Media IDs` value is handed to the writer exactly as written.
+fn chat_entry_with_media(created: &str, created_epoch: Option<i64>, media_ids: &str) -> schema::ChatEntry {
+    schema::ChatEntry {
+        created: created.to_owned(),
+        created_epoch,
+        media_type: "MEDIA".to_owned(),
+        media_ids: media_ids.to_owned(),
         ..schema::ChatEntry::default()
     }
 }
@@ -387,4 +402,200 @@ fn the_writers_stamp_the_resolved_instant_not_the_created_string_alone() {
     }]);
     let value: serde_json::Value = serde_json::from_str(&write_json(&document).unwrap()).unwrap();
     assert_eq!(value["records"][0]["created"], "2021-03-04 09:00:00 UTC");
+}
+
+// ---- the html writer (decision 58's "the format a user reads", decision 62's links) ----
+
+/// Escaping is the writer's first concern: a body holding markup, quotes and an ampersand renders
+/// as escaped text, and the raw markup never reaches the document. The assertion is on the literal
+/// entity spellings, so a mutation that skips one character's escape cannot pass by coincidence.
+#[test]
+fn html_escapes_a_body_containing_markup() {
+    let body = "<script>alert('&\"x');</script>";
+    let document = document_with(vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, body)]);
+    let rendered = write_html(&document, None).unwrap().html;
+
+    assert!(
+        rendered.contains("&lt;script&gt;alert(&#39;&amp;&quot;x&#39;);&lt;/script&gt;"),
+        "the body renders as entities, not markup: {rendered}"
+    );
+    assert!(!rendered.contains("<script>"), "the raw markup never reaches the document: {rendered}");
+}
+
+/// A `done` manifest row renders a link to the bare output filename — the conversation directory is
+/// flat and the document sits beside the media (decision 60) — and that filename names a real file
+/// on disk (the path `mark_done` recorded).
+#[test]
+fn html_links_a_done_media_token_to_the_bare_filename_on_disk() {
+    let workspace = TempDir::new().unwrap();
+    let mut manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
+    let token = "b~aB3xY9";
+    manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: token, url: None }]).unwrap();
+    let output = workspace.path().join("2021-03-04_b~aB3xY9.jpg");
+    fs::write(&output, b"media bytes").unwrap();
+    manifest.mark_done(ItemKind::ChatMedia, token, &output).unwrap();
+
+    let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, token)]);
+    let rendered = write_html(&document, Some(&manifest)).unwrap().html;
+
+    let href = "2021-03-04_b~aB3xY9.jpg";
+    assert!(rendered.contains(&format!("<a href=\"{href}\">{href}</a>")), "{rendered}");
+    let recorded = manifest.item(ItemKind::ChatMedia, token).unwrap().unwrap();
+    assert_eq!(recorded.output_path.unwrap().file_name().unwrap().to_str().unwrap(), href, "the href is the bare output filename");
+    assert!(output.exists(), "the file the link names is on disk beside the document");
+}
+
+/// A row that is not `done` — failed, source-missing, pending, retired, excluded, or absent —
+/// renders an inert placeholder naming the record's own `Media Type` and nothing else (decision 62):
+/// no token, no id, no path. Every non-`done` status is pinned in one message, because a mutation
+/// weakening the `Done` predicate to admit any one of them (`Done` → `Done | Pending` is the
+/// realistic one, the mid-run state) would render a link where the test asserts a placeholder.
+#[test]
+fn html_renders_a_placeholder_for_every_status_that_is_not_done() {
+    let workspace = TempDir::new().unwrap();
+    let mut manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
+    let failed = "b~tokA";
+    let source_missing = "b~tokB";
+    let pending = "b~tokC";
+    let retired = "b~tokD";
+    let excluded = "b~tokE";
+    let missing_row = "b~tokF";
+    manifest
+        .enroll(&[
+            NewItem { kind: ItemKind::ChatMedia, source_id: failed, url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: source_missing, url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: pending, url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: retired, url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: excluded, url: None },
+        ])
+        .unwrap();
+    manifest.mark_failed(ItemKind::ChatMedia, failed, "it broke").unwrap();
+    manifest.mark_source_missing(ItemKind::ChatMedia, source_missing, "no media in the export").unwrap();
+    // `pending` stays Pending: enrolled, never marked.
+    manifest.exclude(ItemKind::ChatMedia, &[excluded.to_owned()]).unwrap();
+    // `retired` left the export: every OTHER token is still named, so the sweep retires only it.
+    let named: BTreeSet<&str> = [failed, source_missing, pending, excluded].into_iter().collect();
+    manifest.retire_absent(ItemKind::ChatMedia, &named, &[]).unwrap();
+
+    let media_ids = format!("{failed} | {source_missing} | {pending} | {retired} | {excluded} | {missing_row}");
+    let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, &media_ids)]);
+    let rendered = write_html(&document, Some(&manifest)).unwrap().html;
+
+    assert_eq!(rendered.matches("<span class=\"media-placeholder\">MEDIA</span>").count(), 6, "{rendered}");
+    assert!(!rendered.contains("<a href"), "no row is done, so no link is rendered: {rendered}");
+    for token in [failed, source_missing, pending, retired, excluded, missing_row] {
+        assert!(!rendered.contains(token), "a placeholder carries no token: {rendered}");
+    }
+}
+
+/// `manifest: None` is the no-`mydata~*`-group run: every media reference renders as a placeholder
+/// and the writer states the reason once in [`HtmlLinks::NoManifest`], so a screen does not have to
+/// guess per message why every link is missing.
+#[test]
+fn html_without_a_manifest_renders_placeholders_and_says_no_manifest() {
+    let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, "b~aB3xY9")]);
+    let rendered = write_html(&document, None).unwrap();
+
+    assert_eq!(rendered.links, HtmlLinks::NoManifest);
+    assert!(rendered.html.contains("<span class=\"media-placeholder\">MEDIA</span>"), "{}", rendered.html);
+    assert!(!rendered.html.contains("b~aB3xY9"), "no token reaches a placeholder");
+    assert!(!rendered.html.contains("<a href"), "no manifest, no link");
+}
+
+/// The mirror of the above: a manifest present — even one with no `done` rows — is reported as
+/// [`HtmlLinks::Manifest`], because a later run could make a row `done` and the links live.
+#[test]
+fn html_with_a_manifest_reports_links_manifest() {
+    let workspace = TempDir::new().unwrap();
+    let manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
+    let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, "b~aB3xY9")]);
+    let rendered = write_html(&document, Some(&manifest)).unwrap();
+
+    assert_eq!(rendered.links, HtmlLinks::Manifest);
+}
+
+/// The `<title>` is the conversation title where any record carries one, else the conversation key,
+/// and both arms are escaped — a title holding markup must render as text, not structure.
+#[test]
+fn html_title_prefers_the_conversation_title_and_escapes_it() {
+    let titled = document_with(vec![schema::ChatEntry {
+        from: "alice".to_owned(),
+        media_type: "TEXT".to_owned(),
+        created: "2021-03-04 09:00:00 UTC".to_owned(),
+        content: Some("hello".to_owned()),
+        conversation_title: Some("<b>The Gang</b>".to_owned()),
+        ..schema::ChatEntry::default()
+    }]);
+    let rendered = write_html(&titled, None).unwrap().html;
+    assert!(rendered.contains("<title>&lt;b&gt;The Gang&lt;/b&gt;</title>"), "{rendered}");
+    assert!(!rendered.contains("<b>The Gang</b>"), "the title's markup is escaped, not structural");
+
+    let keyed = document_with(vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, "hello")]);
+    assert!(
+        write_html(&keyed, None).unwrap().html.contains("<title>k</title>"),
+        "no record carries a title, so the key names the document"
+    );
+}
+
+/// A snap record renders its kind, timestamp and direction like the other formats, and carries no
+/// media paragraph at all — a snap names no `Media IDs`.
+#[test]
+fn html_renders_a_snap_record_with_no_media() {
+    let document = document_from(Vec::new(), vec![snap_entry_named("bob", "2021-03-04 09:30:00 UTC")]);
+    let rendered = write_html(&document, None).unwrap().html;
+
+    assert!(rendered.contains("<span class=\"kind\">snap</span>"), "{rendered}");
+    assert!(rendered.contains("<span class=\"time\">2021-03-04 09:30:00 UTC</span>"), "{rendered}");
+    assert!(!rendered.contains("media-placeholder"), "a snap names no media, so none is rendered");
+}
+
+/// `MediaKind::Other` carries arbitrary text, so a media type that is itself markup must render
+/// escaped in the header and the placeholder alike — the call site the body-escape test does not
+/// reach, since it drives `TEXT` bodies.
+#[test]
+fn html_escapes_an_unknown_media_type() {
+    let document = document_with(vec![schema::ChatEntry {
+        media_type: "<IMG>".to_owned(),
+        media_ids: "b~aB3xY9".to_owned(),
+        created: "2021-03-04 09:00:00 UTC".to_owned(),
+        ..schema::ChatEntry::default()
+    }]);
+    let rendered = write_html(&document, None).unwrap().html;
+
+    assert!(rendered.contains("<span class=\"media-type\">&lt;IMG&gt;</span>"), "the header escapes the unknown type: {rendered}");
+    assert!(rendered.contains("<span class=\"media-placeholder\">&lt;IMG&gt;</span>"), "the placeholder escapes it too: {rendered}");
+    assert!(!rendered.contains("<IMG>"), "the raw unknown type never reaches the document: {rendered}");
+}
+
+/// The `href` is the bare filename escaped for its attribute context: a recorded output filename
+/// carrying a double quote must not break out of the attribute. The crate never writes such a name,
+/// but the manifest is `0600` and hand-editable, and the escape is what contains it.
+#[test]
+fn html_escapes_a_double_quote_in_the_recorded_filename() {
+    let workspace = TempDir::new().unwrap();
+    let mut manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
+    let token = "b~aB3xY9";
+    manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: token, url: None }]).unwrap();
+    let output = workspace.path().join("we\"ird.jpg");
+    fs::write(&output, b"media bytes").unwrap();
+    manifest.mark_done(ItemKind::ChatMedia, token, &output).unwrap();
+
+    let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, token)]);
+    let rendered = write_html(&document, Some(&manifest)).unwrap().html;
+
+    assert!(rendered.contains("href=\"we&quot;ird.jpg\""), "the filename's quote is escaped: {rendered}");
+    assert!(!rendered.contains("href=\"we\"ird.jpg\""), "an unescaped quote would break the attribute: {rendered}");
+}
+
+/// The hand-written `Debug` on [`Html`] redacts the transcript, the way the model's [`MessageText`]
+/// redacts a body: escaping is markup safety, not privacy, so a `{:?}` on an `Html` must not print
+/// the message text either.
+#[test]
+fn html_debug_never_prints_a_message_body() {
+    let body = "TOP-SECRET-BODY-NEVER-DEBUG";
+    let document = document_with(vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, body)]);
+    let rendered = write_html(&document, None).unwrap();
+    let debugged = format!("{rendered:?}");
+    assert!(!debugged.contains(body), "a Debug render of an Html must not print a message body");
+    assert!(debugged.contains("<redacted>"), "the html field's Debug spelling is the redacted one");
 }
