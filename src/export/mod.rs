@@ -31,6 +31,7 @@ pub mod chat_run;
 pub mod env;
 pub mod exif;
 pub mod ffmpeg;
+pub mod history;
 pub mod local_fix;
 pub mod manifest;
 pub mod memories;

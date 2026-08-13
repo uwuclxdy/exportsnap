@@ -49,14 +49,15 @@ use std::sync::OnceLock;
 /// | `video` | 1 | 6 | 6 |
 /// | `export` | 11 | 0 | 6 |
 /// | `overview` | 11 | 0 | 6 |
+/// | `history` | 11 | 0 | 6 |
 /// | `fixture_gate` | 11 | 2 | 6 |
 /// | `tool_gate` | 5 | 6 | 6 |
 ///
 /// `video`, `local_fix` and `chat_fix` reach every function out here, which is the zero in the first
 /// column; `video`'s 1 is the [`Tool`] variant its own allow is documented against, not a function.
 /// The alternative placement is a crate-level allow on those three `mod common;` declarations, which
-/// would have taken that zero with it. `export`, `overview` and `fixture_gate` are the mirror image
-/// at 11 tool-side warnings each and carry that crate-level allow instead. `tool_gate` warns 5 out
+/// would have taken that zero with it. `export`, `overview`, `history` and `fixture_gate` are the
+/// mirror image at 11 tool-side warnings each and carry that crate-level allow instead. `tool_gate` warns 5 out
 /// here, which is the number its own allow is documented against, and 17 with nothing allowed at
 /// all.
 ///
