@@ -24,7 +24,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use exportsnap::export::env;
@@ -197,18 +197,24 @@ fn the_out_root_the_binary_was_given_reaches_both_media_screens() {
     assert_eq!(value(&fields, "memories-source"), quoted(dir.path()));
 }
 
-/// Unix only, because the sandbox's config dir is spelled per platform and the platform answer
-/// decides which one the binary reads. Linux reads `$XDG_CONFIG_HOME/exportsnap` and mac reads
-/// `$HOME/Library/Application Support/exportsnap`; writing both spellings keeps one test body on
-/// both legs, with the unread one inert. Windows reads the shell folders that no env var can
-/// redirect, so it has no sandbox to write into — the same split `tests/config.rs` documents.
+/// The two config-dir spellings the binary can read, one per unix platform. Linux reads
+/// `$XDG_CONFIG_HOME/exportsnap` — `directories`' `lin.rs` ignores the qualifier and organization
+/// and keeps the application name only — and mac reads the bundle id
+/// `$HOME/Library/Application Support/dev.uwuclxdy.exportsnap` (`mac.rs` joins qualifier,
+/// organization and application). Writing both spellings keeps one test body on both legs, with
+/// the unread one inert. Windows reads the shell folders that no env var can redirect, so it has
+/// no sandbox to write into — the same split `tests/config.rs` documents.
+fn config_dirs(home: &Path) -> [PathBuf; 2] {
+    [home.join("exportsnap"), home.join("Library/Application Support/dev.uwuclxdy.exportsnap")]
+}
+
 #[cfg(unix)]
 #[test]
 fn a_config_out_dir_reaches_every_out_key() {
     let dir = export_tree();
     let home = tempfile::tempdir().unwrap();
     let out = dir.path().join("elsewhere");
-    for config_dir in [home.path().join("exportsnap"), home.path().join("Library/Application Support/exportsnap")] {
+    for config_dir in config_dirs(home.path()) {
         fs::create_dir_all(&config_dir).unwrap();
         fs::write(config_dir.join("config.toml"), format!("out_dir = {}\n", quoted(&out))).unwrap();
     }
@@ -226,6 +232,26 @@ fn a_config_out_dir_reaches_every_out_key() {
     assert_eq!(value(&fields, "history-out"), quoted(&out));
     // The file moves the out root and nothing else; the source keys must not follow it.
     assert_eq!(value(&fields, "memories-source"), quoted(dir.path()));
+}
+
+/// The ruling's fail-identical half, from the outside: a broken config file must fail
+/// `--print-source` exactly as it fails the TUI path — exit non-zero, stderr naming the config
+/// error. A path that swallowed the load error would print defaults at exit 0 here while the ui
+/// still failed, which is the exact divergence the ruling forbids.
+#[cfg(unix)]
+#[test]
+fn a_broken_config_fails_the_print_source_path_too() {
+    let dir = export_tree();
+    let home = tempfile::tempdir().unwrap();
+    for config_dir in config_dirs(home.path()) {
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("config.toml"), "out_dir = [unclosed").unwrap();
+    }
+    let output = print_source_at(home.path(), &[format!("--source={}", dir.path().display())]);
+    assert!(!output.status.success(), "a broken config must fail --print-source, got {:?}", output.status);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("config.toml"), "the error must name the config file, got {stderr:?}");
+    assert!(stderr.contains("not valid toml"), "the error must name the config failure, got {stderr:?}");
 }
 
 /// Unix only, and the gate is the FIXTURE rather than the assertion: a newline, a tab and a quote

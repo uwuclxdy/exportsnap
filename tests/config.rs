@@ -58,7 +58,7 @@ fn a_cli_flag_beats_the_same_key_in_the_config() {
 }
 
 #[test]
-fn a_config_out_dir_is_honoured_through_the_real_wiring() {
+fn a_config_out_dir_is_honoured_by_resolve() {
     let dir = tempdir().unwrap();
     let config = load_text(dir.path(), "out_dir = \"/tmp/fixed\"\n").unwrap();
     assert_eq!(config.out_dir.as_deref(), Some(Path::new("/tmp/fixed")));

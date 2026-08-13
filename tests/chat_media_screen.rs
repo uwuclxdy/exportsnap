@@ -801,6 +801,28 @@ fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
     assert!(!app.chat_media().is_transcode_on(), "space on the start chip must not reach the toggle");
 }
 
+/// The delivery pin the cycle test cannot see: its assertions start from the default and wrap
+/// through the row, so a `with_environment` that ignored the resolved values and hardcoded
+/// `Both`/`true` kept every existing test green (measured on a full-suite mutation run,
+/// 2026-08-14). The resolved values are the cycle's and the toggle's initial state, so composing
+/// with `Merged` and `false` must surface as such on the screen.
+#[test]
+fn the_resolved_overlay_and_transcode_are_the_chat_initial_state() {
+    let mut app = App::new(Tier::Full).with_source_environment(
+        PathBuf::from("/export"),
+        RunDefaults {
+            out_root: PathBuf::from("/export/out"),
+            overlay_mode: OverlayMode::Merged,
+            transcode: false,
+            ..RunDefaults::resolve(None, &Config::default(), Path::new("/export"))
+        },
+        environment(),
+    );
+    on_tab(&mut app, Tab::ChatMedia);
+    assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Merged, "the resolved overlay_mode must be the cycle's initial state");
+    assert!(!app.chat_media().is_transcode_on(), "the resolved transcode=false must be the chat toggle's initial state");
+}
+
 #[test]
 fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item() {
     let dir = export_tree(&[], &[1]);

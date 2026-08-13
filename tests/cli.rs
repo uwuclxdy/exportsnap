@@ -17,8 +17,16 @@ use std::process::{Command, Output, Stdio};
 /// Launches the built binary with `args` and hands back its whole run. `output()` gives the child a
 /// captured stdout and no tty, which is the point: every flag pinned here has to work with no
 /// terminal to take over.
+///
+/// Every spawn is sandboxed against the operator's real config for the same reason
+/// `tests/print_source.rs`'s sandbox exists — `main` loads the config file before it parses the
+/// source and out arguments (decision 66, task 85), so a real or malformed config on the box
+/// would red these argv assertions for a reason unrelated to the argument under test. The
+/// per-platform spelling of the config dir is `tests/print_source.rs`'s `config_dirs`; the scratch
+/// home here is empty, so the sandbox itself adds no key.
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_exportsnap")).args(args).output().unwrap()
+    let home = tempfile::tempdir().unwrap();
+    Command::new(env!("CARGO_BIN_EXE_exportsnap")).args(args).env("XDG_CONFIG_HOME", home.path()).env("HOME", home.path()).output().unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -118,8 +126,13 @@ fn a_payload_flag_exits_zero_when_its_reader_has_left() {
     let source = format!("--source={}", dir.path().display());
     for args in [["--version"].as_slice(), ["--help"].as_slice(), ["--print-source", &source].as_slice()] {
         let (reader, writer) = std::io::pipe().unwrap();
+        // The `--print-source` arm reaches the config load like any other run (see `run`'s doc for
+        // the sandbox rationale), so the env is set here too even though two of the three arms exit
+        // before it.
+        let home = tempfile::tempdir().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_exportsnap"));
         command.args(args).stdout(writer).stderr(Stdio::piped());
+        command.env("XDG_CONFIG_HOME", home.path()).env("HOME", home.path());
         drop(reader);
         let output = command.output().unwrap();
 

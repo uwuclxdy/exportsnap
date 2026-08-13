@@ -191,9 +191,11 @@ impl StdError for ConfigError {
     }
 }
 
-/// The platform config dir (`directories` 6: `~/.config/exportsnap` on linux, roaming AppData
-/// on windows, `~/Library/Application Support` on macos), or `None` when no home dir can be
-/// resolved — in which case there is no config file and defaults rule.
+/// The platform config dir (`directories` 6: `~/.config/exportsnap` on linux — the qualifier and
+/// organization are dropped — `%APPDATA%\uwuclxdy\exportsnap\config` on windows,
+/// `~/Library/Application Support/dev.uwuclxdy.exportsnap` on macos — the bundle id joins all
+/// three parts), or `None` when no home dir can be resolved — in which case there is no config
+/// file and defaults rule.
 ///
 /// Kept separate from [`load`] and [`write`], which take the dir as a parameter: the binary
 /// calls this once at startup, and tests pass scratch dirs so the windows leg never resolves

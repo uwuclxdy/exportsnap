@@ -716,6 +716,25 @@ fn arrows_are_trapped_while_descended_but_the_alt_jump_still_lands() {
     let _ = jump;
 }
 
+/// The delivery pin the toggle test cannot see: its flip assertions start from the default, so a
+/// `with_environment` that ignored the resolved `transcode` and hardcoded `true` kept every
+/// existing test green (measured on a full-suite mutation run, 2026-08-14). The resolved value is
+/// the toggle's initial state, so composing with `false` must surface as `false` on the screen.
+#[test]
+fn the_resolved_transcode_is_the_toggle_initial_state() {
+    let mut app = App::new(Tier::Full).with_source_environment(
+        PathBuf::from("/export"),
+        RunDefaults {
+            out_root: PathBuf::from("/export/out"),
+            transcode: false,
+            ..RunDefaults::resolve(None, &Config::default(), Path::new("/export"))
+        },
+        Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
+    );
+    on_memories(&mut app);
+    assert!(!app.memories().is_transcode_on(), "the resolved transcode=false must be the toggle's initial state");
+}
+
 #[test]
 fn the_form_caret_walks_all_rows_and_enter_acts_on_toggle_and_start() {
     let dir = export_tree("form-keys", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
