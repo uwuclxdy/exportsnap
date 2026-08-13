@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use exportsnap::export::ExportJson;
-use exportsnap::export::history::{Record, RecordKind, merge};
+use exportsnap::export::history::{Document, Record, RecordKind, merge, write_csv, write_json, write_text};
 use exportsnap::export::model::{ChatHistory, ConversationId, MessageText, SnapHistory};
 use exportsnap::export::schema;
 
@@ -41,9 +41,16 @@ fn chat_entry(created: &str, created_epoch: Option<i64>) -> schema::ChatEntry {
 }
 
 /// One chat message with a body, so two records with no timestamps are still distinguishable in
-/// the pinned order.
+/// the pinned order. `Media Type` is set to `TEXT` so the writers' rows carry a real word rather
+/// than the schema default's empty string (which `MediaKind::from_wire` maps to `Other("")`).
 fn chat_entry_with_content(created: &str, created_epoch: Option<i64>, content: &str) -> schema::ChatEntry {
-    schema::ChatEntry { created: created.to_owned(), created_epoch, content: Some(content.to_owned()), ..schema::ChatEntry::default() }
+    schema::ChatEntry {
+        created: created.to_owned(),
+        created_epoch,
+        content: Some(content.to_owned()),
+        media_type: "TEXT".to_owned(),
+        ..schema::ChatEntry::default()
+    }
 }
 
 /// One snap, every field other than its dates left at the loader's own default.
@@ -151,4 +158,233 @@ fn the_real_export_merges_chat_and_snap_into_aligned_threads() {
             assert!(has_snap && !has_chat, "a snap-only key carries no chat record");
         }
     }
+}
+
+// ---- the document model and the three writers (decision 58) ----
+
+/// One conversation holding `chat_entries` and no snaps, as a [`Document`] through the real
+/// schema-to-merge path.
+fn document_with(chat_entries: Vec<schema::ChatEntry>) -> Document {
+    document_from(chat_entries, Vec::new())
+}
+
+/// One conversation holding both sources' entries, as a [`Document`] through the real
+/// schema-to-merge path.
+fn document_from(chat_entries: Vec<schema::ChatEntry>, snap_entries: Vec<schema::SnapEntry>) -> Document {
+    let chat = chat_from(vec![("k", chat_entries)]);
+    let snap = snap_from(vec![("k", snap_entries)]);
+    let merged = merge(&chat, &snap);
+    let thread = merged.threads.into_iter().next().expect("the single conversation becomes one thread");
+    Document::from_thread(thread)
+}
+
+/// One snap with its sender and kind named, so a snap row in the writers is distinguishable.
+fn snap_entry_named(from: &str, created: &str) -> schema::SnapEntry {
+    schema::SnapEntry { from: from.to_owned(), media_type: "MEDIA".to_owned(), created: created.to_owned(), ..schema::SnapEntry::default() }
+}
+
+/// A small RFC 4180 reader, in the test so the write path is not judged by the code that wrote
+/// it. Fields are unwrapped on `\n`; a quoted field is unwrapped on `"` with `""` read back as a
+/// single quote; `\r` outside a quoted field is skipped rather than misread as a line ending.
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut chars = text.chars().peekable();
+    let mut in_quotes = false;
+    while let Some(character) = chars.next() {
+        if in_quotes {
+            if character == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(character);
+            }
+        } else {
+            match character {
+                '"' => in_quotes = true,
+                ',' => row.push(std::mem::take(&mut field)),
+                '\n' => {
+                    row.push(std::mem::take(&mut field));
+                    rows.push(std::mem::take(&mut row));
+                }
+                // The writer never emits a bare `\r` outside a quoted field, so skipping it here
+                // cannot lose data this format actually produces.
+                '\r' => {}
+                _ => field.push(character),
+            }
+        }
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    rows
+}
+
+/// Reads [`write_text`] output back into `(header, body_lines)` records. A blank line separates
+/// records; a line starting with `> ` continues the current record's body; any other non-blank
+/// line starts a new record.
+fn parse_text(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut records: Vec<(String, Vec<String>)> = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("> ") {
+            let (_, body) = records.last_mut().expect("a continuation line always follows a header");
+            body.push(rest.to_owned());
+        } else {
+            records.push((line.to_owned(), Vec::new()));
+        }
+    }
+    records
+}
+
+/// The whole risk of csv: a body holding the delimiter, a quote, and a newline has to survive
+/// write-then-parse byte-for-byte, and so does a body holding a bare carriage return and nothing
+/// else. The `\r` case is separate rather than folded into the first body, because a strict csv
+/// consumer treats a bare `\r` as a terminator — a mutation deleting `\r` from the quoting trigger
+/// would leave the first body still quoted by its comma, so only the `\r`-only body catches it.
+#[test]
+fn csv_round_trips_a_body_with_every_quoting_trigger() {
+    for body in ["hello, \"world\"\nsecond line", "bare\rreturn"] {
+        let document = document_with(vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, body)]);
+        let rendered = write_csv(&document);
+
+        let rows = parse_csv(&rendered);
+        assert_eq!(rows.len(), 2, "the header row plus one data row");
+        assert_eq!(rows[0], ["kind", "from", "is_sender", "media_type", "created", "content", "media_ids", "conversation_title"]);
+        assert_eq!(rows[1].len(), 8, "an empty absent field still occupies its column");
+        assert_eq!(rows[1][5], body, "the content column survives write-then-parse byte-for-byte");
+    }
+}
+
+/// Each writer is byte-stable: two INDEPENDENTLY built documents — same entries, separate
+/// schema-to-merge passes, not a cloned buffer — render byte-identical output. That is the
+/// determinism the writers promise and the test the task's "one render stream" (decision 58)
+/// exists to guarantee.
+#[test]
+fn each_writer_is_byte_stable_across_two_independent_builds() {
+    let entries = || vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, "stable\nbody, \"quoted\"")];
+    let snaps = || vec![snap_entry_named("alice", "2021-03-04 09:30:00 UTC")];
+    let first = document_from(entries(), snaps());
+    let second = document_from(entries(), snaps());
+
+    assert_eq!(write_text(&first), write_text(&second));
+    assert_eq!(write_csv(&first), write_csv(&second));
+    assert_eq!(write_json(&first).unwrap(), write_json(&second).unwrap());
+}
+
+/// The text format's unambiguity: a body with a newline must stay one record, and a record with
+/// an empty body must not be swallowed into the one before it. [`parse_text`] is the reader a
+/// consumer would write, so "cannot be read as two records" is asserted through it rather than
+/// by eyeballing the bytes.
+#[test]
+fn text_renders_a_multiline_body_and_an_empty_body_as_distinct_records() {
+    let document = document_with(vec![
+        chat_entry_with_content("2021-03-04 09:00:00 UTC", None, "first line\nsecond line"),
+        // `content: Some("")` through the schema path is the loader's empty-spelling of absence,
+        // so this record reaches the writers with no body at all.
+        chat_entry_with_content("2021-03-04 09:30:00 UTC", None, ""),
+        chat_entry_with_content("2021-03-04 10:00:00 UTC", None, "third"),
+    ]);
+    let rendered = write_text(&document);
+
+    let records = parse_text(&rendered);
+    assert_eq!(records.len(), 3, "the empty-body record must not be read as two records or none");
+    assert_eq!(records[0].1, ["first line", "second line"], "a newline in the body is one record, not two");
+    assert!(records[1].1.is_empty(), "the empty body renders as no body lines");
+    assert_eq!(records[2].1, ["third"]);
+}
+
+/// The json output has to be the REAL body, not a `Debug` string: it parses back with the body,
+/// kind, and timestamp intact, and carries no `MessageText(<redacted>)` marker. A snap row is
+/// pinned too — `kind: "snap"` and no `content` key, since `None` fields are omitted.
+#[test]
+fn json_round_trips_body_kind_and_timestamp_and_never_carries_a_redaction_marker() {
+    let body = "hello \"world\"";
+    let document = document_from(
+        vec![schema::ChatEntry {
+            from: "alice".to_owned(),
+            media_type: "TEXT".to_owned(),
+            created: "2021-03-04 09:00:00 UTC".to_owned(),
+            created_epoch: None,
+            content: Some(body.to_owned()),
+            conversation_title: Some("The Gang".to_owned()),
+            is_sender: false,
+            ..schema::ChatEntry::default()
+        }],
+        vec![snap_entry_named("bob", "2021-03-04 09:30:00 UTC")],
+    );
+    let rendered = write_json(&document).unwrap();
+
+    // The body's embedded quote is JSON-escaped (`"` → `\"`) on the wire, so the byte-level check
+    // matches the escaped spelling; the round-trip below proves the value itself survives.
+    assert!(rendered.contains(r#"hello \"world\""#), "the real body is in the output, not a placeholder");
+    assert!(!rendered.contains("MessageText(<redacted>)"), "the json must never carry the Debug marker");
+
+    let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(value["conversation"], "k", "the conversation key rides in the document");
+    let records = value["records"].as_array().expect("records is an array");
+    assert_eq!(records.len(), 2, "the chat and the snap both render");
+
+    let chat = &records[0];
+    assert_eq!(chat["kind"], "chat");
+    assert_eq!(chat["content"], body);
+    assert_eq!(chat["created"], "2021-03-04 09:00:00 UTC");
+    assert_eq!(chat["media_type"], "TEXT");
+    assert_eq!(chat["from"], "alice");
+    assert_eq!(chat["conversation_title"], "The Gang");
+    assert_eq!(chat["is_sender"], false);
+
+    let snap = &records[1];
+    assert_eq!(snap["kind"], "snap");
+    assert_eq!(snap["media_type"], "MEDIA");
+    assert!(snap.get("content").is_none(), "a snap row carries no content key at all");
+}
+
+/// The redacting `Debug` holds all the way up the document: a `{:?}` on the [`Document`] must
+/// not contain a body string. This is the leak the json mirror's missing `Debug` exists to stop.
+#[test]
+fn document_debug_never_prints_a_message_body() {
+    let body = "TOP-SECRET-BODY-NEVER-DEBUG";
+    let document = document_with(vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, body)]);
+    let debugged = format!("{document:?}");
+    assert!(!debugged.contains(body), "a Debug render of the document must not leak a message body");
+    assert!(debugged.contains("MessageText(<redacted>)"), "the body's Debug spelling is the redacted one");
+}
+
+/// A body whose first character is a spreadsheet formula trigger is guarded with a leading `'`, so
+/// Excel and Sheets render it as text instead of evaluating it (CWE-1236). The guard rides inside
+/// the quotes when the value needs quoting too, and it is the whole reason the csv is the display
+/// path while [`exportsnap::export::history::write_json`] is the lossless re-import path.
+#[test]
+fn csv_neutralizes_every_formula_trigger() {
+    for trigger in ['=', '+', '-', '@', '\t', '\r'] {
+        let body = format!("{trigger}1+1");
+        let document = document_with(vec![chat_entry_with_content("2021-03-04 09:00:00 UTC", None, &body)]);
+        let rows = parse_csv(&write_csv(&document));
+        assert_eq!(rows[1][5], format!("'{body}"), "a leading {trigger:?} is guarded so a spreadsheet reads text");
+    }
+}
+
+/// The writers stamp the RESOLVED instant (decision 61's fixed timestamps), not the `Created` string
+/// alone: a record carrying only `Created(microseconds)` must still render a date, and that is the
+/// wiring a `record_json` switch back to `created()` would break.
+#[test]
+fn the_writers_stamp_the_resolved_instant_not_the_created_string_alone() {
+    // `created: ""` is the loader's empty spelling, so only the epoch names the instant.
+    let document = document_with(vec![schema::ChatEntry {
+        created: "".to_owned(),
+        created_epoch: Some(1_614_848_400_000), // 2021-03-04 09:00:00 UTC
+        content: Some("only an epoch".to_owned()),
+        ..schema::ChatEntry::default()
+    }]);
+    let value: serde_json::Value = serde_json::from_str(&write_json(&document).unwrap()).unwrap();
+    assert_eq!(value["records"][0]["created"], "2021-03-04 09:00:00 UTC");
 }

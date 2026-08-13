@@ -9,9 +9,7 @@
 //! and [`Record::content`]/[`Record::media_ids`] return `None` on the snap arm as a consequence
 //! of what the type holds, not as a convention every call site has to remember.
 //!
-//! Nothing here writes a file, renders a row, or knows a screen exists. This is the document
-//! model the four phase-4 writers render over (decision 58); the writers themselves, and the
-//! serializable mirror one of them needs, are later tasks.
+//! Nothing here writes a file, renders a row, or knows a screen exists. This is the document model the four phase-4 writers render over (decision 58), and three of the four writers (json, text, csv) live here as pure functions over that document; the html writer and the `fs::write` that lands any of them on disk are later tasks.
 //!
 //! # Ordering
 //!
@@ -34,13 +32,28 @@
 //!
 //! # Privacy
 //!
-//! [`Record`], [`Thread`] and [`MergedHistory`] derive `Debug` and `Clone` and nothing else. The
-//! bodies they wrap keep [`model::MessageText`]'s redacting `Debug`, so a `{:?}` cannot leak a
-//! message body, and nothing here derives `Serialize` — task 77's json writer builds a separate
-//! serializable mirror rather than deriving one on these (decisions 3, 58).
+//! [`Record`], [`Thread`], [`MergedHistory`] and [`Document`] derive `Debug` and `Clone` and nothing else. The bodies they wrap keep [`model::MessageText`]'s redacting `Debug`, so a `{:?}` cannot leak a message body, and nothing here derives `Serialize` — the json writer builds a separate serializable mirror inside the call and drops it before returning (decisions 3, 58). That mirror is `Serialize`-only, with no `Debug`: it holds the plain-text bodies, so a `{:?}` on it would leak exactly what [`model::MessageText`]'s redacting `Debug` exists to keep off a terminal.
+//!
+//! # The document model and writers
+//!
+//! [`Document`] is one conversation's transcript: the merged records of one [`Thread`], kept in the order [`merge`] produced them. The three writers are pure functions over it, each byte-stable — the same [`Document`] always renders the same bytes — and free of any `HashMap` iteration, timestamp, or randomness, which is what makes the byte-equality tests meaningful.
+//!
+//! ## json (decision 58's re-import path)
+//!
+//! A transient [`Serialize`]-only mirror is built inside [`write_json`] and dropped before returning. It wraps the document as `{ "conversation": <key>, "records": [...] }`, one record per merged row, with `None` fields omitted rather than written as `null` (`skip_serializing_if`) — a snap row therefore carries no `content` key at all. `created` is the record's resolved instant ([`Record::resolved_created`]) rendered as a string: the same fixed timestamp the media legs stamp with (decision 61). [`write_json`] returns a `Result` rather than swallowing the `Result` the serializer returns: the mirror holds only `String`s and `bool`s, so the error arm is unreachable in practice, but propagating keeps a future mirror field that CAN fail (a float, a hand-written `Serialize`) loud instead of `""`.
+//!
+//! ## csv (RFC 4180, decision 58's spreadsheet path)
+//!
+//! A header row, then one row per record, `\n`-terminated, with absent fields as the empty string. A field containing a comma, a double quote, a newline or a carriage return is wrapped in double quotes and every embedded quote is doubled (`"` → `""`); every other field is written verbatim.
+//!
+//! ## text (the plain-transcript path)
+//!
+//! One header line per record — `[<created>] <from> (<kind> <media_type>, <sent|received>)`, with `no date` and `unknown` standing in for an absent instant and sender — then the body with every line prefixed `> `, and a blank line between records. The prefix is what keeps the format unambiguous: a reader treats any line starting with `> ` as the current record's body and every other non-blank line as a new record's header, so a multi-line body (an embedded blank line included) can never be read as two records, and a header always starts with `[`, so it can never be mistaken for a continuation. The body renders through `str::lines()`, which normalizes `\r\n` to `\n` and drops a trailing line break — a display choice, since text is for a person to read rather than a byte-exact round trip. An absent body renders as no body lines at all.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+
+use serde::Serialize;
 
 use crate::export::model;
 use crate::export::model::{ConversationId, MediaKind, MessageText, Timestamp, Username};
@@ -50,6 +63,19 @@ use crate::export::model::{ConversationId, MediaKind, MessageText, Timestamp, Us
 pub enum RecordKind {
     Chat,
     Snap,
+}
+
+impl RecordKind {
+    /// The lowercase word the three writers use for this kind.
+    ///
+    /// [`RecordKind`] is this crate's own invention — decision 61 merges two files that never name a kind — so the vocabulary is ours and has no wire form: `chat` for a chat message, `snap` for a snap. Named like [`MediaKind::as_wire`] for consistency with that established idiom.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Snap => "snap",
+        }
+    }
 }
 
 /// One merged record: a chat message or a snap, carrying a uniform view for the render stream.
@@ -230,6 +256,178 @@ impl SortKey {
             position,
         }
     }
+}
+
+// ---- the per-conversation document model and its writers (decision 58) ----
+
+/// One conversation's transcript: the conversation's identity and its merged, ordered records.
+///
+/// Built from a [`Thread`] with [`Self::from_thread`], which moves the thread's records rather than copying them — [`merge`] already ordered them, so the document stores the render stream verbatim and every writer walks the same `Vec<Record>` (decision 58's "one render stream"). The records are reused whole, never flattened or re-wrapped, so the bodies stay [`model::MessageText`] values and the redacting `Debug` survives into the document.
+///
+/// The transcript omits the `is_saved` bookmark flag: it is a client-side toggle about the account,
+/// not part of what was said, and no format here has a consumer for it.
+#[derive(Debug, Clone)]
+pub struct Document {
+    /// The conversation's identity; decision 60 names the output file by it.
+    pub key: ConversationId,
+    /// The merged records, already sorted by the ordering rule in the module docs.
+    pub records: Vec<Record>,
+}
+
+impl Document {
+    /// The document for one already-merged thread.
+    #[must_use]
+    pub fn from_thread(thread: Thread) -> Self {
+        Self { key: thread.id, records: thread.records }
+    }
+}
+
+/// The json writer's transient per-record projection.
+///
+/// [`Serialize`]-only, deliberately: this struct holds the plain-text bodies ([`model::MessageText::expose`]'d) that the redacting `Debug` exists to keep off a terminal, so it must never gain a `Debug` — a `{:?}` here would leak a body the way [`model::MessageText`]'s own `Debug` prevents. The `None` fields are omitted rather than written as `null` (`skip_serializing_if`), so a snap row carries no `content` key at all; see [`write_json`].
+#[derive(Serialize)]
+struct RecordJson<'a> {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'a str>,
+    is_sender: bool,
+    media_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_ids: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_title: Option<&'a str>,
+}
+
+/// The json writer's whole-document projection; see [`RecordJson`] for why it derives `Serialize` and nothing else.
+#[derive(Serialize)]
+struct DocumentJson<'a> {
+    conversation: &'a str,
+    records: Vec<RecordJson<'a>>,
+}
+
+/// The json form of a [`Document`] (decision 58's re-import path).
+///
+/// A top-level object `{ "conversation": <key>, "records": [...] }` — the key rides in the file as well as in the path decision 60 names, so a transcript is self-identifying if it is moved or renamed. Rows are the merged records in order; each row's `created` is [`Record::resolved_created`] rendered as a string, the same fixed instant the media legs stamp with (decision 61). `None` fields are omitted (see [`RecordJson`]).
+///
+/// # Errors
+///
+/// Returns `serde_json::Error` when serialization fails. The mirror holds only `String`s and `bool`s, so this is unreachable in practice — the `Result` is returned rather than swallowed so a future mirror field that CAN fail (a float, a hand-written `Serialize`) surfaces loudly instead of rendering as `""`.
+pub fn write_json(document: &Document) -> Result<String, serde_json::Error> {
+    let mirror = DocumentJson { conversation: document.key.as_str(), records: document.records.iter().map(record_json).collect() };
+    serde_json::to_string(&mirror)
+}
+
+fn record_json(record: &Record) -> RecordJson<'_> {
+    RecordJson {
+        kind: record.kind().as_wire(),
+        from: record.from().map(Username::as_str),
+        is_sender: record.is_sender(),
+        media_type: record.media_type().as_wire(),
+        created: record.resolved_created().map(|timestamp| timestamp.to_string()),
+        content: record.content().map(model::MessageText::expose),
+        media_ids: record.media_ids(),
+        conversation_title: record.conversation_title(),
+    }
+}
+
+/// The csv form of a [`Document`] (decision 58's spreadsheet path), RFC 4180.
+///
+/// A header row, then one row per record in the merged order, `\n`-terminated, with an absent field as the empty string. The columns are `kind,from,is_sender,media_type,created,content,media_ids,conversation_title`; `created` is the resolved instant rendered as a string, like the json writer. A field containing a comma, a double quote, a newline or a carriage return is wrapped in double quotes and any embedded quote is doubled (`"` → `""`); every other field is written verbatim. `\n` line endings rather than RFC 4180's `\r\n`, stated so the choice is a decision rather than a surprise: the crate is Unix-flavored, the files land beside the media on the same tree, and the parsers this targets accept both.
+pub fn write_csv(document: &Document) -> String {
+    let mut out = String::new();
+    out.push_str("kind,from,is_sender,media_type,created,content,media_ids,conversation_title\n");
+    for record in &document.records {
+        let from = record.from().map(Username::as_str).unwrap_or("");
+        let created = record.resolved_created().map(|timestamp| timestamp.to_string()).unwrap_or_default();
+        let content = record.content().map(model::MessageText::expose).unwrap_or("");
+        let media_ids = record.media_ids().unwrap_or("");
+        let conversation_title = record.conversation_title().unwrap_or("");
+        out.push_str(&csv_field(record.kind().as_wire()));
+        out.push(',');
+        out.push_str(&csv_field(from));
+        out.push(',');
+        out.push_str(if record.is_sender() { "true" } else { "false" });
+        out.push(',');
+        out.push_str(&csv_field(record.media_type().as_wire()));
+        out.push(',');
+        out.push_str(&csv_field(&created));
+        out.push(',');
+        out.push_str(&csv_field(content));
+        out.push(',');
+        out.push_str(&csv_field(media_ids));
+        out.push(',');
+        out.push_str(&csv_field(conversation_title));
+        out.push('\n');
+    }
+    out
+}
+
+/// The RFC 4180 quoting for one field, applied only when the field needs it.
+///
+/// A value whose first character is a spreadsheet formula trigger (`=`, `+`, `-`, `@`, a tab, or a
+/// carriage return) is prefixed with a single quote first, so Excel and Sheets render it as text
+/// instead of evaluating it (CWE-1236). That quote is the cost of csv being the display path rather
+/// than a lossless one: a body that really begins with `=` comes back out of a spreadsheet as `'=`,
+/// and [`write_json`] is the re-import path that keeps the bytes verbatim. The prefix lands before
+/// quoting, so a value needing both a guard and quoting carries the guard inside its quotes.
+fn csv_field(value: &str) -> String {
+    let neutralized;
+    let value = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        neutralized = format!("'{value}");
+        neutralized.as_str()
+    } else {
+        value
+    };
+    if value.contains([',', '"', '\n', '\r']) {
+        let mut out = String::with_capacity(value.len() + 2);
+        out.push('"');
+        for character in value.chars() {
+            if character == '"' {
+                out.push('"');
+            }
+            out.push(character);
+        }
+        out.push('"');
+        out
+    } else {
+        value.to_owned()
+    }
+}
+
+/// The plain-text form of a [`Document`] (the transcript path).
+///
+/// One header line per record — `[<created>] <from> (<kind> <media_type>, <sent|received>)`, with the literals `no date` and `unknown` standing in for an absent instant and sender — then the body with every line prefixed `> `. A blank line separates records. See the module docs for why the prefix and the `str::lines()` rendering keep the format unambiguous.
+///
+/// The `no date` and `unknown` literals are display placeholders, not a lossless encoding: a handle
+/// that literally spells `unknown` renders here exactly as an absent sender does, and [`write_json`]
+/// (key omitted) and [`write_csv`] (empty field) keep the two apart.
+pub fn write_text(document: &Document) -> String {
+    let blocks: Vec<String> = document.records.iter().map(text_block).collect();
+    blocks.join("\n")
+}
+
+fn text_block(record: &Record) -> String {
+    let created = record.resolved_created().map(|timestamp| timestamp.to_string()).unwrap_or_else(|| "no date".to_owned());
+    let from = record.from().map(ToString::to_string).unwrap_or_else(|| "unknown".to_owned());
+    let direction = if record.is_sender() { "sent" } else { "received" };
+    let mut out = format!(
+        "[{created}] {from} ({kind} {media_type}, {direction})",
+        kind = record.kind().as_wire(),
+        media_type = record.media_type().as_wire(),
+    );
+    out.push('\n');
+    if let Some(content) = record.content() {
+        for line in content.expose().lines() {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
