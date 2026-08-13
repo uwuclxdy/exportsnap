@@ -11,10 +11,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use exportsnap::export::ExportJson;
+use exportsnap::export::chat_fix::{self, OverlayMode, RecordedDirs};
+use exportsnap::export::chat_media::{self, ChatMedia, ChatMediaFile, ChatMediaItem, Join, Message, MessageRef, Reconciliation};
 use exportsnap::export::history::{Document, HtmlLinks, Record, RecordKind, merge, write_csv, write_html, write_json, write_text};
-use exportsnap::export::manifest::{ExportId, ItemKind, Manifest, NewItem};
+use exportsnap::export::history_run::{self, HistoryReport, RunEvent, RunInputs, RunOutcome};
+use exportsnap::export::manifest::{DirectoryClaim, ExportId, ItemKind, Manifest, NewItem, ResumeReport};
 use exportsnap::export::model::{ChatHistory, ConversationId, MessageText, SnapHistory};
 use exportsnap::export::schema;
 use tempfile::TempDir;
@@ -445,6 +450,27 @@ fn html_links_a_done_media_token_to_the_bare_filename_on_disk() {
     assert!(output.exists(), "the file the link names is on disk beside the document");
 }
 
+/// A message spelling the prefix loudly (`B~x`) must reach the row the join mints under the
+/// canonical `b~x`: the lookup key is the join's own normalization, so a `done` row still renders
+/// its link rather than a placeholder (decision 62).
+#[test]
+fn html_links_a_done_media_token_spelled_with_a_shouted_prefix() {
+    let workspace = TempDir::new().unwrap();
+    let mut manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
+    let token = "b~aB3xY9";
+    manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: token, url: None }]).unwrap();
+    let output = workspace.path().join("2021-03-04_b~aB3xY9.jpg");
+    fs::write(&output, b"media bytes").unwrap();
+    manifest.mark_done(ItemKind::ChatMedia, token, &output).unwrap();
+
+    let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, "B~aB3xY9")]);
+    let rendered = write_html(&document, Some(&manifest)).unwrap().html;
+
+    let href = "2021-03-04_b~aB3xY9.jpg";
+    assert!(rendered.contains(&format!("<a href=\"{href}\">{href}</a>")), "{rendered}");
+    assert!(!rendered.contains("media-placeholder"), "the shouted prefix is a spelling of the row, not an absence: {rendered}");
+}
+
 /// A row that is not `done` — failed, source-missing, pending, retired, excluded, or absent —
 /// renders an inert placeholder naming the record's own `Media Type` and nothing else (decision 62):
 /// no token, no id, no path. Every non-`done` status is pinned in one message, because a mutation
@@ -598,4 +624,406 @@ fn html_debug_never_prints_a_message_body() {
     let debugged = format!("{rendered:?}");
     assert!(!debugged.contains(body), "a Debug render of an Html must not print a message body");
     assert!(debugged.contains("<redacted>"), "the html field's Debug spelling is the redacted one");
+}
+
+// ---- the run entry (decisions 60, 62, 63, 63a) ----
+
+/// The export id every synthetic delivery below carries; it names the manifest file.
+const EXPORT_ID: &str = "1784667002819";
+
+/// A `chat_history.json` in the wire shape the parser expects: an object keyed by conversation,
+/// each value an array of message records. Built by hand — the schema types are deserialize-only —
+/// in the exact spelling the observed export uses.
+fn write_chat_history(json_dir: &Path, conversations: &[(&str, &[(&str, &str)])]) {
+    fs::create_dir_all(json_dir).unwrap();
+    let threads: Vec<String> = conversations
+        .iter()
+        .map(|(key, rows)| {
+            let entries: Vec<String> = rows
+                .iter()
+                .map(|(created, media_ids)| {
+                    format!(
+                        r#"{{"From":"sender-handle","Media Type":"MEDIA","Created":"{created}","IsSender":false,"IsSaved":false,"Created(microseconds)":0,"Media IDs":"{media_ids}"}}"#
+                    )
+                })
+                .collect();
+            format!(r#""{key}":[{}]"#, entries.join(","))
+        })
+        .collect();
+    fs::write(json_dir.join("chat_history.json"), format!("{{{}}}", threads.join(","))).unwrap();
+}
+
+/// A `snap_history.json` in the same wire shape, snap rows carrying no body and no `Media IDs`.
+fn write_snap_history(json_dir: &Path, conversations: &[(&str, &[&str])]) {
+    fs::create_dir_all(json_dir).unwrap();
+    let threads: Vec<String> = conversations
+        .iter()
+        .map(|(key, rows)| {
+            let entries: Vec<String> = rows
+                .iter()
+                .map(|created| {
+                    format!(r#"{{"From":"sender-handle","Media Type":"MEDIA","Created":"{created}","IsSender":false,"Created(microseconds)":0}}"#)
+                })
+                .collect();
+            format!(r#""{key}":[{}]"#, entries.join(","))
+        })
+        .collect();
+    fs::write(json_dir.join("snap_history.json"), format!("{{{}}}", threads.join(","))).unwrap();
+}
+
+/// One delivery: part 1 unpacked with its `json/`, no media dirs.
+fn export_tree(conversations: &[(&str, &[(&str, &str)])]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    write_chat_history(&dir.path().join(format!("mydata~{EXPORT_ID}/json")), conversations);
+    dir
+}
+
+/// A source naming no `mydata~*` part group: the export extracted flat, `json/` directly under
+/// the source. The decision-62 no-manifest arm.
+fn flat_tree(conversations: &[(&str, &[(&str, &str)])]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    write_chat_history(&dir.path().join("json"), conversations);
+    dir
+}
+
+fn inputs(dir: &TempDir) -> (RunInputs, TempDir) {
+    let state = TempDir::new().unwrap();
+    let inputs =
+        RunInputs { source: dir.path().to_path_buf(), out_root: dir.path().join("out"), manifest_dir: Some(state.path().to_path_buf()) };
+    (inputs, state)
+}
+
+fn collect(inputs: &RunInputs) -> Vec<RunEvent> {
+    let (sender, receiver) = mpsc::channel();
+    history_run::run(inputs, &sender);
+    drop(sender);
+    receiver.try_iter().collect()
+}
+
+fn finished(events: &[RunEvent]) -> &RunOutcome {
+    match events.last().unwrap() {
+        RunEvent::Finished(outcome) => outcome,
+        RunEvent::Planned(_) => panic!("no Finished event"),
+    }
+}
+
+fn report(outcome: &RunOutcome) -> HistoryReport {
+    match outcome {
+        RunOutcome::Completed(report) => *report,
+        RunOutcome::Failed(error) => panic!("run failed: {error}"),
+    }
+}
+
+/// A reconciliation over one file a message of `key` names, built by hand so the chat-media
+/// planner can be driven without a media walk. The file itself is never read past its name.
+fn hand_reconciliation(key: &str, token: &str) -> Reconciliation {
+    let file = ChatMediaFile::parse(PathBuf::from(format!("/x/chat_media/2021-03-04_{token}.jpg"))).expect("the name parses");
+    Reconciliation {
+        items: vec![ChatMediaItem {
+            media: ChatMedia { file, overlay: None },
+            join: Join::Named(Message {
+                at: MessageRef { conversation: 0, message: 0 },
+                conversation: ConversationId::new(key),
+                conversation_title: None,
+                from: None,
+                is_sender: false,
+                created: None,
+                created_epoch_ms: None,
+            }),
+        }],
+        missing: Vec::new(),
+        unparsed_tokens: Vec::new(),
+        unparsed: Vec::new(),
+        duplicates: Vec::new(),
+        unreadable: Vec::new(),
+    }
+}
+
+/// The absolute spelling the run's own canonicalization gives the out root, so a relative
+/// `--out` respelling cannot split the comparisons.
+fn chat_root(dir: &TempDir) -> PathBuf {
+    std::path::absolute(dir.path().join("out")).unwrap().join("chat")
+}
+
+/// A chat-media run under an earlier key set put `a?b`'s media in the SUFFIXED directory — with
+/// its neighbour gone, `a?b` alone would now derive the plain `a_b`, so only the manifest record
+/// can hold it in `a_b_2`. The history run for the same key must adopt that directory, write its
+/// four documents into it, and claim it under the adopted name (decisions 60, 63a).
+#[test]
+fn a_history_run_writes_into_the_directory_a_chat_media_run_already_adopted() {
+    let dir = export_tree(&[("a?b", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let (inputs, state) = inputs(&dir);
+    let mut manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: "b~tokA", url: None }]).unwrap();
+    let media = dir.path().join("out/chat/a_b_2/20210304_143005.jpg");
+    fs::create_dir_all(media.parent().unwrap()).unwrap();
+    fs::write(&media, b"media bytes").unwrap();
+    manifest.mark_done(ItemKind::ChatMedia, "b~tokA", &media).unwrap();
+
+    let events = collect(&inputs);
+    let outcome = report(finished(&events));
+    assert_eq!(outcome.conversations, 1);
+    assert_eq!(outcome.documents, 4);
+    assert_eq!(outcome.links, HtmlLinks::Manifest);
+
+    for extension in ["json", "txt", "csv", "html"] {
+        assert!(dir.path().join(format!("out/chat/a_b_2/history.{extension}")).is_file(), "the document lands in the adopted directory");
+    }
+    assert!(
+        !dir.path().join("out/chat/a_b/history.json").exists(),
+        "a fresh derivation would be the defect: the record names the suffixed directory"
+    );
+
+    let manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    let claims = manifest.claims().unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].source_id, "a?b");
+    assert_eq!(claims[0].directory, chat_root(&dir).join("a_b_2"), "the claim names the adopted directory, not a re-derivation");
+}
+
+/// The 63a back door, closed from both sides. First the history run: a conversation with messages
+/// and no media claims the plain name, and a later chat-media plan for a DIFFERENT key cleaning
+/// onto it takes the suffix — with a control over a claimless manifest, which hands out the plain
+/// name, proving the claim is what moved the assignment. Then the mirror: the claiming
+/// conversation's own later media adopts the claimed directory, so one thread never splits.
+#[test]
+fn a_history_only_conversations_directory_is_reserved_from_a_later_chat_media_plan() {
+    let dir = export_tree(&[("a?b", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let (inputs, state) = inputs(&dir);
+    let events = collect(&inputs);
+    assert_eq!(report(finished(&events)).conversations, 1);
+    assert!(dir.path().join("out/chat/a_b/history.json").is_file(), "the history-only conversation derives the plain name");
+
+    let manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    let newcomer = hand_reconciliation("a:b", "b~tokB");
+    let recorded = RecordedDirs::read(&newcomer, &manifest).unwrap();
+    let plan = chat_fix::plan(&newcomer, dir.path().join("out"), OverlayMode::Both, &recorded).unwrap();
+    assert_eq!(plan.items[0].output.parent().unwrap(), chat_root(&dir).join("a_b_2"), "the claimed name is not handed to another key");
+
+    // The control: without the claim the same planner hands out the plain name, so the suffix
+    // above is the claim's work and not this fixture's shape.
+    let fresh = TempDir::new().unwrap();
+    let fresh_manifest = Manifest::open_in(fresh.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    let recorded = RecordedDirs::read(&newcomer, &fresh_manifest).unwrap();
+    let plan = chat_fix::plan(&newcomer, dir.path().join("out"), OverlayMode::Both, &recorded).unwrap();
+    assert_eq!(plan.items[0].output.parent().unwrap(), chat_root(&dir).join("a_b"));
+
+    // The claiming conversation's own later media keeps its directory: the claim adopts for the
+    // key it names, exactly as a media record would.
+    let owner = hand_reconciliation("a?b", "b~tokC");
+    let recorded = RecordedDirs::read(&owner, &manifest).unwrap();
+    let plan = chat_fix::plan(&owner, dir.path().join("out"), OverlayMode::Both, &recorded).unwrap();
+    assert_eq!(plan.items[0].output.parent().unwrap(), chat_root(&dir).join("a_b"));
+}
+
+/// A claim is not an item: out of `items`, `pending`, `counts` and the resume sweep, read only
+/// through `claims` (decision 63a). The idempotence half rides a backdated sentinel: `unixepoch()`
+/// is integer seconds, so two runs landing in one second would read "untouched" even with no skip
+/// at all — a sentinel the environment cannot reproduce is what makes the skip observable, and the
+/// positive control proves the writer still fires when the claim genuinely moves.
+#[test]
+fn a_directory_claim_is_out_of_every_item_enumeration_and_never_restamped() {
+    let dir = export_tree(&[("a?b", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let (inputs, state) = inputs(&dir);
+    let events = collect(&inputs);
+    assert_eq!(report(finished(&events)).conversations, 1);
+
+    let mut manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    assert!(manifest.items(ItemKind::HistoryExport).unwrap().is_empty(), "a claim is not an item");
+    assert!(manifest.pending(ItemKind::HistoryExport, 0).unwrap().is_empty(), "a claim is never work");
+    assert!(manifest.pending(ItemKind::HistoryExport, 3).unwrap().is_empty());
+    let resumed = manifest.resume(ItemKind::HistoryExport).unwrap();
+    assert_eq!(
+        resumed,
+        ResumeReport { demoted: Vec::new(), verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
+        "the resume sweep surfaces no claim"
+    );
+    let claims = manifest.claims().unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].kind, ItemKind::HistoryExport);
+    assert_eq!(claims[0].source_id, "a?b");
+    assert_eq!(claims[0].directory, chat_root(&dir).join("a_b"));
+
+    // Backdate the row, then re-run: the same claim with the same directory touches nothing.
+    let db = state.path().join(format!("{EXPORT_ID}.sqlite"));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE items SET updated_at = 1 WHERE kind = 'history_export' AND source_id = 'a?b'", []).unwrap();
+    drop(conn);
+
+    let events = collect(&inputs);
+    assert_eq!(report(finished(&events)).conversations, 1, "the one-shot run is idempotent end to end");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let updated: i64 =
+        conn.query_row("SELECT updated_at FROM items WHERE kind = 'history_export' AND source_id = 'a?b'", [], |row| row.get(0)).unwrap();
+    assert_eq!(updated, 1, "re-claiming the same directory leaves the sentinel alone");
+
+    // The positive control: a claim whose directory moved is re-recorded, so the untouched
+    // sentinel is the skip and not a writer that never fires.
+    let mut manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    let moved = state.path().join("moved");
+    manifest.claim_directories(&[DirectoryClaim { source_id: "a?b", directory: &moved }]).unwrap();
+    drop(manifest);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let (updated, recorded): (i64, String) = conn
+        .query_row("SELECT updated_at, output_path FROM items WHERE kind = 'history_export' AND source_id = 'a?b'", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_ne!(updated, 1, "a changed claim is re-recorded");
+    assert_eq!(recorded, moved.to_str().unwrap());
+}
+
+/// The run-level half of decision 62: the no-manifest run still lands documents — every media
+/// reference a placeholder — and states the reason ONCE, in the report, rather than per message.
+#[test]
+fn a_run_without_an_export_id_states_the_placeholder_links_once_and_lands_the_documents() {
+    let dir = flat_tree(&[("k", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let (inputs, state) = inputs(&dir);
+    let events = collect(&inputs);
+    let outcome = report(finished(&events));
+    assert_eq!(outcome.conversations, 1);
+    assert_eq!(outcome.documents, 4);
+    assert_eq!(outcome.links, HtmlLinks::NoManifest, "the run states the no-manifest arm once, in the report");
+
+    let html = fs::read_to_string(dir.path().join("out/chat/k/history.html")).unwrap();
+    assert!(html.contains("<span class=\"media-placeholder\">MEDIA</span>"), "{html}");
+    assert!(!html.contains("<a href"), "no manifest, no link: {html}");
+    assert!(!html.contains("b~tokA"), "the token never reaches the document: {html}");
+    assert!(dir.path().join("out/chat/k/history.json").is_file());
+    assert!(!state_touched(&state), "nothing to claim into, nothing enrolled");
+}
+
+/// The mirror arm: with a manifest present the report says so, and a `done` media row renders a
+/// live link in the document the RUN wrote — the writer arms are 78's pins; this pins the run
+/// feeding them.
+#[test]
+fn a_run_with_a_manifest_reports_the_manifest_arm_and_links_done_media() {
+    let dir = export_tree(&[("k", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let (inputs, state) = inputs(&dir);
+    let mut manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: "b~tokA", url: None }]).unwrap();
+    let media = dir.path().join("out/chat/k/20210304_143005.jpg");
+    fs::create_dir_all(media.parent().unwrap()).unwrap();
+    fs::write(&media, b"media bytes").unwrap();
+    manifest.mark_done(ItemKind::ChatMedia, "b~tokA", &media).unwrap();
+    drop(manifest);
+
+    let events = collect(&inputs);
+    let outcome = report(finished(&events));
+    assert_eq!(outcome.links, HtmlLinks::Manifest);
+
+    let html = fs::read_to_string(dir.path().join("out/chat/k/history.html")).unwrap();
+    assert!(html.contains("<a href=\"20210304_143005.jpg\">20210304_143005.jpg</a>"), "{html}");
+}
+
+/// A snap-only conversation merges into one thread of its own and lands its four documents too
+/// (decision 61, at the run).
+#[test]
+fn a_snap_only_conversation_lands_its_documents_too() {
+    let dir = TempDir::new().unwrap();
+    write_snap_history(&dir.path().join(format!("mydata~{EXPORT_ID}/json")), &[("snapper", &["2021-03-04 09:00:00 UTC"])]);
+    let (inputs, _state) = inputs(&dir);
+    let events = collect(&inputs);
+    assert_eq!(report(finished(&events)).conversations, 1);
+    assert!(dir.path().join("out/chat/snapper/history.json").is_file());
+    assert!(dir.path().join("out/chat/snapper/history.html").is_file());
+}
+
+/// An export holding neither history file has nothing to write, and fails by name rather than
+/// writing an empty tree.
+#[test]
+fn a_run_over_an_export_holding_neither_history_file_fails_by_name() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join(format!("mydata~{EXPORT_ID}/json"))).unwrap();
+    let (inputs, _state) = inputs(&dir);
+    let events = collect(&inputs);
+    match finished(&events) {
+        RunOutcome::Failed(history_run::RunError::NoHistory(_)) => {}
+        other => panic!("expected the no-history failure, got {other:?}"),
+    }
+}
+
+/// A part whose id cannot name a manifest is refused, the same call `chat_run` makes — the
+/// decision-62 no-manifest arm is for a source naming no part group at all, and an unusable id
+/// must not read as a clean run with placeholder links and no claim rows.
+#[test]
+fn a_part_whose_id_cannot_name_a_manifest_is_refused_not_silently_degraded() {
+    let dir = TempDir::new().unwrap();
+    write_chat_history(&dir.path().join("mydata~bad..id/json"), &[("k", &[("2021-03-04 14:30:05 UTC", "b~tokA")])]);
+    let (inputs, state) = inputs(&dir);
+    let events = collect(&inputs);
+    match finished(&events) {
+        RunOutcome::Failed(history_run::RunError::InvalidExportId(_)) => {}
+        other => panic!("expected the invalid-id refusal, got {other:?}"),
+    }
+    assert!(!state_touched(&state), "nothing to claim into, nothing enrolled");
+}
+
+/// The attribution map the run derives from `chat_history.json` alone holds exactly the tokens the
+/// join's own grammar could name — a token the join refuses is absent from the map exactly as it is
+/// absent from a reconciliation, so the two attributions cannot drift (decision 60).
+#[test]
+fn the_attribution_map_holds_only_the_tokens_the_join_could_name() {
+    let chat = chat_from(vec![("k", vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, "b~tokA | media~m1 | not a token")])]);
+    let map = chat_media::history_attribution(&chat);
+    assert_eq!(map.len(), 1, "one joinable token: {map:?}");
+    assert_eq!(map.get("b~tokA"), Some(&&ConversationId::new("k")));
+    assert!(!map.contains_key("media~m1"), "a token the join grammar refuses is absent from the attribution");
+    assert!(!map.contains_key("not a token"));
+}
+
+/// A token spelling its prefix loudly must be keyed by the CANONICAL spelling the join mints rows
+/// under, not by the raw `Media IDs` text: the manifest's `source_id` is `b~<id>`, so a map keyed
+/// on the raw spelling misses the row the join itself would have attributed and the history
+/// planner then derives a second directory beside the reserved one (decision 60).
+#[test]
+fn the_attribution_map_keys_a_shouted_prefix_by_the_canonical_spelling() {
+    let chat = chat_from(vec![("k", vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, "B~tokB")])]);
+    let map = chat_media::history_attribution(&chat);
+    assert_eq!(map.len(), 1);
+    assert_eq!(map.get("b~tokB"), Some(&&ConversationId::new("k")), "the canonical spelling is the key");
+    assert!(!map.contains_key("B~tokB"), "the raw spelling is not a key: {map:?}");
+}
+
+/// The whole composition over the real redacted export: one directory per merged conversation,
+/// four documents in each, nothing else, and a claim per conversation. Counts only — the
+/// directory names are key-derived, so no name reaches a failure message.
+#[test]
+fn a_run_over_the_real_export_lands_four_documents_per_conversation() {
+    let Some(root) = common::fixtures::root("a_run_over_the_real_export_lands_four_documents_per_conversation") else {
+        return;
+    };
+    let state = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let inputs = RunInputs { source: root.clone(), out_root: out.path().to_path_buf(), manifest_dir: Some(state.path().to_path_buf()) };
+    let events = collect(&inputs);
+    let outcome = report(finished(&events));
+    assert_eq!(outcome.links, HtmlLinks::Manifest, "the fixture's part id names a manifest");
+
+    let export = ExportJson::load_dir(root.join("mydata~xxxxxxxxxxxx/json")).expect("the fixture export loads");
+    let merged = merge(
+        export.chat_history.as_ref().expect("the fixture carries chat_history.json"),
+        export.snap_history.as_ref().expect("the fixture carries snap_history.json"),
+    );
+    assert_eq!(outcome.conversations, merged.threads.len(), "one directory per merged conversation");
+    assert_eq!(outcome.documents, merged.threads.len() * 4);
+
+    let mut directories = 0;
+    for entry in fs::read_dir(out.path().join("chat")).unwrap() {
+        let entry = entry.unwrap();
+        assert!(entry.path().is_dir(), "nothing but conversation directories under chat/");
+        directories += 1;
+        let mut names: Vec<String> =
+            fs::read_dir(entry.path()).unwrap().map(|file| file.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["history.csv", "history.html", "history.json", "history.txt"], "four documents per conversation");
+    }
+    assert_eq!(directories, merged.threads.len());
+
+    let manifest = Manifest::open_in(state.path(), &ExportId::new("xxxxxxxxxxxx").unwrap()).unwrap();
+    assert_eq!(manifest.claims().unwrap().len(), merged.threads.len(), "one claim row per conversation");
+}
+
+fn state_touched(state: &TempDir) -> bool {
+    fs::read_dir(state.path()).unwrap().next().is_some()
 }

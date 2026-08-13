@@ -197,6 +197,9 @@ pub(crate) fn status_pill(palette: &Palette, status: ItemStatus) -> Vec<Span<'st
         ItemStatus::SourceMissing => "missing",
         ItemStatus::Retired => "retired",
         ItemStatus::Excluded => "dropped",
+        // Never rendered: `Manifest::items` excludes claims (decision 63a), so no table row ever
+        // carries one. The arm exists for exhaustiveness.
+        ItemStatus::Claimed => "claimed",
     };
     let bracket = Style::new().fg(palette.text_dim);
     let width = 2 + label.len() + 2;

@@ -24,6 +24,12 @@
 //! answers where each file lands and what goes into it, filling the same [`local_fix`] `Plan` the
 //! memories planner does, and [`chat_run`] composes the whole leg for a screen exactly as
 //! [`memories_run`] composes the other one.
+//!
+//! Phase 4 starts at [`history`]: chat and snap merge into one per-conversation timeline rendered
+//! by four writers over one document model. [`history_run`] is the whole history export in one
+//! call — it plans the documents into the same `chat/` tree through [`chat_fix`]'s directory
+//! machinery, enrolls one directory-claim row per conversation, and lands the four files beside the
+//! media.
 
 pub mod chat_fix;
 pub mod chat_media;
@@ -32,6 +38,7 @@ pub mod env;
 pub mod exif;
 pub mod ffmpeg;
 pub mod history;
+pub mod history_run;
 pub mod local_fix;
 pub mod manifest;
 pub mod memories;

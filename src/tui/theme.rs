@@ -144,6 +144,8 @@ impl Palette {
             ItemStatus::Done => self.success,
             ItemStatus::Failed => self.danger,
             ItemStatus::SourceMissing => self.warning,
+            // Unrendered: claims (decision 63a) never reach a status pill — see `widgets::status_pill`.
+            ItemStatus::Claimed => self.text_dim,
         }
     }
 

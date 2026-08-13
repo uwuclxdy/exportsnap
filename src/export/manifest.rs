@@ -16,6 +16,18 @@
 //! the identity; `source_id` is whatever the export side already calls the record, so nothing here
 //! invents an id.
 //!
+//! **Phase 4 adds a row meaning this table did not have** (decision 63a). Every row until now
+//! recorded an ITEM: something a run downloaded, wrote, parked or refused. The history leg's row
+//! records a DIRECTORY CLAIM and nothing else: [`ItemKind::HistoryExport`], status
+//! [`ItemStatus::Claimed`], `source_id` the conversation key, `output_path` the claimed directory
+//! itself, every other payload column null. Such a row is never work, never resumed, never
+//! re-hashed, and is excluded from [`Manifest::items`], [`Manifest::pending`], `counts` and the
+//! resume sweep — the discriminator is the TYPE ([`ItemStatus::Claimed`]) rather than a convention
+//! a reader has to remember. It is read only through [`Manifest::claims`], which is the seed both
+//! planners' directory reservations consume: the conversation directory is reserved off manifest
+//! rows and nothing walks the output tree, so a directory that exists only because a history run
+//! created it has to be a row or a later chat-media run hands its name to a different conversation.
+//!
 //! # What the output record means
 //!
 //! `output_path`, `checksum` and `bytes` are one RECORD between them: what a run wrote, and what it
@@ -78,6 +90,10 @@
 //!   of the above. [`Manifest::exclude`] is what puts a row here: a source that is present
 //!   and readable and that this build deliberately writes no output for. Same way back,
 //!   [`Manifest::reset`].
+//! - [`ItemStatus::Claimed`] — untouched, never handed back as work, and not an item at all: a
+//!   directory claim (decision 63a), outside every enumeration and every count. [`Manifest::claims`]
+//!   is the only read, and the resume sweep never sees it, so there is nothing to skip it by beyond
+//!   the status it carries.
 //!
 //! Nothing here deletes a row, so a re-enumeration ([`Manifest::enroll`]) of the same export is
 //! idempotent and never costs finished work. Retiring is what a row that outlived its source gets
@@ -275,10 +291,17 @@ pub enum ItemStatus {
     ///
     /// [`Manifest::reset`] is the way back, for the build whose rules change.
     Excluded,
+    /// The history leg's directory claim (decision 63a): one row per conversation, naming the
+    /// directory it claimed, and nothing else. Not an item and never work: [`Manifest::pending`]
+    /// never offers it, the resume sweep never re-hashes it, and [`Manifest::items`] and `counts`
+    /// exclude it. Its whole payload is `output_path`, which IS the directory rather than a file
+    /// inside it; [`Manifest::claims`] is the read, and the two planners' directory-reservation
+    /// seeds are its only consumers.
+    Claimed,
 }
 
 impl ItemStatus {
-    pub const ALL: [Self; 6] = [Self::Pending, Self::Done, Self::Failed, Self::SourceMissing, Self::Retired, Self::Excluded];
+    pub const ALL: [Self; 7] = [Self::Pending, Self::Done, Self::Failed, Self::SourceMissing, Self::Retired, Self::Excluded, Self::Claimed];
 
     /// The word stored in the `status` column.
     #[must_use]
@@ -290,6 +313,7 @@ impl ItemStatus {
             Self::SourceMissing => "source_missing",
             Self::Retired => "retired",
             Self::Excluded => "excluded",
+            Self::Claimed => "claimed",
         }
     }
 
@@ -359,6 +383,30 @@ pub struct NewItem<'a> {
     /// The signed download url, when the export carried one. Every url in the one observed export
     /// is empty, so `None` is the normal answer there and the media has to come off disk instead.
     pub url: Option<&'a DownloadUrl>,
+}
+
+/// One directory claim the history run hands to [`Manifest::claim_directories`] (decision 63a).
+///
+/// The conversation key and the directory its documents land in, and nothing else — no per-item
+/// status, no resume, no row per document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryClaim<'a> {
+    /// The conversation key, as the merged history spells it.
+    pub source_id: &'a str,
+    /// The claimed directory, absolute — the row's `output_path` is the directory itself, not a
+    /// file inside it.
+    pub directory: &'a Path,
+}
+
+/// One directory-claim row as the manifest holds it, read back through [`Manifest::claims`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// Which pipeline enrolled the claim. [`ItemKind::HistoryExport`] is the only producer today.
+    pub kind: ItemKind,
+    /// The conversation key.
+    pub source_id: String,
+    /// The claimed directory.
+    pub directory: PathBuf,
 }
 
 /// One item as the manifest holds it.
@@ -1162,21 +1210,149 @@ impl Manifest {
     /// every status transition is one autocommit statement, so a reader on its own connection sees
     /// whole rows at whatever point the run has reached.
     ///
+    /// **Directory claims are not items and are excluded here** (decision 63a): the status filter,
+    /// not the kind, so a claim under any kind stays out of every item enumeration. The exclusion
+    /// does not weaken the corrupt-row guard — a row whose stored status is anything OTHER than the
+    /// exact claim word still reaches [`ItemStatus::from_stored`] and is refused there. Claims are
+    /// read through [`Manifest::claims`].
+    ///
     /// # Errors
     ///
     /// Returns [`ManifestError::Sqlite`] when the read fails and [`ManifestError::CorruptRow`]
     /// when a stored value no longer parses.
     pub fn items(&self, kind: ItemKind) -> Result<Vec<Item>, ManifestError> {
-        let sql = format!("SELECT {ITEM_COLUMNS} FROM items WHERE kind = ?1 ORDER BY source_id");
+        let sql = format!("SELECT {ITEM_COLUMNS} FROM items WHERE kind = ?1 AND status <> ?2 ORDER BY source_id");
         let mut stmt = self.conn.prepare(&sql).map_err(|source| sqlite_error("list items", &self.path, source))?;
         let rows = stmt
-            .query_map(params![kind.as_stored()], RawItem::from_row)
+            .query_map(params![kind.as_stored(), ItemStatus::Claimed.as_stored()], RawItem::from_row)
             .map_err(|source| sqlite_error("list items", &self.path, source))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|source| sqlite_error("list items", &self.path, source))?
             .into_iter()
             .map(Item::try_from)
             .collect()
+    }
+
+    /// The directory-claim rows (decision 63a), ordered by kind then source id.
+    ///
+    /// The mirror of [`Self::items`]'s exclusion: a claim is not an item, so nothing in the item
+    /// vocabulary reads it, and the two planners' directory-reservation seeds read it HERE — the
+    /// history run's own seed, and the chat-media planner's occupancy, which is the whole reason the
+    /// row exists. The status word selects, so a claim under any kind is returned; a row whose
+    /// `output_path` is null names no directory and claims nothing, so it is skipped rather than
+    /// surfaced as a half-claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::Sqlite`] when the read fails.
+    pub fn claims(&self) -> Result<Vec<Claim>, ManifestError> {
+        let sql = "SELECT kind, source_id, output_path FROM items WHERE status = ?1 ORDER BY kind, source_id";
+        let mut stmt = self.conn.prepare(sql).map_err(|source| sqlite_error("list directory claims", &self.path, source))?;
+        let rows = stmt
+            .query_map(params![ItemStatus::Claimed.as_stored()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+            })
+            .map_err(|source| sqlite_error("list directory claims", &self.path, source))?;
+        let rows =
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|source| sqlite_error("list directory claims", &self.path, source))?;
+        let mut claims = Vec::with_capacity(rows.len());
+        for (kind, source_id, directory) in rows {
+            // A claim whose `output_path` is null names no directory and claims nothing — this
+            // build never writes one, and the store is hand-editable. Skipped rather than surfaced
+            // as a half-claim a planner would then have to know what to do with.
+            let Some(directory) = directory else { continue };
+            claims.push(Claim { kind: ItemKind::from_stored(&kind)?, source_id, directory: PathBuf::from(directory) });
+        }
+        Ok(claims)
+    }
+
+    /// Records the history leg's directory claims (decision 63a): one row per conversation naming
+    /// the directory it claimed, and nothing else.
+    ///
+    /// Idempotent, for the same reason the run itself is: a claim a row already carries with the
+    /// same directory touches nothing, so a re-run costs no write and no `updated_at` restamp. A
+    /// claim whose directory moved — the key set shifted a collision ordinal, or the out root
+    /// changed — is updated; a row this build knows under another status is overwritten, because
+    /// the claim is a re-derivation of where the conversation lives NOW, the same call
+    /// [`Self::exclude`] makes about its own verdict. A stored status this build cannot read is
+    /// refused with [`ManifestError::CorruptRow`] rather than overwritten, like every other reader
+    /// of the column.
+    ///
+    /// **The write lock is the transaction's, so no SQL guard rides on the statement** — the same
+    /// arrangement and the same argument as [`Self::exclude`]: `TransactionBehavior::Immediate`
+    /// takes the write lock at `BEGIN` and holds it to the commit, so the row the read decided on
+    /// cannot move before the write acts on it, and a retained `status <> ?` clause would be a
+    /// predicate no input can make false.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError::OutputPath`] for a claim directory that is relative or not utf-8,
+    /// [`ManifestError::CorruptRow`] when a stored status no longer parses, and
+    /// [`ManifestError::Sqlite`] when a read or a write fails. Any of the three rolls the whole
+    /// transaction back, so a call that fails part-way claims nothing at all.
+    pub fn claim_directories(&mut self, claims: &[DirectoryClaim<'_>]) -> Result<(), ManifestError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+        {
+            let mut current = tx
+                .prepare("SELECT status, output_path FROM items WHERE kind = ?1 AND source_id = ?2")
+                .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+            let mut update = tx
+                .prepare(
+                    "UPDATE items SET status = ?1, output_path = ?2, url = NULL, checksum = NULL, bytes = NULL, \
+                     retry_count = 0, last_error = NULL, updated_at = unixepoch() WHERE kind = ?3 AND source_id = ?4",
+                )
+                .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO items (kind, source_id, status, retry_count, url, output_path, updated_at) \
+                     VALUES (?1, ?2, ?3, 0, NULL, ?4, unixepoch())",
+                )
+                .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+
+            for claim in claims {
+                // The same guard `mark_done` puts on an output path: the manifest stores absolute
+                // utf-8 paths only, so a claim directory a later run re-resolves has to be one.
+                let directory = stored_path(claim.directory)?;
+                let stored: Option<(String, Option<String>)> = current
+                    .query_row(params![ItemKind::HistoryExport.as_stored(), claim.source_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .optional()
+                    .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+                match stored {
+                    Some((status, recorded)) => {
+                        let status = ItemStatus::from_stored(&status)?;
+                        if status == ItemStatus::Claimed && recorded.as_deref() == Some(directory) {
+                            continue;
+                        }
+                        update
+                            .execute(params![
+                                ItemStatus::Claimed.as_stored(),
+                                directory,
+                                ItemKind::HistoryExport.as_stored(),
+                                claim.source_id
+                            ])
+                            .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+                    }
+                    None => {
+                        insert
+                            .execute(params![
+                                ItemKind::HistoryExport.as_stored(),
+                                claim.source_id,
+                                ItemStatus::Claimed.as_stored(),
+                                directory
+                            ])
+                            .map_err(|source| sqlite_error("record directory claims", &path, source))?;
+                    }
+                }
+            }
+        }
+        tx.commit().map_err(|source| sqlite_error("record directory claims", &path, source))
     }
 
     /// Runs the resume contract over one [`ItemKind`] and reports what it found.
@@ -1227,6 +1403,9 @@ impl Manifest {
                 ItemStatus::SourceMissing => report.source_missing = count,
                 ItemStatus::Retired => report.retired = count,
                 ItemStatus::Excluded => report.excluded = count,
+                // Unreachable: `counts` excludes claims (decision 63a). The arm exists so a claim
+                // added back into the counts is a visible decision rather than a wildcard swallow.
+                ItemStatus::Claimed => {}
             }
         }
         Ok(report)
@@ -1332,12 +1511,21 @@ impl Manifest {
     }
 
     fn counts(&self, kind: ItemKind) -> Result<Vec<(ItemStatus, u64)>, ManifestError> {
+        // Claims are excluded (decision 63a): a directory claim is not an item, so no count of
+        // items may carry it. The exclusion is the exact claim word, so an unknown status still
+        // reaches the parse below and is refused rather than silently uncounted. **This filter and
+        // [`Self::resume`]'s `Claimed` arm are belt-and-braces**: on the observable surface (the
+        // resume report) removing either alone survives the whole suite — measured — because the
+        // other half keeps the claim out of the answer. Both are kept so a future consumer of
+        // `counts` itself stays correct without having to know the rule.
         let mut stmt = self
             .conn
-            .prepare("SELECT status, count(*) FROM items WHERE kind = ?1 GROUP BY status")
+            .prepare("SELECT status, count(*) FROM items WHERE kind = ?1 AND status <> ?2 GROUP BY status")
             .map_err(|source| sqlite_error("count items", &self.path, source))?;
         let rows = stmt
-            .query_map(params![kind.as_stored()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .query_map(params![kind.as_stored(), ItemStatus::Claimed.as_stored()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(|source| sqlite_error("count items", &self.path, source))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|source| sqlite_error("count items", &self.path, source))?

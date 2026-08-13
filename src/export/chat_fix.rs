@@ -301,6 +301,16 @@ pub fn dir_name(key: &str) -> String {
 /// no message can name because [`super::chat_media`]'s history-token grammar admits the `b~` spelling
 /// alone.
 ///
+/// **The history leg's directory-claim rows enter both halves, and that is the back door decision
+/// 63a exists to close.** A directory that exists only because a history run created it is named by
+/// no media row, so a seed reading media rows alone would hand its name to a different conversation
+/// on the next chat-media plan. A claim row's `output_path` IS the directory (not a file inside
+/// it), so it seeds [`Self::occupied`] verbatim rather than through `Path::parent` — the same
+/// reserve-everything rule, which is the whole point of the row — and it seeds [`Self::named`]
+/// under its own key, since its `source_id` IS the conversation key: a later run of either leg
+/// adopts the claimed directory for that conversation, which is what keeps one thread in one
+/// folder. Read through [`super::manifest::Manifest::claims`], so a claim under any kind reserves.
+///
 /// **Two rows of one conversation can disagree**, if a run before this rule split them, so
 /// [`Self::named`] keeps every directory the conversation's rows name and [`Conversations::adopt`]
 /// takes the lowest ADOPTABLE one in `Ord` order. Lowest, because that is a function of the SET of
@@ -371,13 +381,37 @@ impl RecordedDirs {
         // carries an output record: an item a message joined, and a gap TOKEN whose file vanished
         // between two runs — the two share one `source_id`, which is what makes a single map right
         // here rather than two lookups.
-        let conversations: BTreeMap<&str, &ConversationId> = reconciliation
+        let conversations: BTreeMap<String, &ConversationId> = reconciliation
             .items
             .iter()
-            .filter_map(|item| item.message().map(|message| (item.source_id(), &message.conversation)))
-            .chain(reconciliation.missing.iter().map(|missing| (missing.token.as_str(), &missing.conversation)))
+            .filter_map(|item| item.message().map(|message| (item.source_id().to_owned(), &message.conversation)))
+            .chain(reconciliation.missing.iter().map(|missing| (missing.token.clone(), &missing.conversation)))
             .collect();
+        Self::read_with(&conversations, manifest)
+    }
 
+    /// The history leg's read of the same layers (decision 60), with attribution taken from the
+    /// map [`super::chat_media::history_attribution`] derives out of `chat_history.json` alone.
+    ///
+    /// The history entry point has no [`Reconciliation`] to attribute from — it never walks media —
+    /// so the map stands in for it: for the plain family the manifest `source_id` IS the history
+    /// token, which is what makes a token-to-conversation lookup reach the same rows the join
+    /// would have named. Everything else is [`Self::read`]'s shape: one read for both layers, and
+    /// the same claim seeding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] when the manifest read fails.
+    pub(crate) fn read_by_tokens(attribution: &BTreeMap<String, &ConversationId>, manifest: &Manifest) -> Result<Self, ManifestError> {
+        Self::read_with(attribution, manifest)
+    }
+
+    /// The two readers' shared body: the media rows attributed through `conversations`, plus the
+    /// history leg's claim rows (decision 63a), which attribute by their own key and reserve their
+    /// directory in [`Self::occupied`] whatever the attribution — the reservation half never
+    /// depends on a join, and a departed conversation's claim must reserve exactly as a departed
+    /// conversation's media rows do.
+    fn read_with(conversations: &BTreeMap<String, &ConversationId>, manifest: &Manifest) -> Result<Self, ManifestError> {
         let rows = manifest.items(ItemKind::ChatMedia)?;
         let mut recorded = Self { outputs: RecordedOutputs::of(&rows), ..Self::default() };
         for row in rows {
@@ -387,7 +421,17 @@ impl RecordedDirs {
                 recorded.named.entry((*conversation).clone()).or_default().insert(dir.to_path_buf());
             }
         }
+        for claim in manifest.claims()? {
+            recorded.occupied.insert(claim.directory.clone());
+            recorded.named.entry(ConversationId::new(claim.source_id.as_str())).or_default().insert(claim.directory);
+        }
         Ok(recorded)
+    }
+
+    /// The per-item output records this read carries, for a caller that plans against the same
+    /// reservation the media outputs derive from (decision 52).
+    pub(crate) fn outputs(&self) -> &RecordedOutputs {
+        &self.outputs
     }
 }
 
@@ -466,6 +510,10 @@ fn portable(c: char) -> bool {
 
 /// One directory per conversation key, with collisions broken by position in the plan.
 ///
+/// `pub(crate)` because the history planner drives the same walk (decision 60): the untrusted-key
+/// cleaner and its append-only collision breaker are one code path for the whole crate, whichever
+/// leg's keys enter it, so the two legs can never clean a key or break a collision two ways.
+///
 /// Two distinct keys can clean to one name — `a/b` and `a?b` both become `a_b` — and the second one
 /// to appear gets `_2`, the third `_3`: **the suffix is a position in this plan, never the next free
 /// name on disk**, so a resumed run recomputes the same answer instead of asking a half-written
@@ -522,7 +570,7 @@ fn portable(c: char) -> bool {
 /// for at all. What the newcomer would then do INSIDE that tree is a second question and it is
 /// answered a layer down: [`super::local_fix::Outputs`] reserves the individual output paths those
 /// finished rows record, so an item is not planned onto one of them either.
-struct Conversations {
+pub(crate) struct Conversations {
     root: PathBuf,
     /// The next ordinal to try for a folded cleaned name, so a long collision run costs one lookup
     /// rather than a scan.
@@ -538,7 +586,7 @@ struct Conversations {
 }
 
 impl Conversations {
-    fn new(root: PathBuf, recorded: &RecordedDirs) -> Self {
+    pub(crate) fn new(root: PathBuf, recorded: &RecordedDirs) -> Self {
         // Claimed before any real key can be, which is what makes a key cleaning to it suffix away
         // rather than merge into the bucket for the files no message names. `claim` folds it like
         // every other name, so a key shouting `_NO-CONVERSATION` cannot take the bucket on a
@@ -609,7 +657,7 @@ impl Conversations {
         }
     }
 
-    fn dir(&mut self, conversation: &ConversationId) -> PathBuf {
+    pub(crate) fn dir(&mut self, conversation: &ConversationId) -> PathBuf {
         if let Some(dir) = self.assigned.get(conversation) {
             return dir.clone();
         }

@@ -258,7 +258,13 @@ fn is_alphanumeric_run(text: &str) -> bool {
 /// The prefix normalizes ascii-case exactly as [`ChatMediaFile::parse`] does, so a shouted `B~x` in
 /// the history and a shouted `B~x` on disk land on ONE row rather than forking into two. The id
 /// half stays verbatim on both sides, because an id is opaque and case-significant.
-fn parse_history_token(raw: &str) -> Option<String> {
+///
+/// `pub(crate)` because the history writer's html lookup is the second caller, for the
+/// NORMALIZATION half only: it keys its manifest read by the canonical spelling this returns, so a
+/// message spelling the prefix loudly still reaches its row. The writer never REJECTS on `None` —
+/// the manifest stays the authority and an unparseable token keeps its own spelling for the lookup
+/// (decision 62) — which is the one difference between the join's use and the writer's.
+pub(crate) fn parse_history_token(raw: &str) -> Option<String> {
     let (prefix, id) = raw.split_once('~')?;
     if Token::parse(prefix) != Some(Token::B) || !is_alphanumeric_run(id) {
         return None;
@@ -1009,6 +1015,33 @@ pub fn reconcile(history: &ChatHistory, discovery: Discovery) -> Reconciliation 
     let unparsed_tokens = unparsed_tokens.into_iter().map(|(token, message)| UnparsedToken { token, message }).collect();
 
     Reconciliation { items, missing, unparsed_tokens, unparsed, duplicates, unreadable }
+}
+
+/// The attribution the history leg derives from `chat_history.json` alone (decision 60): which
+/// conversation each joinable `Media IDs` token belongs to.
+///
+/// The history entry point takes its own key set plus this map instead of a [`Reconciliation`],
+/// because it never walks media. The map works because for the plain family the manifest
+/// `source_id` IS the history token, and it is keyed by the CANONICAL spelling
+/// [`parse_history_token`] mints — the one spelling of the join's grammar — so a token shouting its
+/// prefix (`B~x`) reaches the same key the rows are minted under, and a token the join could never
+/// attribute (`media~<id>`, a zip stem, anything unparseable) is absent from the map exactly as it
+/// is absent from the join. The two answers cannot drift. A token named by two conversations takes
+/// the first namer, the same rule [`reconcile`] applies to a gap token.
+#[must_use]
+pub fn history_attribution(chat: &ChatHistory) -> BTreeMap<String, &ConversationId> {
+    let mut by_token: BTreeMap<String, &ConversationId> = BTreeMap::new();
+    for conversation in &chat.conversations {
+        for record in &conversation.records {
+            let Some(raw) = record.media_ids.as_deref() else { continue };
+            for token in media_tokens(raw) {
+                if let Some(canonical) = parse_history_token(token) {
+                    by_token.entry(canonical).or_insert(&conversation.id);
+                }
+            }
+        }
+    }
+    by_token
 }
 
 #[cfg(test)]

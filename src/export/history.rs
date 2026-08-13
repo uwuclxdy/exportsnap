@@ -9,7 +9,7 @@
 //! and [`Record::content`]/[`Record::media_ids`] return `None` on the snap arm as a consequence
 //! of what the type holds, not as a convention every call site has to remember.
 //!
-//! Nothing here writes a file, renders a row, or knows a screen exists. This is the document model the four phase-4 writers render over (decision 58), and the four writers (json, text, csv, html) live here as pure functions over that document; the `fs::write` that lands any of them on disk is a later task.
+//! Nothing here writes a file, renders a row, or knows a screen exists. This is the document model the four phase-4 writers render over (decision 58), and the four writers (json, text, csv, html) live here as pure functions over that document; the `fs::write` that lands one on disk is [`super::history_run`]'s.
 //!
 //! # Ordering
 //!
@@ -69,10 +69,11 @@
 //! (decision 62): a `done` row renders a relative link whose `href` is the bare output filename —
 //! the conversation directory is flat (decision 60) and this document sits beside the media — while
 //! every other status, and a missing row, renders an inert placeholder naming the message's own
-//! `Media Type` and nothing else: no token, no id, no path. The manifest lookup is the authority, so
-//! a token is never re-validated — that would be a second spelling of `chat_media`'s private
-//! `parse_history_token` — and a token that is not a `b~<id>` spelling simply has no row and falls to
-//! the placeholder naturally.
+//! `Media Type` and nothing else: no token, no id, no path. The manifest lookup is the authority, and
+//! the lookup KEY is the join's own canonical spelling — `chat_media`'s one
+//! `parse_history_token`, now shared — so a shouted prefix reaches the row it names; a token outside
+//! that grammar keeps its own spelling, has no row, and falls to the placeholder naturally. Nothing
+//! is rejected here, only normalized.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -81,7 +82,7 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::export::chat_media::media_tokens;
+use crate::export::chat_media::{media_tokens, parse_history_token};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest, ManifestError};
 use crate::export::model;
 use crate::export::model::{ConversationId, MediaKind, MessageText, Timestamp, Username};
@@ -488,8 +489,9 @@ impl fmt::Debug for Html {
 ///
 /// `manifest` is `None` when the source names no `mydata~*` part group, so there is no `ExportId`
 /// and no manifest to read from; every media reference then renders as a placeholder and
-/// [`Html::links`] is [`HtmlLinks::NoManifest`], so the run that lands the file (task 79) can state
-/// the reason once rather than per message. `Some` is the already-opened manifest that run holds.
+/// [`Html::links`] is [`HtmlLinks::NoManifest`], so the run that lands the file
+/// ([`super::history_run`]) can state the reason once rather than per message. `Some` is the
+/// already-opened manifest that run holds.
 ///
 /// # Errors
 ///
@@ -545,11 +547,17 @@ fn html_block(record: &Record, manifest: Option<&Manifest>) -> Result<String, Ma
 /// One `Media IDs` token as html: a link where the manifest row is `done`, else a placeholder.
 ///
 /// The module docs hold the reading of decision 62 that drives this; the manifest lookup is the
-/// authority and no token re-validation runs.
+/// authority. The lookup KEY is the join's own canonical spelling — [`parse_history_token`]'s
+/// normalization, not a second one — so a token shouting its prefix (`B~x`) reaches the row the
+/// join mints under `b~x`. A token outside the grammar keeps its own spelling and
+/// falls to the placeholder unless that spelling names a row: nothing is REJECTED here, the
+/// canonicalization only ever widens the lookup to the spelling the rows actually carry.
 fn html_media_token(record: &Record, token: &str, manifest: Option<&Manifest>) -> Result<String, ManifestError> {
     let Some(manifest) = manifest else {
         return Ok(media_placeholder(record));
     };
+    let canonical = parse_history_token(token);
+    let token = canonical.as_deref().unwrap_or(token);
     let Some(item) = manifest.item(ItemKind::ChatMedia, token)? else {
         return Ok(media_placeholder(record));
     };

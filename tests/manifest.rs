@@ -1619,7 +1619,10 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
     // These words are in every user's database. Renaming one silently orphans their rows, so the
     // list is a contract rather than an implementation detail.
     assert_eq!(ItemKind::ALL.map(ItemKind::as_stored), ["memory", "chat_media", "history_export"]);
-    assert_eq!(ItemStatus::ALL.map(ItemStatus::as_stored), ["pending", "done", "failed", "source_missing", "retired", "excluded"]);
+    assert_eq!(
+        ItemStatus::ALL.map(ItemStatus::as_stored),
+        ["pending", "done", "failed", "source_missing", "retired", "excluded", "claimed"]
+    );
 
     // Second witness for each; `ItemKind::as_stored`/`ItemStatus::as_stored` above are the first,
     // and `ItemStatus` also has `resume`'s per-status match (src/export/manifest.rs) as a second.
@@ -1640,7 +1643,8 @@ fn every_kind_and_status_keeps_the_word_it_is_stored_as() {
             | ItemStatus::Failed
             | ItemStatus::SourceMissing
             | ItemStatus::Retired
-            | ItemStatus::Excluded => {}
+            | ItemStatus::Excluded
+            | ItemStatus::Claimed => {}
         }
     }
 }

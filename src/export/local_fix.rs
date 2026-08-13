@@ -1244,6 +1244,17 @@ impl Outputs {
         self.next.insert(folded, ordinal);
         path
     }
+
+    /// [`Self::free`] under a name that says what it is: the history writer's entry (decision 60).
+    ///
+    /// A history document has no manifest row of its own — decision 63a's claim records the
+    /// DIRECTORY, and nothing records a document — so it never adopts, only derives. It still goes
+    /// through the same reservation: a `history.<ext>` name any recorded path already claims is
+    /// suffixed away from rather than written over, which is what stops the document names from
+    /// resting on the coincidence that no media stem spells one (decision 60's surviving clause).
+    pub(crate) fn reserve(&mut self, dir: &Path, stem: &str, extension: &str) -> PathBuf {
+        self.free(dir, stem, extension)
+    }
 }
 
 /// The `(stem, extension)` a kept copy's name is claimed under: the source's own file name, split on
