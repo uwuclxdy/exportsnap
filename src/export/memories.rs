@@ -4,7 +4,8 @@
 //! The join is by DATE BUCKET, because the export offers nothing better. An entry carries five
 //! keys and none of them is an id; every download link in the one observed export is `""`; and the
 //! `memories.html` index sitting beside the media repeats the date already in each filename and
-//! carries nothing else. So an entry is matched to media by the day it happened on and the kind of
+//! carries nothing else. So an entry is matched to media by the day it happened on — or one of the
+//! two adjacent days, for an entry the exact day could not serve (decision 75) — and the kind of
 //! media it is, and a bucket holding several of each pairs them arbitrarily.
 //!
 //! What that costs is recorded rather than hidden. A [`Pairing`] says whether an item was the one
@@ -24,6 +25,8 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{Datelike, NaiveDate};
+
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest, ManifestError, NewItem};
 use crate::export::model::{DownloadUrl, MediaKind, Memories, Memory, Timestamp, fixed_width, in_range, split_three};
 use crate::export::walk::{Walk, walk};
@@ -42,7 +45,9 @@ const MEMORIES_DIR: &str = "memories";
 /// A calendar day: what a memory filename spells and what an entry's [`Timestamp`] reduces to.
 ///
 /// Range-checked rather than calendar-checked, exactly like [`Timestamp`]: `2021-02-30` parses.
-/// Nothing here does date arithmetic, and the day is a bucket key and a label.
+/// The join's ±1-day window is the one place this type does date arithmetic
+/// ([`Self::neighbors`]), and it converts fallibly through a real calendar: a day that names no
+/// real date has no neighbors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Day {
     year: u16,
@@ -85,15 +90,36 @@ impl Day {
     pub const fn day(self) -> u8 {
         self.day
     }
+
+    /// The two calendar days either side of this one, the next day first.
+    ///
+    /// The join's ±1-day window (decision 75) is the only date arithmetic this type does, so it is
+    /// fallible the same way [`Timestamp`]'s conversion to a date crate is (the design's ceiling:
+    /// a range-checked day handed to a real calendar converts fallibly). A day that parses but
+    /// names no real date — `2021-02-30` — has no neighbors rather than an invented day.
+    #[must_use]
+    fn neighbors(self) -> Option<[Self; 2]> {
+        let date = NaiveDate::from_ymd_opt(i32::from(self.year), u32::from(self.month), u32::from(self.day))?;
+        let next = date.succ_opt().and_then(Self::from_date)?;
+        let previous = date.pred_opt().and_then(Self::from_date)?;
+        Some([next, previous])
+    }
+
+    /// The [`Day`] a real calendar date names, or `None` when this type cannot hold its year.
+    ///
+    /// Same shape as [`Timestamp::from_epoch_ms`]'s conversion: the `u16` year is the type's
+    /// ceiling, so a neighbor reaching past it (`65535-12-31`'s successor) is absence, never a
+    /// truncated year.
+    fn from_date(date: NaiveDate) -> Option<Self> {
+        Some(Self { year: u16::try_from(date.year()).ok()?, month: u8::try_from(date.month()).ok()?, day: u8::try_from(date.day()).ok()? })
+    }
 }
 
 /// Takes the UTC calendar date verbatim, which is the join's load-bearing assumption: the entry's
-/// `Date` is UTC and the filename's day is whatever zone Snapchat named the file in. If the two
-/// ever disagree, an entry and its own file land in adjacent buckets and never pair. The observed
-/// export supports them agreeing — zero surplus files across 479 buckets, so no file was left
-/// orphaned by a day boundary — but that is one export, and a run reporting a sudden crop of
-/// source-missing entries next to an equal crop of files-without-entry is what this assumption
-/// failing would look like.
+/// `Date` is UTC and the filename's day is whatever zone Snapchat named the file in. The zones
+/// disagree, measured at n=2 — 36 of 846 entries (and 36 of 836) sit exactly one day off their
+/// media, at filename-coverage level. The join's ±1-day window (decision 75) is the bound: a file
+/// two days out still pairs with nothing.
 impl From<Timestamp> for Day {
     fn from(timestamp: Timestamp) -> Self {
         Self { year: timestamp.year(), month: timestamp.month(), day: timestamp.day() }
@@ -202,7 +228,7 @@ impl fmt::Display for MemoryKind {
 /// The day-and-kind pair an entry and a media set have to share to pair at all.
 ///
 /// Keying on the day alone was measured against the same export and is strictly worse: 393 buckets
-/// against 479, and 187 entries in a 1:1 bucket against 267. The surplus is the same 90 either way,
+/// against 479, and 187 entries in a 1:1 bucket against 267. The surplus is the same either way,
 /// so the kind buys precision in the pairing without changing what is missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bucket {
@@ -521,7 +547,8 @@ pub enum Pairing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingReason {
     /// The bucket named more entries than the export holds media for. All 90 of the observed
-    /// export's unpaired entries are these.
+    /// export's unpaired entries are these; only 746 mains exist for 836 entries, so at least 90
+    /// pair with nothing under any window.
     NoMedia,
     /// The entry carries no usable `Date`, so it falls in no bucket at all. Unobserved: all 836
     /// entries in the one export date cleanly.
@@ -743,6 +770,12 @@ impl Reconciliation {
 /// pairs ambiguously, including the one entry of a bucket holding two files. Entries a bucket
 /// cannot serve become [`Pairing::Missing`] and media no entry claimed lands in
 /// [`Reconciliation::files_without_entry`], so neither side of a disagreement is dropped.
+///
+/// Two claim passes, both in the export's own order (decision 75): the exact-day claim first, then
+/// the adjacent-day claim for entries the first pass left unpaired. An adjacent-day claim is
+/// always [`Pairing::Ambiguous`] — the file's day disagrees with the entry's, so `Exact`'s "the
+/// bucket held one of each, they belong together" contract cannot hold — and entries still
+/// unmatched after both passes keep the [`MissingReason`] precedence below, unchanged.
 #[must_use]
 pub fn reconcile(memories: &Memories, discovery: Discovery) -> Reconciliation {
     let Discovery { media, orphan_overlays, unparsed, duplicates, unreadable } = discovery;
@@ -762,30 +795,62 @@ pub fn reconcile(memories: &Memories, discovery: Discovery) -> Reconciliation {
 
     let scan_incomplete = !unreadable.is_empty();
     let mut items = Vec::with_capacity(memories.saved_media.len());
+    // Pass 1: the exact-day claim, in the export's own order. An entry that claims nothing here is
+    // NOT verdicted yet — pass 2 may still pair it across a day boundary — so its bucket is
+    // recorded for that pass rather than re-derived: `Bucket::of` is the one spelling of the key
+    // and a second one written here could drift from it.
+    let mut widen: Vec<(usize, &Memory, Bucket)> = Vec::new();
     for (entry_index, memory) in memories.saved_media.iter().enumerate() {
         let url = memory.media_download_url.clone().or_else(|| memory.download_link.clone());
-        let claimed = Bucket::of(memory).and_then(|bucket| {
-            let media = unclaimed.get_mut(&bucket)?.pop_front()?;
+        let bucket = Bucket::of(memory);
+        let claimed = bucket.and_then(|bucket| {
+            let media = draw(&bucket, &mut unclaimed)?;
             let alone = entries_per_bucket.get(&bucket) == Some(&1) && files_per_bucket.get(&bucket) == Some(&1);
             let source_id = media.uuid().to_owned();
             Some((source_id, if alone { Pairing::Exact(media) } else { Pairing::Ambiguous(media) }))
         });
-        let (source_id, pairing) = claimed.unwrap_or_else(|| {
-            // An incomplete scan outranks `NoMedia`, because the manifest never hands a
-            // source-missing row back as work: "no media exists" written off a scan that could not
-            // read part of the source is a durable claim the run did not establish. It does NOT
-            // outrank `NoDate`, which is a fact about the entry rather than about the filesystem —
-            // an entry carrying no date pairs with nothing however much of the source was read, so
-            // reporting it as unscanned would send a reader to fix permissions that would not have
-            // helped.
-            let reason = match (memory.date.is_none(), scan_incomplete) {
-                (true, _) => MissingReason::NoDate,
-                (false, true) => MissingReason::Unscanned,
-                (false, false) => MissingReason::NoMedia,
-            };
-            (synthetic_source_id(entry_index), Pairing::Missing(reason))
-        });
+        let (source_id, pairing) = match claimed {
+            Some(claimed) => claimed,
+            None => {
+                if let Some(bucket) = bucket {
+                    widen.push((entry_index, memory, bucket));
+                }
+                // An incomplete scan outranks `NoMedia`, because the manifest never hands a
+                // source-missing row back as work: "no media exists" written off a scan that could
+                // not read part of the source is a durable claim the run did not establish. It does
+                // NOT outrank `NoDate`, which is a fact about the entry rather than about the
+                // filesystem — an entry carrying no date pairs with nothing however much of the
+                // source was read, so reporting it as unscanned would send a reader to fix
+                // permissions that would not have helped.
+                let reason = match (memory.date.is_none(), scan_incomplete) {
+                    (true, _) => MissingReason::NoDate,
+                    (false, true) => MissingReason::Unscanned,
+                    (false, false) => MissingReason::NoMedia,
+                };
+                (synthetic_source_id(entry_index), Pairing::Missing(reason))
+            }
+        };
         items.push(MemoryItem { entry_index, source_id, url, pairing });
+    }
+
+    // Pass 2: the adjacent-day claim (decision 75). Snapchat writes the filename's day in a
+    // different zone than the manifest's UTC date, so 36 of 846 entries land one bucket off their
+    // own file, at filename-coverage level (n=2: 52 per export have no same-day filename, 16 none
+    // within ±1). The window draws +1 day first, then -1, and only what pass 1 left: an entry
+    // with a same-day file has already taken it, and an entry with none can only touch what no
+    // exact-day claim wanted.
+    for (entry_index, memory, bucket) in widen {
+        let media = bucket.day.neighbors().and_then(|[next, previous]| {
+            let next_bucket = Bucket { day: next, kind: bucket.kind };
+            let previous_bucket = Bucket { day: previous, kind: bucket.kind };
+            draw(&next_bucket, &mut unclaimed).or_else(|| draw(&previous_bucket, &mut unclaimed))
+        });
+        if let Some(media) = media {
+            let url = memory.media_download_url.clone().or_else(|| memory.download_link.clone());
+            // `entry_index` is the position this item was pushed at in pass 1, which iterated the
+            // same list this entry came from.
+            items[entry_index] = MemoryItem { entry_index, source_id: media.uuid().to_owned(), url, pairing: Pairing::Ambiguous(media) };
+        }
     }
 
     Reconciliation {
@@ -796,6 +861,14 @@ pub fn reconcile(memories: &Memories, discovery: Discovery) -> Reconciliation {
         duplicates,
         unreadable,
     }
+}
+
+/// Draws one media set from `unclaimed` for `bucket`, if an earlier claim left one.
+///
+/// The one spelling of a claim, shared by the exact-day and the adjacent-day passes so neither can
+/// disagree with the other about what claiming means.
+fn draw(bucket: &Bucket, unclaimed: &mut BTreeMap<Bucket, VecDeque<MemoryMedia>>) -> Option<MemoryMedia> {
+    unclaimed.get_mut(bucket)?.pop_front()
 }
 
 /// The manifest `source_id` for an entry no media paired with.
@@ -813,7 +886,7 @@ fn synthetic_source_id(entry_index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_uuid, synthetic_source_id};
+    use super::{Day, is_uuid, synthetic_source_id};
 
     const UUID: &str = "2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8e";
 
@@ -843,5 +916,27 @@ mod tests {
             assert!(!is_uuid(&synthetic), "{synthetic} would collide with a real memory uuid");
         }
         assert_eq!(synthetic_source_id(90), "unpaired-entry-90");
+    }
+
+    #[test]
+    fn a_day_names_the_two_neighbor_days_across_rollovers() {
+        let day = |text: &str| Day::parse(text).unwrap();
+        // Month rollover.
+        assert_eq!(day("2021-01-31").neighbors(), Some([day("2021-02-01"), day("2021-01-30")]));
+        // Non-leap February, and the leap year beside it.
+        assert_eq!(day("2021-02-28").neighbors(), Some([day("2021-03-01"), day("2021-02-27")]));
+        assert_eq!(day("2020-02-29").neighbors(), Some([day("2020-03-01"), day("2020-02-28")]));
+        // The 28 → 29 successor only exists in a leap year; a successor that hardcodes February
+        // at 28 days would pass every other pin here.
+        assert_eq!(day("2024-02-28").neighbors(), Some([day("2024-02-29"), day("2024-02-27")]));
+        // Year rollover.
+        assert_eq!(day("2020-12-31").neighbors(), Some([day("2021-01-01"), day("2020-12-30")]));
+    }
+
+    #[test]
+    fn a_day_that_names_no_real_calendar_date_has_no_neighbors() {
+        // `2021-02-30` parses — the day is range-checked, not calendar-checked — and a day that
+        // does not exist must not invent neighbors or panic on the way there.
+        assert_eq!(Day::parse("2021-02-30").unwrap().neighbors(), None);
     }
 }

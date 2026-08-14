@@ -472,6 +472,44 @@ fn an_entry_whose_word_names_no_memory_buckets_as_unknown() {
     assert_eq!(reconciliation.files_without_entry.len(), 1);
 }
 
+#[test]
+fn an_entry_whose_file_is_a_day_off_pairs_through_the_window() {
+    // The entry is on 2020-07-28, its file on 2020-07-29. A second unclaimed file on the -1 side
+    // makes the order decide which of the two the window hands it: +1 is tried first (decision 75).
+    let reconciliation =
+        reconciled(&[(&at("2020-07-28"), "Image")], vec![main_file("2020-07-29", 1, "jpg"), main_file("2020-07-27", 2, "jpg")]);
+
+    // A cross-day claim is arbitrary by construction: the file's day disagrees with the entry's, so
+    // `Exact`'s "the bucket held one of each, they belong together" contract cannot hold however
+    // alone the bucket was.
+    assert!(matches!(reconciliation.items[0].pairing, Pairing::Ambiguous(_)), "{:?}", reconciliation.items[0].pairing);
+    assert_eq!(source_ids(&reconciliation), [uuid(1)]);
+    assert_eq!(reconciliation.files_without_entry.len(), 1);
+    assert_eq!(reconciliation.files_without_entry[0].uuid(), uuid(2), "the -1-side file stays unclaimed");
+}
+
+#[test]
+fn an_entry_whose_file_is_a_day_early_pairs_through_the_window() {
+    let reconciliation = reconciled(&[(&at("2020-07-28"), "Image")], vec![main_file("2020-07-27", 1, "jpg")]);
+
+    assert!(matches!(reconciliation.items[0].pairing, Pairing::Ambiguous(_)), "{:?}", reconciliation.items[0].pairing);
+    assert_eq!(source_ids(&reconciliation), [uuid(1)]);
+    assert!(reconciliation.files_without_entry.is_empty());
+}
+
+#[test]
+fn an_exact_day_pair_never_loses_its_file_to_a_neighbor() {
+    // Two entries on adjacent days and one file, on the later day. The earlier entry's +1 neighbor
+    // IS the later entry's day, so a pass 2 that ran before pass 1 finished would hand the later
+    // entry's own file to the earlier one.
+    let reconciliation = reconciled(&[(&at("2020-07-28"), "Image"), (&at("2020-07-29"), "Image")], vec![main_file("2020-07-29", 1, "jpg")]);
+
+    assert_eq!(source_ids(&reconciliation), ["unpaired-entry-0", &uuid(1)], "the same-day pair keeps its file");
+    assert!(matches!(reconciliation.items[1].pairing, Pairing::Exact(_)), "{:?}", reconciliation.items[1].pairing);
+    assert_eq!(reconciliation.items[0].pairing, Pairing::Missing(MissingReason::NoMedia));
+    assert!(reconciliation.files_without_entry.is_empty());
+}
+
 /// A dir the walk could not list means the run cannot say media does not exist — it can only say it
 /// never saw any. `SourceMissing` is never handed back as work, so the verdict is durable and has to
 /// stop short of the claim.
