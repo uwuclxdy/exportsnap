@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use exportsnap::export::env::locate_in;
 use exportsnap::export::env::{Environment, Tool, available_space};
 
-/// A path under cargo's own test tmpdir that is guaranteed not to exist.
+/// A path under cargo's own test tmpdir that is guaranteed not to exist. Unix-gated with its two
+/// callers: on windows the same input does not fail the probe, so no test there uses it.
+#[cfg(unix)]
 fn missing_path() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("env-no-such-dir").join("nor-this-one")
 }
@@ -34,6 +36,12 @@ fn available_space_reports_a_real_filesystem() {
     assert!(space > 0, "the checkout's filesystem reported {space} available bytes");
 }
 
+/// Unix-only: on windows the same input does not fail the probe — `GetVolumePathNameW` climbs from
+/// a path that is not there to the drive root it names, so the probe measures the volume instead —
+/// and the asserted error text is the unix one (`ENOENT`). A nonexistent drive letter is the only
+/// known failing path and which letter that is is a per-box guess; the rest of the failure surface
+/// is unmeasured, so the failure shape this pins has a unix home.
+#[cfg(unix)]
 #[test]
 fn a_space_probe_that_fails_names_the_path_and_the_fix() {
     let path = missing_path();
@@ -56,6 +64,10 @@ fn a_probe_measures_the_filesystem_the_path_sits_on() {
     assert!(probe.available_space.is_some_and(|space| space > 0));
 }
 
+/// Unix-only, for the reason its sibling records: on windows the probe of a path that is not there
+/// measures the volume the path names, so there is no failed probe for this fixture to show a
+/// `None` for.
+#[cfg(unix)]
 #[test]
 fn a_space_probe_that_fails_reports_no_figure_rather_than_a_wrong_one() {
     // The tool fields are deliberately NOT asserted here: any comparison against `locate` is

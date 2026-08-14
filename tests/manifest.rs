@@ -1150,8 +1150,15 @@ fn the_manifest_dir_is_a_per_user_data_dir_outside_the_repo() {
     let dir = manifest_dir().expect("a box running these tests has a home directory");
 
     assert!(dir.ends_with("manifests"), "{}", dir.display());
-    let app = dir.parent().unwrap().file_name().unwrap().to_string_lossy().to_ascii_lowercase();
-    assert!(app.contains("exportsnap"), "the data dir is named for the app, got {app:?}");
+    // The app-named component sits one level up on unix (`<data dir>/exportsnap/manifests`) and two
+    // on windows (`<data dir>/exportsnap/data/manifests` — the `directories` crate's windows layout
+    // splits the app dir into `config/` and `data/`), so check the ancestor chain rather than a
+    // fixed depth. A false positive needs an unrelated ancestor whose name contains `exportsnap`;
+    // the app dir is genuinely present on all three layouts, so the check reads the real one.
+    let named_for_the_app = dir
+        .ancestors()
+        .any(|ancestor| ancestor.file_name().is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains("exportsnap")));
+    assert!(named_for_the_app, "the data dir sits under a directory named for the app: {}", dir.display());
     assert!(dir.is_absolute(), "{}", dir.display());
     assert!(!dir.starts_with(env!("CARGO_MANIFEST_DIR")), "the manifest holds signed urls: {}", dir.display());
 }

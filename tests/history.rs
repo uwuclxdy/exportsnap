@@ -602,10 +602,23 @@ fn html_escapes_a_double_quote_in_the_recorded_filename() {
     let mut manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
     let token = "b~aB3xY9";
     manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: token, url: None }]).unwrap();
-    let output = workspace.path().join("we\"ird.jpg");
+    let output = workspace.path().join("weird.jpg");
     fs::write(&output, b"media bytes").unwrap();
     manifest.mark_done(ItemKind::ChatMedia, token, &output).unwrap();
+    let db = manifest.path().to_path_buf();
+    drop(manifest);
 
+    // The quoted spelling is planted by editing the row, the way a user editing the 0600 manifest
+    // could: a file whose name holds `"` cannot exist on windows, where the character is not a
+    // legal filename. Nothing about the href reads the file — it is built from the recorded NAME
+    // alone — which is the same reason the escape is what contains the hand edit.
+    let quoted = workspace.path().join("we\"ird.jpg");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE items SET output_path = ?1 WHERE kind = 'chat_media' AND source_id = ?2", [quoted.to_str().unwrap(), token])
+        .unwrap();
+    drop(conn);
+
+    let manifest = Manifest::open_in(workspace.path(), &ExportId::new("1784667002819").unwrap()).unwrap();
     let document = document_with(vec![chat_entry_with_media("2021-03-04 09:00:00 UTC", None, token)]);
     let rendered = write_html(&document, Some(&manifest)).unwrap().html;
 

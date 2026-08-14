@@ -2106,6 +2106,23 @@ mod tests {
         output_dir(Path::new(root), local).join(output_name(stem, extension, ordinal))
     }
 
+    /// A path in the 2021/01 bucket, spelled through the same [`output_dir`] + [`output_name`]
+    /// construction the planner itself derives from.
+    ///
+    /// **The fixture must share the planner's construction, not merely point at the same
+    /// location.** [`ClaimedPaths`] compares byte spellings, and on windows the planner's joins
+    /// spell separators as `\` where a `/`-joined literal does not, so a literal fixture misses
+    /// the reservation the test exists to pin. This is the test-side half of the canonical-root
+    /// rule: production canonicalizes at the plan boundary, and here both sides go through the
+    /// same builder instead.
+    ///
+    /// **Coverage bound, stated**: this root is a literal and the compares below are
+    /// spelling-agnostic, so the canonical-verbatim spelling (`\\?\C:\out`) production feeds in is
+    /// not exercised here — the chat_fix plan tests own that half.
+    fn bucket_path(root: &str, stem: &str, extension: &str, ordinal: u32) -> std::path::PathBuf {
+        output_path(root, at(2021, 1, 15, 0, 0, 0), stem, extension, ordinal)
+    }
+
     #[test]
     fn an_output_path_is_year_month_and_the_local_wall_time() {
         let local = at(2021, 1, 15, 14, 30, 5);
@@ -2131,15 +2148,18 @@ mod tests {
     // ---- the claim set decision 52 put under both planners ----
 
     /// What [`RecordedOutputs::read`] builds, without a manifest to build it out of.
-    fn recorded(rows: &[(&str, &str)]) -> RecordedOutputs {
-        RecordedOutputs { recorded: rows.iter().map(|(source_id, output)| ((*source_id).to_owned(), (*output).into())).collect() }
+    fn recorded(rows: &[(&str, std::path::PathBuf)]) -> RecordedOutputs {
+        RecordedOutputs { recorded: rows.iter().map(|(source_id, output)| ((*source_id).to_owned(), output.clone())).collect() }
     }
 
     /// Where each of `source_ids` lands, planned into one directory on one second under whatever
     /// `recorded` already holds — the collision the whole type is about.
     fn planned(recorded: &RecordedOutputs, source_ids: &[&str]) -> Vec<std::path::PathBuf> {
+        // The dir through `output_dir` rather than as a literal, so the derivation shares the
+        // byte spelling the fixtures in [`bucket_path`] use on every platform — see there.
+        let dir = output_dir(Path::new("/out"), at(2021, 1, 15, 0, 0, 0));
         let mut outputs = Outputs::new("/out".into(), recorded);
-        source_ids.iter().map(|source_id| outputs.path(source_id, Path::new("/out/2021/01"), "20210115_000000", "jpg")).collect()
+        source_ids.iter().map(|source_id| outputs.path(source_id, &dir, "20210115_000000", "jpg")).collect()
     }
 
     #[test]
@@ -2163,8 +2183,9 @@ mod tests {
     /// gives `_3` because the row's own record is claimed too, and adopting gives `_2`.
     #[test]
     fn a_recorded_path_is_handed_back_to_the_item_that_recorded_it() {
-        let kept = recorded(&[("a", "/out/2021/01/20210115_000000.jpg"), ("b", "/out/2021/01/20210115_000000_2.jpg")]);
-        assert_eq!(planned(&kept, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+        let kept =
+            recorded(&[("a", bucket_path("/out", "20210115_000000", "jpg", 0)), ("b", bucket_path("/out", "20210115_000000", "jpg", 1))]);
+        assert_eq!(planned(&kept, &["b"]), [bucket_path("/out", "20210115_000000", "jpg", 1)]);
     }
 
     /// The reservation half, and the one the measured defect actually turns on: the survivor was
@@ -2172,8 +2193,8 @@ mod tests {
     /// give it and only the departed row's reservation keeps it off that row's file.
     #[test]
     fn a_departed_items_recorded_path_is_not_handed_to_another_item() {
-        let left_behind = recorded(&[("a", "/out/2021/01/20210115_000000.jpg")]);
-        assert_eq!(planned(&left_behind, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+        let left_behind = recorded(&[("a", bucket_path("/out", "20210115_000000", "jpg", 0))]);
+        assert_eq!(planned(&left_behind, &["b"]), [bucket_path("/out", "20210115_000000", "jpg", 1)]);
     }
 
     /// Two rows recorded on one path is the state the defect this closes actually produces, so it is
@@ -2181,10 +2202,11 @@ mod tests {
     /// file the first one already claims.
     #[test]
     fn two_rows_recorded_on_one_path_do_not_both_adopt_it() {
-        let doubled = recorded(&[("a", "/out/2021/01/20210115_000000.jpg"), ("b", "/out/2021/01/20210115_000000.jpg")]);
+        let doubled =
+            recorded(&[("a", bucket_path("/out", "20210115_000000", "jpg", 0)), ("b", bucket_path("/out", "20210115_000000", "jpg", 0))]);
         assert_eq!(
             planned(&doubled, &["a", "b"]),
-            [Path::new("/out/2021/01/20210115_000000.jpg"), Path::new("/out/2021/01/20210115_000000_2.jpg")]
+            [bucket_path("/out", "20210115_000000", "jpg", 0), bucket_path("/out", "20210115_000000", "jpg", 1)]
         );
     }
 
@@ -2207,10 +2229,10 @@ mod tests {
     /// The second half is the control — without it, a seed that reserved nothing at all reads green.
     #[test]
     fn a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved() {
-        let elsewhere = recorded(&[("a", "/OUT/2021/01/20210115_000000.jpg")]);
-        assert_eq!(planned(&elsewhere, &["b"]), [Path::new("/out/2021/01/20210115_000000.jpg")]);
-        let here = recorded(&[("a", "/out/2021/01/20210115_000000.jpg")]);
-        assert_eq!(planned(&here, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+        let elsewhere = recorded(&[("a", bucket_path("/OUT", "20210115_000000", "jpg", 0))]);
+        assert_eq!(planned(&elsewhere, &["b"]), [bucket_path("/out", "20210115_000000", "jpg", 0)]);
+        let here = recorded(&[("a", bucket_path("/out", "20210115_000000", "jpg", 0))]);
+        assert_eq!(planned(&here, &["b"]), [bucket_path("/out", "20210115_000000", "jpg", 1)]);
     }
 
     /// A record whose parent is not the directory this run planned for the item is left claimed and
@@ -2223,8 +2245,8 @@ mod tests {
     /// names is still on disk.
     #[test]
     fn a_record_in_a_directory_this_run_did_not_plan_is_not_handed_back() {
-        let moved = recorded(&[("a", "/out/2020/12/20210115_000000.jpg")]);
-        assert_eq!(planned(&moved, &["a"]), [Path::new("/out/2021/01/20210115_000000.jpg")]);
+        let moved = recorded(&[("a", output_path("/out", at(2020, 12, 15, 0, 0, 0), "20210115_000000", "jpg", 0))]);
+        assert_eq!(planned(&moved, &["a"]), [bucket_path("/out", "20210115_000000", "jpg", 0)]);
     }
 
     /// Case-sensitivity is a property of the filesystem, not of the string: a recorded `.JPG` and a
@@ -2233,8 +2255,8 @@ mod tests {
     /// a record and not a second derived name.
     #[test]
     fn a_recorded_path_differing_only_in_case_still_reserves_its_file() {
-        let shouted = recorded(&[("a", "/out/2021/01/20210115_000000.JPG")]);
-        assert_eq!(planned(&shouted, &["b"]), [Path::new("/out/2021/01/20210115_000000_2.jpg")]);
+        let shouted = recorded(&[("a", bucket_path("/out", "20210115_000000", "JPG", 0))]);
+        assert_eq!(planned(&shouted, &["b"]), [bucket_path("/out", "20210115_000000", "jpg", 1)]);
     }
 
     #[test]

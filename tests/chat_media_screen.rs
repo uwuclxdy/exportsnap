@@ -738,8 +738,11 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     // ≥ 2-space gap, then the value — never padded to a shared column.
     assert!(cell_run(buffer, 2).contains("❯ source  /export"), "{:?}", cell_run(buffer, 2));
     // The output row names the `chat/` level this leg actually writes into (decision 46a), so it
-    // cannot be read as the memories tree.
-    assert!(cell_run(buffer, 3).contains("output dir  /export/out/chat"), "{:?}", cell_run(buffer, 3));
+    // cannot be read as the memories tree. The expected value is built by joining the same way
+    // the row builds it, so the platform's separator reaches the comparison (on windows the row
+    // spells `/export/out\chat`).
+    let output_row = format!("output dir  {}", Path::new("/export/out").join("chat").to_string_lossy());
+    assert!(cell_run(buffer, 3).contains(&output_row), "{:?}", cell_run(buffer, 3));
     assert!(cell_run(buffer, 4).contains("3.0 GiB"));
     assert!(cell_run(buffer, 4).contains("40%"));
     assert!(cell_run(buffer, 5).contains("overlay mode"), "{:?}", cell_run(buffer, 5));

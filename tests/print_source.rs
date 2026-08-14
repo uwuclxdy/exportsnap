@@ -369,22 +369,25 @@ fn a_source_dir_that_is_not_there_is_reported_rather_than_refused() {
     // flag inherits that: a typo is a report, exit 0, not an error.
     assert_eq!(value(&fields, "parts"), "missing");
     assert_eq!(value(&fields, "source"), quoted(&source));
-    // Nothing was counted and nothing was measured, so neither the part numbers nor the space
-    // figures appear. A `zips=0` here would be a confident wrong answer.
-    assert_eq!(
-        keys(&fields),
-        [
-            "source",
-            "parts",
-            "memories-source",
-            "memories-out",
-            "chat-source",
-            "chat-out",
-            "history-source",
-            "history-out",
-            "account-source"
-        ]
-    );
+    // Nothing was counted, so no part numbers appear — a `zips=0` here would be a confident wrong
+    // answer. The space rows answer what the platform could measure: on unix the probe of an
+    // absent dir fails and both are omitted, and on windows the probe measures the volume the path
+    // names, so the two rows carry the drive's figure.
+    let mut expected = vec![
+        "source",
+        "parts",
+        "memories-source",
+        "memories-out",
+        "chat-source",
+        "chat-out",
+        "history-source",
+        "history-out",
+        "account-source",
+    ];
+    if cfg!(windows) {
+        expected.splice(2..2, ["free", "total"]);
+    }
+    assert_eq!(keys(&fields), expected);
 }
 
 #[test]

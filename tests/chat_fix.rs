@@ -238,6 +238,18 @@ fn first_run(reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: 
     chat_fix::plan(reconciliation, out_root, mode, &RecordedDirs::default()).unwrap()
 }
 
+/// The path the planners spell a literal `/out` root as, for the plan-only tests that plan into
+/// `/out`.
+///
+/// **Built the way the plan itself spells it, not as a string.** The plan canonicalizes the
+/// deepest existing prefix of its root and re-appends the missing tail (`canonical_out_root`),
+/// and `/out` does not exist, so the canonical form is the canonicalized filesystem root plus
+/// `out`. On windows that is a verbatim-prefixed drive root joined with `\`, which a `/out/...`
+/// literal does not equal.
+fn out_root() -> PathBuf {
+    fs::canonicalize(Path::new("/")).unwrap().join("out")
+}
+
 struct Workspace {
     temp: TempDir,
 }
@@ -923,7 +935,7 @@ fn each_overlay_mode_writes_exactly_what_decision_44b_says_on_the_video_leg() {
 #[test]
 fn a_png_main_that_pairs_keeps_its_own_format_under_every_overlay_mode() {
     let names = ["2021-03-04_media~vantsnap-0000009.zip.a1b2c3d.png", "2021-03-04_overlay~vantsnap-0000009.zip.a1b2c3d.png"];
-    let expected = Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.png");
+    let expected = out_root().join("chat/_no-conversation/2021/03/20210304_000000.png");
 
     for mode in OverlayMode::ALL {
         let plan = first_run(&from_names(&no_history(), &names), "/out", mode);
@@ -1255,11 +1267,12 @@ fn a_key_that_cleans_to_the_no_conversation_bucket_is_suffixed_away_from_it() {
         ("other", vec![]),
     ]);
     let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let out = out_root();
     assert_eq!(
         outputs(&plan),
         [
-            Path::new("/out/chat/_no-conversation_2/20210304_143005.jpg"),
-            Path::new("/out/chat/_no-conversation/2021/03/20210304_000000.jpg"),
+            out.join("chat/_no-conversation_2/20210304_143005.jpg").as_path(),
+            out.join("chat/_no-conversation/2021/03/20210304_000000.jpg").as_path(),
         ]
     );
 }
@@ -1277,7 +1290,11 @@ fn the_collision_suffix_is_the_same_answer_on_a_second_run() {
 
     let first = first_run(&reconciliation, "/out", OverlayMode::Both);
     let second = first_run(&reconciliation, "/out", OverlayMode::Both);
-    assert_eq!(outputs(&first), [Path::new("/out/chat/a_b/20210304_143005.jpg"), Path::new("/out/chat/a_b_2/20210304_143005.jpg"),]);
+    let out = out_root();
+    assert_eq!(
+        outputs(&first),
+        [out.join("chat/a_b/20210304_143005.jpg").as_path(), out.join("chat/a_b_2/20210304_143005.jpg").as_path(),]
+    );
     assert_eq!(outputs(&first), outputs(&second));
 }
 
@@ -1306,7 +1323,7 @@ fn a_conversation_keeps_its_directory_when_a_neighbours_item_leaves_the_export()
     // The first item, which belongs to `a/b`, leaves the export. `a?b` now arrives first.
     let after = first_run(&from_names(&rows(&all[1..]), &files[1..]), "/out", OverlayMode::Both);
 
-    assert_eq!(dir_of(&full, "b~aB3xY90002"), Some(PathBuf::from("/out/chat/a_b_2")), "sorted key order puts `a?b` second");
+    assert_eq!(dir_of(&full, "b~aB3xY90002"), Some(out_root().join("chat/a_b_2")), "sorted key order puts `a?b` second");
     assert_eq!(dir_of(&after, "b~aB3xY90002"), dir_of(&full, "b~aB3xY90002"), "an item leaving moved another conversation's directory");
 }
 
@@ -1651,9 +1668,10 @@ fn two_files_in_one_conversation_on_one_second_get_a_counted_suffix() {
         vec![message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90001"), message("a", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")],
     )]);
     let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let out = out_root();
     assert_eq!(
         outputs(&plan),
-        [Path::new("/out/chat/friend-handle/20210304_143005.jpg"), Path::new("/out/chat/friend-handle/20210304_143005_2.jpg"),]
+        [out.join("chat/friend-handle/20210304_143005.jpg").as_path(), out.join("chat/friend-handle/20210304_143005_2.jpg").as_path(),]
     );
 }
 
@@ -1665,11 +1683,12 @@ fn two_conversations_with_a_file_on_one_second_do_not_collide_with_each_other() 
         (GROUP_KEY, vec![message("b", "2021-03-04 14:30:05 UTC", "b~aB3xY90002")]),
     ]);
     let plan = first_run(&from_names(&history, &["2021-03-04_b~aB3xY90001.jpg", "2021-03-04_b~aB3xY90002.jpg"]), "/out", OverlayMode::Both);
+    let out = out_root();
     assert_eq!(
         outputs(&plan),
         [
-            PathBuf::from(format!("/out/chat/{SOLO_KEY}/20210304_143005.jpg")).as_path(),
-            PathBuf::from(format!("/out/chat/{GROUP_KEY}/20210304_143005.jpg")).as_path(),
+            out.join(format!("chat/{SOLO_KEY}/20210304_143005.jpg")).as_path(),
+            out.join(format!("chat/{GROUP_KEY}/20210304_143005.jpg")).as_path(),
         ]
     );
 }
@@ -1743,7 +1762,7 @@ fn an_epoch_dated_message_stamps_its_instant_without_moving_the_item() {
 
     // The both-halves assertion goes FIRST, deliberately: it is the one this test is named for, and
     // a field-level assert ahead of it would abort the body before the path was ever read.
-    assert_eq!(plan.items[0].output, Path::new("/out/chat/friend-handle/20200726_154805.jpg"));
+    assert_eq!(plan.items[0].output, out_root().join("chat/friend-handle/20200726_154805.jpg"));
     assert_eq!(plan.items[0].capture.local().to_string(), "2020-07-26 15:48:05");
     assert_eq!(plan.items[0].capture.source(), TimeSource::Message, "an epoch is the message speaking, not a fourth source");
 }
@@ -1819,7 +1838,7 @@ fn an_empty_conversation_key_is_absence_rather_than_an_empty_metadata_field() {
     let attribution = plan.items[0].attribution.as_ref().expect("the message still names a sender");
     assert_eq!(attribution.sender.as_ref().map(|from| from.as_str()), Some("sender-handle"));
     assert_eq!(attribution.conversation, None, "an empty key is absence, not an empty value");
-    assert_eq!(plan.items[0].output, Path::new("/out/chat/_unnamed/20210304_143005.jpg"));
+    assert_eq!(plan.items[0].output, out_root().join("chat/_unnamed/20210304_143005.jpg"));
 }
 
 #[test]

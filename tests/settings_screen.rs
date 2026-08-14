@@ -248,7 +248,10 @@ fn an_empty_commit_drops_the_key_and_the_row_shows_the_default() {
     assert_eq!(config.out_dir, None, "an empty commit removes the key");
     let mut restarted = Settings::with_layers(SettingsLayers { config, ..layers(Some(dir.path())) });
     restarted.set_source(PathBuf::from("/export"));
-    let expected = panel_row(&format!("{} · default", padded("❯ output dir  /export/exportsnap-out", 3)), 27);
+    // The value joined the way the row itself derives it (`default_out_root`), so the platform's
+    // separator reaches the comparison — on windows the row spells `/export\exportsnap-out`.
+    let shown = format!("❯ output dir  {}", Path::new("/export").join("exportsnap-out").to_string_lossy());
+    let expected = panel_row(&format!("{} · default", padded(&shown, 3)), 27);
     assert_eq!(row(render_80(&restarted).backend().buffer(), 1), expected, "the row falls back to the source-derived default");
 }
 

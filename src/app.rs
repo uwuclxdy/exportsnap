@@ -654,8 +654,16 @@ mod tests {
         // The tools are shared but the space figures are not: the overview measures the source dir
         // and the media screens measure the output root. Here the source is not there and the
         // default out root climbs to a dir that is, so the two differ by whether they can be
-        // measured at all rather than by a byte count no machine agrees on.
-        assert_eq!(app.overview().environment().available_space, None, "the overview measures the source dir, which is absent");
+        // measured at all rather than by a byte count no machine agrees on. "Measured at all"
+        // answers differently per OS: on unix the probe of an absent dir fails, and on windows the
+        // probe measures the volume the path names (`GetVolumePathNameW` climbs to the drive root
+        // even when the dir itself is not there), so the figure is the drive's rather than `None`.
+        let overview_space = app.overview().environment().available_space;
+        if cfg!(windows) {
+            assert!(overview_space.is_some(), "the overview measures the volume the source dir names, which exists");
+        } else {
+            assert_eq!(overview_space, None, "the overview measures the source dir, which is absent");
+        }
         assert!(app.memories().environment().available_space.is_some(), "the media screens measure the output root");
         assert!(app.chat_media().environment().available_space.is_some(), "the media screens measure the output root");
     }
