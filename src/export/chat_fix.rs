@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use crate::export::chat_media::{ChatMediaItem, MediaDate, Message, Reconciliation, Token};
 use crate::export::local_fix::{
     self, Capture, DeferralReason, Deferred, Leg, OutRootError, Outputs, Plan, PlannedItem, RecordedOutputs, SourceMedia,
+    canonical_out_root,
 };
 use crate::export::manifest::{ItemKind, Manifest, ManifestError};
 use crate::export::model::{Attribution, ConversationId};
@@ -440,10 +441,11 @@ impl RecordedDirs {
 /// The whole of what makes a name off the manifest safe to join back onto the output root, and it is
 /// the containment property rather than a cleaning pass — see [`Conversations::adopt`].
 ///
-/// **The root is absolute** — [`plan`] canonicalizes the out root with [`std::path::absolute`] before
-/// joining `CHAT_DIR`, so a relative `--out` and an absolute recorded directory name the same path
-/// here. The case-folding ceiling is stated at [`super::local_fix::under`]: `std::path::absolute`
-/// does not resolve case, and the dev platform does not fold it.
+/// **The root is canonical** — [`plan`] canonicalizes the out root through
+/// [`super::local_fix::canonical_out_root`] before joining `CHAT_DIR`, so a respelled `--out`
+/// (relative, symlinked, `..`-laden or case-differing) and the recorded directory name the same
+/// path here. The compare never folds on its own; the spellings agree instead, as
+/// [`super::local_fix::under`] states.
 fn child_name<'a>(root: &Path, dir: &'a Path) -> Option<&'a str> {
     if dir.parent() != Some(root) {
         return None;
@@ -732,11 +734,12 @@ pub fn plan(
     reconciliation: &Reconciliation, out_root: impl AsRef<Path>, mode: OverlayMode, recorded: &RecordedDirs,
 ) -> Result<Plan, OutRootError> {
     // Canonicalized once here, before joining `CHAT_DIR`: both [`Outputs`] and [`Conversations`]
-    // receive the same absolute chat root, and [`child_name`]'s parent check agrees with
-    // [`super::local_fix::under`]'s prefix check across a relative-vs-absolute respelling. The
-    // same call in [`super::local_fix::Plan::build`]; the ceilings (`..`, symlinks, case) there.
+    // receive the same canonical chat root, and [`child_name`]'s parent check agrees with
+    // [`super::local_fix::under`]'s prefix check across every respelling — relative, symlinked,
+    // `..`-laden or case-differing. The same call in [`super::local_fix::Plan::build`], via
+    // [`super::local_fix::canonical_out_root`].
     let root = out_root.as_ref();
-    let out_root = std::path::absolute(root).map_err(|_| OutRootError { root: root.to_path_buf() })?;
+    let out_root = canonical_out_root(root)?;
     let chat_root = out_root.join(CHAT_DIR);
     let no_conversation = chat_root.join(NO_CONVERSATION_DIR);
     // The chat root rather than the out root, so a record this leg could not have written — a

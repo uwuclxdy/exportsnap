@@ -377,7 +377,7 @@ fn a_memory_carries_no_attribution_and_keeps_no_originals() {
     // With an overlay, which is the case the other leg would keep originals for.
     let files = vec![write_main(dir.path(), "2021-01-15", 1), write_overlay(dir.path(), "2021-01-15", 1)];
     let reconciliation = reconciled(&memories, files);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.kind, ItemKind::Memory);
@@ -400,7 +400,7 @@ fn an_exact_bucket_takes_its_time_and_place_from_the_entry() {
     let files = vec![write_main(dir.path(), "2021-01-15", 1)];
     let reconciliation = reconciled(&memories, files);
 
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.items.len(), 1);
@@ -477,7 +477,7 @@ fn an_unpaired_entry_is_planned_for_nothing_while_a_video_gets_its_own_leg() {
         write_raw(dir.path(), &format!("2021-03-01_{}-main.mp4", uuid(2)), b"not really an mp4"),
     ];
     let reconciliation = reconciled(&memories, files);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.items.iter().map(|item| item.leg).collect::<Vec<_>>(), [Leg::Image, Leg::Video]);
@@ -499,7 +499,7 @@ fn an_image_and_a_video_landing_on_one_second_both_keep_the_plain_name() {
         write_raw(dir.path(), &format!("2021-01-15_{}-main.mp4", uuid(2)), b"not really an mp4"),
     ];
     let reconciliation = reconciled(&memories, files);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
 
     // Two files, one name, two extensions: nothing collides on disk, so nothing gets a suffix.
@@ -534,7 +534,7 @@ fn memories_landing_on_one_second_get_counted_names_rather_than_overwriting_each
     let files = (1..=3).map(|seed| write_main(dir.path(), "2021-01-15", seed)).collect();
     let reconciliation = reconciled(&memories, files);
 
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(outputs(&plan, &out), ["2021/01/20210115_000000.jpg", "2021/01/20210115_000000_2.jpg", "2021/01/20210115_000000_3.jpg"]);
 
@@ -573,7 +573,7 @@ fn an_item_leaving_the_export_does_not_shift_a_survivor_onto_its_finished_file()
     let reconciliation = reconciled(&memories, files);
     let mut first = manifest(&dir, &reconciliation);
 
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 2);
     assert_eq!(
@@ -646,7 +646,7 @@ fn an_item_whose_output_was_deleted_is_rewritten_at_the_path_it_recorded() {
     let reconciliation = reconciled(&memories, files);
     let mut first = manifest(&dir, &reconciliation);
 
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
     assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 2);
     assert_eq!(
@@ -716,6 +716,73 @@ fn a_recorded_path_is_adopted_across_a_relative_respelling_of_the_out_root() {
     std::env::set_current_dir(&resolved).unwrap();
     let replan = Plan::build(&memories, &reconciliation, "out", &recorded).unwrap();
     assert_eq!(replan.items[0].output, absolute_output, "the recorded path was not adopted across the relative respelling of the out root");
+}
+
+/// Task 87, pin 1: a recorded path spelled through the REAL path is adopted when the run root is
+/// spelled through a symlink to it. `std::fs::canonicalize` resolves symlinks on unix and
+/// `std::path::absolute` does not, so the symlink half of the spelling hole bites exactly where the
+/// relative-vs-absolute half (the test above) already did not. The first run writes under the real
+/// spelling, the second respells the same directory through a symlink, and adoption has to see one
+/// root — otherwise the recorded path neither adopts nor reserves (byte-wise `under`) and the item
+/// re-derives its whole tree.
+///
+/// Gated `#[cfg(unix)]` because the fixture is a `symlink(2)` call, which is unix-only: the ceiling
+/// this closes is not platform-specific, but a non-unix port would have to spell the fixture
+/// differently (junction / hardlink-to-dir) and that spelling would be a different test.
+#[test]
+#[cfg(unix)]
+fn a_recorded_path_is_adopted_across_a_symlink_respelling_of_the_out_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let resolved = fs::canonicalize(dir.path()).unwrap();
+    let memories = entries(&[(&at("2021-01-15", "00:00:00"), "Image", PARIS)]);
+    let files = vec![write_main(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
+    let mut first = manifest(&dir, &reconciliation);
+
+    let out = resolved.join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 1);
+
+    let recorded = RecordedOutputs::read(&first, ItemKind::Memory).unwrap();
+    let absolute_output = plan.items[0].output.clone();
+
+    let linked = resolved.join("linked-out");
+    symlink(&out, &linked).unwrap();
+    let replan = Plan::build(&memories, &reconciliation, &linked, &recorded).unwrap();
+    assert_eq!(replan.items[0].output, absolute_output, "the recorded path was not adopted across the symlink respelling of the out root");
+}
+
+/// Task 87, pin 2: a recorded path under `<dir>/out` adopts when the run root is spelled
+/// `<dir>/nonexistent/../out`. `std::path::absolute` leaves `..` in place, so the plan-time
+/// canonicalization has to resolve it through the deepest EXISTING prefix (`<dir>`) and re-append
+/// the tail — the point of the shape is that the out root itself must not have to exist, which is
+/// why full `std::fs::canonicalize` is unavailable at plan time.
+///
+/// The recorded side comes out of the first run under the plain spelling, so without the helper the
+/// second run's derived path carries the `..` verbatim and equals nothing the first run recorded.
+#[test]
+fn a_recorded_path_is_adopted_across_a_dotdot_respelling_of_the_out_root() {
+    let dir = TempDir::new().unwrap();
+    let resolved = fs::canonicalize(dir.path()).unwrap();
+    let memories = entries(&[(&at("2021-01-15", "00:00:00"), "Image", PARIS)]);
+    let files = vec![write_main(dir.path(), "2021-01-15", 1)];
+    let reconciliation = reconciled(&memories, files);
+    let mut first = manifest(&dir, &reconciliation);
+
+    let out = resolved.join("out");
+    let plan = first_run(&memories, &reconciliation, &out);
+    assert_eq!(local_fix::run(&plan, &mut first, 3, &copying()).unwrap().fixed, 1);
+
+    let recorded = RecordedOutputs::read(&first, ItemKind::Memory).unwrap();
+    let absolute_output = plan.items[0].output.clone();
+
+    // `nonexistent` is a name nothing created: the walk may only resolve the `..` lexically, after
+    // canonicalizing the deepest existing prefix (`<resolved>`).
+    let respelled = resolved.join("nonexistent").join("..").join("out");
+    let replan = Plan::build(&memories, &reconciliation, &respelled, &recorded).unwrap();
+    assert_eq!(replan.items[0].output, absolute_output, "the recorded path was not adopted across the `..` respelling of the out root");
 }
 
 #[test]
@@ -1158,7 +1225,7 @@ fn an_opaque_png_main_under_an_overlay_keeps_its_own_format_because_the_rule_rea
     let files = vec![MemoryFile::parse(path).unwrap(), write_overlay(dir.path(), "2021-01-15", 1)];
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
@@ -1208,7 +1275,7 @@ fn a_png_main_whose_own_transparency_sits_under_an_overlay_keeps_it() {
     let files = vec![MemoryFile::parse(path).unwrap(), write_overlay(dir.path(), "2021-01-15", 1)];
     let reconciliation = reconciled(&memories, files);
     let mut manifest = manifest(&dir, &reconciliation);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
 
@@ -1258,7 +1325,7 @@ fn a_lone_png_main_is_copied_through_with_its_transparency_intact() {
 
     let reconciliation = reconciled(&memories, vec![MemoryFile::parse(path).unwrap()]);
     let mut manifest = manifest(&dir, &reconciliation);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
     let report = local_fix::run(&plan, &mut manifest, 3, &transcoding()).unwrap();
     assert_eq!(report.fixed, 1, "{:?}", report.failed);
@@ -1812,7 +1879,7 @@ fn a_video_whose_time_falls_back_reads_its_own_movie_header_before_its_filename(
     stamped.write(&dated.path).unwrap();
 
     let reconciliation = reconciled(&memories, vec![dated, undated]);
-    let out = dir.path().join("out");
+    let out = fs::canonicalize(dir.path()).unwrap().join("out");
     let plan = first_run(&memories, &reconciliation, &out);
 
     assert_eq!(plan.items.iter().map(|item| item.capture.source()).collect::<Vec<_>>(), [TimeSource::Embedded, TimeSource::Filename]);

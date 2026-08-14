@@ -256,7 +256,7 @@ impl Workspace {
     }
 
     fn out(&self) -> PathBuf {
-        self.temp.path().join("out")
+        fs::canonicalize(self.temp.path()).unwrap().join("out")
     }
 
     fn state(&self) -> PathBuf {

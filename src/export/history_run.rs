@@ -62,7 +62,7 @@ use std::sync::mpsc::Sender;
 use crate::export::chat_fix::{CHAT_DIR, Conversations, RecordedDirs};
 use crate::export::chat_media;
 use crate::export::history::{self, Document, Html, HtmlLinks, MergedHistory};
-use crate::export::local_fix::{OutRootError, Outputs};
+use crate::export::local_fix::{OutRootError, Outputs, canonical_out_root};
 use crate::export::manifest::{DirectoryClaim, ExportId, Manifest, ManifestError};
 use crate::export::model::{ChatHistory, ConversationId, SnapHistory};
 use crate::export::zip::{DiscoverError, discover_parts};
@@ -151,7 +151,7 @@ pub struct HistoryPlan {
 pub enum PlanError {
     /// The recorded directories could not be read off the manifest.
     Manifest(ManifestError),
-    /// The out root could not be made absolute — a path the platform cannot name a directory with.
+    /// The out root could not be made absolute or resolved onto the filesystem.
     OutRoot(OutRootError),
 }
 
@@ -193,7 +193,8 @@ impl Error for PlanError {
 /// # Errors
 ///
 /// Returns [`PlanError::Manifest`] when the recorded-directory read fails, and
-/// [`PlanError::OutRoot`] when the out root cannot be made absolute.
+/// [`PlanError::OutRoot`] when the out root cannot be made absolute or resolved onto the
+/// filesystem.
 pub fn plan(
     keys: &BTreeSet<ConversationId>, attribution: &BTreeMap<String, &ConversationId>, out_root: impl AsRef<Path>,
     manifest: Option<&Manifest>,
@@ -202,11 +203,11 @@ pub fn plan(
         Some(manifest) => RecordedDirs::read_by_tokens(attribution, manifest).map_err(PlanError::Manifest)?,
         None => RecordedDirs::default(),
     };
-    // Canonicalized the way the chat-media planner canonicalizes, so a relative `--out` and an
-    // absolute recorded directory name the same root — the property the adoption and the
-    // reservation both depend on.
+    // Canonicalized the way the chat-media planner canonicalizes, so a respelled `--out` and an
+    // absolute recorded directory name the same root — the property the adoption, the reservation
+    // and the manifest's directory-claim comparison all depend on.
     let root = out_root.as_ref();
-    let out_root = std::path::absolute(root).map_err(|_| OutRootError { root: root.to_path_buf() }).map_err(PlanError::OutRoot)?;
+    let out_root = canonical_out_root(root).map_err(PlanError::OutRoot)?;
     let chat_root = out_root.join(CHAT_DIR);
     let mut conversations = Conversations::new(chat_root.clone(), &recorded);
     let mut outputs = Outputs::new(chat_root, recorded.outputs());

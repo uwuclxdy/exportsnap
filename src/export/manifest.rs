@@ -1329,6 +1329,9 @@ impl Manifest {
                 match stored {
                     Some((status, recorded)) => {
                         let status = ItemStatus::from_stored(&status)?;
+                        // Both spellings come from the planners' canonical out root
+                        // (`local_fix::canonical_out_root`), so the byte compare is one directory
+                        // even across a respelled `--out`.
                         if status == ItemStatus::Claimed && recorded.as_deref() == Some(directory) {
                             continue;
                         }

@@ -223,7 +223,7 @@ pub enum RunError {
     /// The manifest could not be opened, enrolled, read back, or written. The one mid-run failure:
     /// the state store itself is broken, so nothing can be recorded against it.
     Manifest(ManifestError),
-    /// The out root could not be made absolute — a path the platform cannot name a directory with.
+    /// The out root could not be made absolute or resolved onto the filesystem.
     InvalidOutRoot(OutRootError),
     /// A bug in the pipeline unwound the worker. Not an input state; present so a caller can say
     /// something instead of spinning forever.

@@ -754,10 +754,10 @@ fn hand_reconciliation(key: &str, token: &str) -> Reconciliation {
     }
 }
 
-/// The absolute spelling the run's own canonicalization gives the out root, so a relative
+/// The canonical spelling the run's own canonicalization gives the out root, so a relative
 /// `--out` respelling cannot split the comparisons.
 fn chat_root(dir: &TempDir) -> PathBuf {
-    std::path::absolute(dir.path().join("out")).unwrap().join("chat")
+    fs::canonicalize(dir.path()).unwrap().join("out").join("chat")
 }
 
 /// A chat-media run under an earlier key set put `a?b`'s media in the SUFFIXED directory — with
@@ -770,7 +770,7 @@ fn a_history_run_writes_into_the_directory_a_chat_media_run_already_adopted() {
     let (inputs, state) = inputs(&dir);
     let mut manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
     manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: "b~tokA", url: None }]).unwrap();
-    let media = dir.path().join("out/chat/a_b_2/20210304_143005.jpg");
+    let media = fs::canonicalize(dir.path()).unwrap().join("out/chat/a_b_2/20210304_143005.jpg");
     fs::create_dir_all(media.parent().unwrap()).unwrap();
     fs::write(&media, b"media bytes").unwrap();
     manifest.mark_done(ItemKind::ChatMedia, "b~tokA", &media).unwrap();

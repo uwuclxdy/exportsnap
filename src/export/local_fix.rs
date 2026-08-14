@@ -60,7 +60,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
@@ -632,25 +632,181 @@ pub struct Plan {
     pub excluded: Vec<String>,
 }
 
-/// The out root could not be made absolute.
+/// The out root could not be made absolute or resolved onto the filesystem.
 ///
-/// [`Plan::build`] canonicalizes the root with [`std::path::absolute`], which resolves
-/// relative-to-absolute and normalizes `.` but does not require the path to exist. The one thing it
-/// can reject is a path the platform cannot name a directory with — a NUL byte on unix, a reserved
-/// character on windows — which is a bad `--out=<dir>` value rather than a missing directory.
+/// [`Plan::build`] canonicalizes the root with [`canonical_out_root`], which resolves
+/// relative-to-absolute and `.`, then canonicalizes the deepest existing ancestor and re-appends
+/// the tail — it does not require the path to exist. The two things it can reject are a path the
+/// platform cannot name a directory with — a NUL byte on unix, a reserved character on windows —
+/// and a path whose existing ancestor cannot be resolved (a permission refusal, a name no
+/// traversal can reach); either is a bad `--out=<dir>` value rather than a missing directory.
 #[derive(Debug)]
-pub struct OutRootError {
-    /// The value the run was given for `--out`.
-    pub root: PathBuf,
+pub enum OutRootError {
+    /// `std::path::absolute` rejected the root.
+    Absolute {
+        /// The value the run was given for `--out`.
+        root: PathBuf,
+    },
+    /// The deepest existing ancestor of the root could not be canonicalized onto the filesystem.
+    Canonicalize {
+        /// The value the run was given for `--out`.
+        root: PathBuf,
+        /// Why the ancestor could not be resolved.
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for OutRootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the out root {} cannot be made absolute; pass --out=<dir> naming a path this platform accepts", self.root.display())
+        match self {
+            Self::Absolute { root } => {
+                write!(f, "the out root {} cannot be made absolute; pass --out=<dir> naming a path this platform accepts", root.display())
+            }
+            Self::Canonicalize { root, source } => write!(
+                f,
+                "the out root {} could not be resolved against the filesystem ({source}); pass --out=<dir> whose existing part this run can resolve",
+                root.display()
+            ),
+        }
     }
 }
 
-impl Error for OutRootError {}
+impl Error for OutRootError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Absolute { .. } => None,
+            Self::Canonicalize { source, .. } => Some(source),
+        }
+    }
+}
+
+/// The one canonicalization of the out root at each plan boundary, so every downstream byte
+/// compare sees canonical spellings on both sides.
+///
+/// [`under`], [`Outputs::path`]'s parent filter, [`super::chat_fix::child_name`] and the manifest's
+/// directory-claim comparison all compare path spellings byte-wise, while the claim set folds ascii
+/// case ([`claimed::ClaimedPaths`]). On a filesystem that folds case (APFS, NTFS) the two layers
+/// must not disagree about a respelled `--out`: a second run with `/Out` where the first wrote
+/// `/out` would then derive the whole tree again instead of adopting and reserving the first run's
+/// outputs. The compares must never fold on their own — the ext4 refusing arm is right on a
+/// case-sensitive filesystem — so the spellings have to agree instead.
+///
+/// `std::path::absolute` resolves relative-to-absolute and `.`, and nothing else; full
+/// [`std::fs::canonicalize`] would resolve symlinks, `..` and case through the filesystem, but it
+/// requires the whole path to exist and the out root may not exist yet at plan time. This walks
+/// the middle: the deepest EXISTING ancestor is canonicalized, and the not-yet-existing tail is
+/// re-appended with its `.` dropped and its `..` resolved component-wise — the spelling the run
+/// itself will create. A symlink whose target exists at plan time and its target agree,
+/// `<dir>/missing/../out` and `<dir>/out` are one root, and the existing prefix's canonicalize
+/// resolves the on-disk spelling of a case-respelled `--out` on a folding filesystem, while a
+/// root under a path that does not exist yet still plans.
+///
+/// The residual is a symlink whose target does not exist at plan time: the walk pops it and
+/// re-appends its name lexically, so the run records `/parent/link/...`; once writes create
+/// the target, the same `--out` value resolves through it instead, and rows recorded under the
+/// broken-at-plan-time spelling re-derive rather than being adopted. The closed form would
+/// follow the popped component with `fs::read_link` before re-appending.
+///
+/// Rows written by builds before this helper hold their own non-canonical spellings and re-derive
+/// once on the first post-fix run; from then on every row a plan adopts or reserves is spelled by
+/// this same canonicalization.
+///
+/// Called once per plan, at the three plan boundaries ([`Plan::build`],
+/// [`super::chat_fix::plan`], [`super::history_run::plan`]), before any directory is derived or
+/// any record is compared.
+pub(crate) fn canonical_out_root(root: &Path) -> Result<PathBuf, OutRootError> {
+    let absolute = std::path::absolute(root).map_err(|_| OutRootError::Absolute { root: root.to_path_buf() })?;
+    let absolute = demangle_verbatim(&absolute);
+
+    // The deepest existing prefix: pop components off the end until `exists()` answers true. The
+    // filesystem root always exists, so the walk stops at or above it and the component list never
+    // runs out. `exists()` swallows a permission refusal, which degrades to today's absolute-only
+    // spelling for that prefix — the run will fail with a real error when it tries to write.
+    let components: Vec<Component> = absolute.components().collect();
+    let mut existing = components.len();
+    while existing > 0 {
+        let prefix: PathBuf = components[..existing].iter().collect();
+        if prefix.exists() {
+            break;
+        }
+        existing -= 1;
+    }
+    let mut canonical = std::fs::canonicalize(components[..existing].iter().collect::<PathBuf>())
+        .map_err(|source| OutRootError::Canonicalize { root: root.to_path_buf(), source })?;
+
+    // The missing tail, spelled the way the run itself will create it: `.` drops, and `..` pops
+    // the component before it — the last component of the canonicalized prefix when it leads.
+    for component in &components[existing..] {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // A `..` pops what precedes it — an earlier tail component, or the canonicalized
+                // prefix's last component when it leads. A leading `..` cannot face an empty
+                // prefix: it would have to follow the root, and `root/..` is the root itself,
+                // so the walk stops with that `..` inside the prefix and canonicalize resolves
+                // it — any deeper stop-prefix leaves the canonicalized path at least one
+                // component to pop. Answered rather than asserted — if the invariant ever
+                // breaks, the path has no spelling and the plan cannot be built.
+                if !canonical.pop() {
+                    return Err(OutRootError::Canonicalize {
+                        root: root.to_path_buf(),
+                        source: io::Error::other("a leading `..` resolves above the existing part of the out root"),
+                    });
+                }
+            }
+            Component::Normal(name) => canonical.push(name),
+            // A root or a prefix leads an absolute path, so neither is ever popped off the end of
+            // one into the tail: the filesystem root always exists and stops the walk first.
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    Ok(canonical)
+}
+
+/// The plain spelling of a windows verbatim-prefixed path, or the path itself.
+///
+/// `std::path::absolute` never emits a verbatim prefix, so a `\\?\C:\...` or `\\?\UNC\...`
+/// spelling can only be user-supplied. The walk above EDITS the path (pops components) and then
+/// re-canonicalizes the prefix, and re-canonicalizing an edited VERBATIM path fails outright
+/// (os error 123) because verbatim paths skip Win32's own normalization — the failure mode
+/// recorded in cloudify's rust index, 2026-07-14. Demangling to the plain form first keeps the
+/// walk's canonicalize on a plain path; canonicalize re-derives the true verbatim form for the
+/// real filesystem path regardless, so nothing is lost.
+///
+/// Two corners are stated rather than closed. A verbatim spelling holding a literal `..`
+/// changes referent once demangled: verbatim paths skip Win32 normalization and the plain form
+/// resolves the traversal, so such a path's canonical form is whatever the plain spelling
+/// resolves to. And the arm runs only on windows builds — the non-windows arm is the identity —
+/// where it is compiled by CI but exercised by no test on any platform; a `#[cfg(windows)]`
+/// unit test would need that platform to run.
+#[cfg(windows)]
+fn demangle_verbatim(path: &Path) -> PathBuf {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let plain = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => PathBuf::from(format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())),
+        _ => return path.to_path_buf(),
+    };
+    let mut plain = plain;
+    for component in components {
+        if let Component::Normal(name) = component {
+            plain.push(name);
+        }
+    }
+    plain
+}
+
+/// On unix a leading `\` is an ordinary component of a real name, so a `\\?\...` spelling is a
+/// directory named that, not a prefix — nothing to demangle.
+#[cfg(not(windows))]
+fn demangle_verbatim(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
 
 impl Plan {
     /// Works out what a run would write, without writing anything.
@@ -763,12 +919,12 @@ impl Plan {
     ) -> Result<Self, OutRootError> {
         // Canonicalized once here, before any use: every directory this plan derives
         // (`output_dir`, `Outputs::new`'s `root`) and every comparison against it (`under`)
-        // share one absolute spelling, so a relative `--out` and an absolute recorded path
-        // name the same directory. `std::path::absolute` resolves relative-to-absolute and
-        // normalizes `.` but does NOT normalize `..`, resolve symlinks, or resolve case —
-        // the ceilings are stated at [`under`].
+        // share one canonical spelling, so a respelled `--out` — relative, symlinked,
+        // `..`-laden or case-differing — names the same directory it named before.
+        // [`canonical_out_root`] canonicalizes the deepest EXISTING ancestor and re-appends the
+        // tail, because the out root may not exist yet at plan time.
         let root = out_root.as_ref();
-        let out_root = std::path::absolute(root).map_err(|_| OutRootError { root: root.to_path_buf() })?;
+        let out_root = canonical_out_root(root)?;
         let agreements = agreements(memories);
         let mut items = Vec::new();
         let mut deferred = Vec::new();
@@ -1180,7 +1336,9 @@ impl Outputs {
     ///
     /// The parent equality is also what makes the returned path containment-safe on its own: `dir`
     /// is the planner's own join onto the output root, so a record equal to `dir` plus one component
-    /// cannot leave the tree. `child_name` states the same property one layer up.
+    /// cannot leave the tree. Both sides carry the plan's canonical root spelling
+    /// ([`canonical_out_root`]), so a respelled `--out` does not move an adopted path. `child_name`
+    /// states the same property one layer up.
     pub(crate) fn path(&mut self, source_id: &str, dir: &Path, stem: &str, extension: &str) -> PathBuf {
         if let Some(output) = self.assigned.get(source_id).filter(|output| output.parent() == Some(dir)) {
             return output.clone();
@@ -1280,23 +1438,20 @@ fn kept_name(source: &Path) -> Option<(&str, &str)> {
 /// for a name nothing here holds. `a_path_recorded_under_another_out_root_is_neither_adopted_nor_reserved`
 /// pins that, on the arm where refusing is right.
 ///
-/// **The root is absolute.** [`Plan::build`] canonicalizes the out root with [`std::path::absolute`]
-/// before any directory is derived or any comparison is made, so a relative `--out` and an absolute
-/// recorded path name the same directory here. That closes the relative-vs-absolute half of the old
-/// spelling hole: `out` and `/home/u/a/out` no longer read as different roots, and a respelled
-/// `--out` that resolves to the same absolute path adopts and reserves exactly as the first spelling
-/// did. `a_recorded_path_is_adopted_across_a_relative_respelling_of_the_out_root` pins that.
+/// **The root is canonical, and the compare is what keeps the layers agreeing.** [`Plan::build`]
+/// canonicalizes the out root through [`canonical_out_root`] before any directory is derived or any
+/// comparison is made: the deepest EXISTING ancestor is canonicalized — resolving symlinks, `..`
+/// and, on a folding filesystem, the on-disk case — and the not-yet-existing tail is re-appended
+/// lexically, because the out root may not exist yet at plan time. So a respelled `--out` —
+/// relative, symlinked, `..`-laden or case-differing — names one root here, and a record it adopts
+/// or reserves was spelled by the same canonicalization on the run that wrote it: the byte compare
+/// and the claim set's ascii fold ([`claimed::ClaimedPaths`]) answer the same question everywhere.
+/// Rows written by older builds hold their own spellings and re-derive once on their first
+/// post-fix run ([`canonical_out_root`]'s migration note).
 ///
-/// **The case-folding half is a ceiling, stated rather than fixed.** [`std::path::absolute`]
-/// resolves relative-to-absolute and normalizes `.` but does NOT normalize `..`, resolve symlinks,
-/// or resolve case. Full [`std::fs::canonicalize`] would resolve case through the filesystem, but
-/// it requires the path to exist, and the out root may not exist yet when the plan is built. So
-/// `/Out` and `/out` still read as different roots here on a filesystem that folds case (APFS,
-/// NTFS), while the claim set's own ascii fold ([`claimed::ClaimedPaths`]) sees them as one. The dev
-/// platform (linux, ext4) does not fold case, so the ceiling is real but does not bite locally.
-///
-/// [`super::chat_fix`]'s `child_name` compares spellings the same way for the directory layer, and
-/// the same canonicalization at its plan boundary closes the same relative-vs-absolute half there.
+/// [`super::chat_fix`]'s `child_name` and the manifest's directory-claim comparison compare
+/// canonical spellings the same way for the directory layer, closed by the same call at their plan
+/// boundaries.
 ///
 /// An empty root makes this true for every path on earth, and no shipped surface can produce one:
 /// `main.rs` rejects both a valueless `--out` and a bare `--out=` with a hard error
@@ -2041,11 +2196,13 @@ mod tests {
     /// this run is about to derive and cost the item a suffix for a file that, on a case-sensitive
     /// filesystem, is a different tree.
     ///
-    /// **That is the arm where refusing is RIGHT, and it is the only arm this pins.** Swap which
-    /// side is shouted and the same shape is a hole on a filesystem that folds; respell the root
-    /// relative-against-absolute and it is a hole on every filesystem. [`under`]'s own doc carries
-    /// the measured table. Nothing here bounds any of that, and reading this test as though it did
-    /// is the mistake its previous wording invited.
+    /// **That is the arm where refusing is RIGHT on a case-sensitive filesystem — ext4, this
+    /// fixture's platform — and the only arm this pins.** On a filesystem that folds case the same
+    /// fixture names ONE tree, but the refusing arm is still the migration behavior there: a record
+    /// spelled differently from this run's canonical root can only be a pre-fix row or a hand edit
+    /// ([`canonical_out_root`]'s migration note), and it re-derives once rather than being folded
+    /// into. The respelled-root halves of the old spelling hole — relative, symlinked, `..`-laden,
+    /// case-differing — are closed at the plan boundary, never by this compare folding on its own.
     ///
     /// The second half is the control — without it, a seed that reserved nothing at all reads green.
     #[test]
