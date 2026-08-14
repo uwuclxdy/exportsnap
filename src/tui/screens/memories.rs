@@ -143,10 +143,14 @@ pub struct Memories {
 
 /// One run's lifecycle. `view` is `None` while the worker is still preparing — the plan event
 /// fills it, so the table appears exactly when the rows exist.
+///
+/// The view is boxed where the chat-media screen's is: `Active` carries the whole view against
+/// an `Idle` that holds nothing, and windows builds cross clippy's `large_enum_variant`
+/// threshold. One allocation, at the moment a plan lands, on a long-lived screen.
 #[derive(Debug)]
 enum Run {
     Idle,
-    Active { view: Option<RunView>, worker: Worker },
+    Active { view: Option<Box<RunView>>, worker: Worker },
 }
 
 #[derive(Debug)]
@@ -381,7 +385,7 @@ impl Memories {
         let rows = snapshot.rows;
         let statuses = vec![ItemStatus::Pending; rows.len()];
         if let Run::Active { view, .. } = &mut self.run {
-            *view = Some(RunView { rows, statuses, manifest, follow_tail: true });
+            *view = Some(Box::new(RunView { rows, statuses, manifest, follow_tail: true }));
         }
     }
 
