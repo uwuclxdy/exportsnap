@@ -1,0 +1,40 @@
+# PKGBUILD for exportsnap — prebuilt from the GitHub Release asset.
+# Bare package name (upstream-maintainer convention): installs the released
+# binary. No -git sibling exists, so no provides/conflicts. Refresh checksums
+# and .SRCINFO with ./prepare-aur.sh before pushing to AUR.
+
+# Maintainer: uwuclxdy <uwuclxdy@users.noreply.github.com>
+
+pkgname=exportsnap
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="TUI and CLI that repairs and exports a Snapchat data dump"
+arch=('x86_64')
+url="https://github.com/uwuclxdy/exportsnap"
+license=('MIT' 'Apache-2.0')
+depends=()
+options=('!strip' '!debug')
+# Sources are pinned to the tag so the install lines in package() actually
+# resolve; $pkgver in each saved filename forces a re-download on a version
+# bump instead of reusing a stale cached file. The binary is a bare ELF asset —
+# no archive extension in the saved name, or makepkg would try to unpack it.
+# THIRD-PARTY-LICENSES rides the package: the binary embeds OSM-derived
+# timezone polygons and the ODbL attribution obligation (decision 35) must ship
+# with it wherever the binary goes.
+source=("exportsnap-linux-$CARCH-$pkgver::$url/releases/download/v$pkgver/exportsnap-linux-$CARCH"
+        "LICENSE-MIT-$pkgver::$url/raw/v$pkgver/LICENSE-MIT"
+        "LICENSE-APACHE-$pkgver::$url/raw/v$pkgver/LICENSE-APACHE"
+        "THIRD-PARTY-LICENSES-$pkgver::$url/raw/v$pkgver/THIRD-PARTY-LICENSES")
+# All SKIP: the v0.1.0 release does not exist yet (pre-release scaffold).
+# `updpkgsums` via ./prepare-aur.sh fills them at the first real release.
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
+
+package() {
+  install -Dm755 "$srcdir/exportsnap-linux-$CARCH-$pkgver" "$pkgdir/usr/bin/exportsnap"
+  install -Dm644 "$srcdir/LICENSE-MIT-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 "$srcdir/LICENSE-APACHE-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  install -Dm644 "$srcdir/THIRD-PARTY-LICENSES-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-LICENSES"
+}

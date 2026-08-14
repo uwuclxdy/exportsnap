@@ -1,0 +1,20 @@
+pkgbase = exportsnap
+	pkgdesc = TUI and CLI that repairs and exports a Snapchat data dump
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/uwuclxdy/exportsnap
+	arch = x86_64
+	license = MIT
+	license = Apache-2.0
+	options = !strip
+	options = !debug
+	source = exportsnap-linux-x86_64-0.1.0::https://github.com/uwuclxdy/exportsnap/releases/download/v0.1.0/exportsnap-linux-x86_64
+	source = LICENSE-MIT-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/LICENSE-MIT
+	source = LICENSE-APACHE-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/LICENSE-APACHE
+	source = THIRD-PARTY-LICENSES-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/THIRD-PARTY-LICENSES
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+
+pkgname = exportsnap
