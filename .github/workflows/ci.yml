@@ -1,0 +1,174 @@
+# Rust CI for exportsnap, from cloudify's rust CI template, customized:
+#   - `check` matrixes over ubuntu/macos/windows (decision 11 + decision 67);
+#     `fmt`, `deny` and `audit` stay ubuntu x1 (platform-independent output).
+#   - ffmpeg (ships ffprobe) and exiftool are installed on every check leg and
+#     EXPORTSNAP_REQUIRE_FFMPEG / EXPORTSNAP_REQUIRE_EXIFTOOL are exported, so a
+#     failed install reds the leg instead of silently skipping the tool-gated
+#     tests (the tool gate lives in tests/common and owns "is this external
+#     tool usable").
+#   - EXPORTSNAP_REQUIRE_FIXTURES is deliberately NOT exported: `fixtures/` is
+#     gitignored and cannot exist on a runner, so every fixture-backed test
+#     skips here and a green CI run proves nothing about them. The local
+#     `~/repos/rs/cargo.sh` gate is the fixture authority (decision 67); the
+#     "fixture hole" step below names the hole on every leg's log.
+#   - the audit job copies the repo's `audit.toml` into the cargo home, since
+#     cargo-audit reads only the global config and the local gate surfaces the
+#     same ignores as `--ignore` flags.
+#   - push triggers on every branch, so verification branches gate too; the
+#     per-job guards below exclude tag refs either way.
+#   - the LTO/codegen env overrides below are CI-only throwaway-build knobs.
+#     The shipped binary comes from a separate release workflow (task 93) and
+#     keeps the crate's declared release profile.
+
+name: ci
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - wiki/**
+      - docs/**
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - wiki/**
+      - docs/**
+
+# Least-privilege default: read-only token. A job that needs more (e.g. a
+# release publish job) opts back up with its own `permissions:` block.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so rapid pushes don't stack.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Force HTTP/1.1 for registry downloads: curl's HTTP/2 multiplexing against the
+# crates.io CDN intermittently dies with "[16] Error in the HTTP2 framing
+# layer" on the hosted runners. Extra retries cover the remaining transient
+# blips. The release-profile overrides drop LTO + single-unit codegen, which
+# change nothing for clippy/test and roughly double the compile.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+jobs:
+  fmt:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: fmt --check
+        run: cargo fmt --all -- --check
+
+  # clippy → test → release build as sequential steps in ONE job so the dep
+  # compile happens once per OS: clippy builds deps + lints, test (nextest)
+  # reuses target/, the release binary falls out of it, then uploads as a
+  # 1-day artifact. mold self-gates on linux. Trade: a clippy failure aborts
+  # before test/build, so fix clippy first.
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: check / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    env:
+      # A runner missing either tool must red, never silently skip. NOT
+      # EXPORTSNAP_REQUIRE_FIXTURES, deliberately — see the header comment.
+      EXPORTSNAP_REQUIRE_FFMPEG: "1"
+      EXPORTSNAP_REQUIRE_EXIFTOOL: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # mold is the fast linker on linux; self-gates so a matrix mac/windows
+      # leg falls back to the platform default. Runs before rust-cache so
+      # RUSTFLAGS is part of the cache key.
+      - name: fast linker (mold on linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          echo "RUSTFLAGS=${RUSTFLAGS} -C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: "media tools (ubuntu: ffmpeg + exiftool)"
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl
+      - name: "media tools (macos: ffmpeg + exiftool)"
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg exiftool
+      - name: "media tools (windows: ffmpeg + exiftool)"
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg exiftool -y
+      - name: clippy (-D warnings)
+        run: cargo clippy --all-targets --all-features --release -- -D warnings
+      # `--no-fail-fast` so a red run reports every failure instead of a
+      # prefix: nextest cancels at the first one otherwise, so you fix what you
+      # were shown, push, and are handed more — which reads like a regression
+      # your own fix caused, at a build per round.
+      - name: test
+        run: cargo nextest run --release --all-targets --all-features --no-fail-fast
+      - name: fixture hole (named, not hidden)
+        shell: bash
+        run: |
+          if [ -d fixtures ]; then
+            echo "fixtures/ present: fixture-backed tests run on this leg"
+          else
+            echo "fixtures/ absent (gitignored): fixture-backed tests skip; the local cargo.sh gate is the fixture authority (decision 67)"
+          fi
+      # nextest can't run doctests, so cover them with cargo test. Self-gates
+      # on a doctest target so a bin-only crate (no lib) skips instead of
+      # erroring with "no library targets found". shell: bash so the
+      # linux/mac/windows matrix legs all get grep (windows runners ship Git
+      # Bash).
+      - name: doctests
+        shell: bash
+        run: |
+          if cargo metadata --no-deps --format-version 1 | grep -q '"doctest":true'; then
+            cargo test --release --doc --all-features
+          else
+            echo "no doctest targets; skipping"
+          fi
+      - name: build release binary
+        run: cargo build --release
+      - name: upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: exportsnap-${{ matrix.os }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            target/release/exportsnap
+            target/release/exportsnap.exe
+
+  deny:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  audit:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit
+        run: |
+          mkdir -p ~/.cargo
+          cp audit.toml ~/.cargo/audit.toml
+          cargo audit
