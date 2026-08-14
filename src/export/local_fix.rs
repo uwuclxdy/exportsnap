@@ -887,7 +887,7 @@ impl Plan {
     ///
     /// **Two producers would open it, and both are conventions rather than guarantees** — this builds,
     /// so the compiler rejects no counterexample. One is a producer marking a PAIRED memories row
-    /// source-missing, the not-yet-existing downloader that
+    /// source-missing, the not-yet-existing media producer that
     /// [`super::memories::Reconciliation::enroll`] says its `SourceMissing` arm is there to serve. The
     /// other needs no new producer at all: give this leg a non-empty [`Self::excluded`] and
     /// [`Manifest::exclude`] carries a `Done` row to `Excluded` WITH its record,

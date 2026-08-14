@@ -755,7 +755,7 @@ fn an_entry_whose_media_turned_up_goes_back_on_the_work_list() {
 
 /// The positive twin of `re_enrolling_leaves_a_finished_item_alone_even_when_its_media_is_gone`:
 /// that one owns the `Missing` arm of `enroll`, this one owns the `Exact | Ambiguous` arm, and
-/// between them they say a second run of a finished export re-downloads nothing.
+/// between them they say a second run of a finished export repeats no media work.
 #[test]
 fn a_second_run_of_a_finished_export_leaves_every_done_row_alone() {
     let workspace = Workspace::new();
@@ -808,8 +808,7 @@ fn an_entry_enrolls_the_url_the_export_carried_for_it() {
     reconcile(&memories, Discovery::from_files(files, Vec::new())).enroll(&mut manifest).unwrap();
 
     let url_of = |source_id: &str| manifest.item(ItemKind::Memory, source_id).unwrap().unwrap().url.map(|url| url.expose().to_owned());
-    // `Media Download Url` wins where both are present; which of the two a downloader should use
-    // is unsettled, and the manifest holds one.
+    // `Media Download Url` wins where both are present, and the manifest holds one.
     assert_eq!(url_of(&uuid(1)).as_deref(), Some("https://cf-st.example/d/media?sig=DIRECT"));
     assert_eq!(url_of(&uuid(2)).as_deref(), Some("https://sc.example/landing?id=2"));
     // Every url in the one observed export is `""`, which is absence rather than a value.
@@ -903,10 +902,10 @@ fn a_retired_memory_whose_media_came_back_goes_back_on_the_work_list() {
 
 /// **This fixture is in a state 16a's own pipeline cannot produce, and that is stated rather than
 /// hidden.** `reconcile` only ever marks a SYNTHETIC id source-missing, so nothing in this crate
-/// today puts a uuid row in `SourceMissing`; the producer is the downloader a later task adds, which
-/// marks a paired item's source missing when it can neither read the file nor fetch the url. The
-/// test drives `mark_source_missing` directly because that is exactly the call that downloader will
-/// make. It is NOT the unextracted-part case — see
+/// today puts a uuid row in `SourceMissing`; the producer is a media producer that does not exist
+/// in this build, which marks a paired item's source missing when the media it names cannot be
+/// read. The test drives `mark_source_missing` directly because that is the call such a producer
+/// would make. It is NOT the unextracted-part case — see
 /// `an_entry_whose_media_turned_up_goes_back_on_the_work_list`, where the entry comes back under a
 /// new uuid row and `reset` never fires.
 #[test]
@@ -954,8 +953,8 @@ fn two_runs_over_an_unchanged_export_leave_a_gap_rows_timestamp_alone() {
         let mut manifest = workspace.open();
         reconciliation.enroll(&mut manifest).unwrap();
         assert_eq!(status_of(&manifest, &gap), Some(ItemStatus::SourceMissing), "the row the second run must leave alone");
-        // The control's setup, in the shape the downloader a later task adds will produce it: a
-        // PAIRED row whose source went missing, so the second run's `reset` has something to stamp.
+        // The control's setup, in the shape a media producer would leave it: a PAIRED row whose
+        // source went missing, so the second run's `reset` has something to stamp.
         manifest.mark_source_missing(ItemKind::Memory, &uuid(1), "gone for now").unwrap();
     }
 

@@ -262,8 +262,8 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     // equivalent mutant on this leg while being a real defect on the chat one — `Plan::build`'s
     // rustdoc carries the invariant, its proof and the measurement.
     //
-    // Two changes reopen it and neither is exotic: a producer that parks a PAIRED row (the downloader
-    // `memories::Reconciliation::enroll` says its `SourceMissing` arm exists for), or a non-empty
+    // Two changes reopen it and neither is exotic: a producer that parks a PAIRED row (the media
+    // producer `memories::Reconciliation::enroll` says its `SourceMissing` arm exists for), or a non-empty
     // `Plan::excluded` on this leg, since `Manifest::exclude` keeps a record and `retire_absent`
     // carries an `Excluded` row on to `Retired` still holding it. Either one makes this position
     // load-bearing with no test to say so.

@@ -352,7 +352,7 @@ impl Jpeg {
     /// The capture time the file already carries, if it carries one.
     ///
     /// `DateTimeOriginal` first, then `CreateDate`, then IFD0's `ModifyDate`: earliest-meaning
-    /// first, since a file rewritten by a downloader gets a fresh `ModifyDate` and keeps the other
+    /// first, since a rewritten file gets a fresh `ModifyDate` and keeps the other
     /// two. Best-effort by design — an unreadable or absent APP1 is `None`, not an error, because
     /// every caller of this has a fallback and none of them wants a missing tag to fail a run.
     #[must_use]

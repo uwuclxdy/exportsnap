@@ -102,7 +102,7 @@
 //!
 //! # Concurrency
 //!
-//! A [`Manifest`] owns one connection and is `Send` but not `Sync`. A concurrent downloader shares
+//! A [`Manifest`] owns one connection and is `Send` but not `Sync`. A concurrent producer shares
 //! one behind its own lock; two processes on one manifest is not a supported arrangement, and the
 //! resume sweep is what makes an interrupted run's leftovers safe rather than any claim protocol.
 
@@ -877,7 +877,7 @@ impl Manifest {
     ///
     /// A mutation that WIDENS the Rust skip is caught by two of the pins named further up — `a_gap_row_is_written_whenever_its_status_or_its_reason_differs` and `a_gap_row_carrying_no_note_is_given_one_rather_than_read_as_already_saying_it`. Not by `re_marking_a_gap_row_with_the_same_reason_leaves_it_untouched`, which pins the skip FIRING and so cannot see it fire too often.
     ///
-    /// **What the read-then-write window costs, exactly.** No in-process writer reaches it, but `!Sync` is not the reason and citing it would be wrong twice over. `rusqlite::Connection` does have no `Sync` impl anywhere in rusqlite 0.40.1 — it is `Send` only, and a grep of the crate for `Sync for Connection` answers nothing — yet a `Mutex<Manifest>` is `Sync` because `Manifest` is `Send`, and its guard hands `&Manifest` to whichever thread holds it, which is exactly the arrangement this module's own concurrency note describes for a concurrent downloader. What rules out an interleaved in-process writer is that lock and the single-writer rule, not the auto trait. Across PROCESSES nothing rules it out: there is no single-instance guard, and rusqlite arms a 5000 ms busy timeout on every `Connection::open` (`inner_connection.rs:118`) which this crate never overrides, so a second run contends rather than failing fast.
+    /// **What the read-then-write window costs, exactly.** No in-process writer reaches it, but `!Sync` is not the reason and citing it would be wrong twice over. `rusqlite::Connection` does have no `Sync` impl anywhere in rusqlite 0.40.1 — it is `Send` only, and a grep of the crate for `Sync for Connection` answers nothing — yet a `Mutex<Manifest>` is `Sync` because `Manifest` is `Send`, and its guard hands `&Manifest` to whichever thread holds it, which is exactly the arrangement this module's own concurrency note describes for a concurrent producer. What rules out an interleaved in-process writer is that lock and the single-writer rule, not the auto trait. Across PROCESSES nothing rules it out: there is no single-instance guard, and rusqlite arms a 5000 ms busy timeout on every `Connection::open` (`inner_connection.rs:118`) which this crate never overrides, so a second run contends rather than failing fast.
     ///
     /// That timeout is the width of this window, and it is also what the skip is worth behind a concurrent writer: a call that issues no statement never waits on it, where ~90 gap rows a run each waiting one out is the cost avoided. What the retained guard buys INSIDE the window is narrower than "no wrong write", and the delta is the honest way to say it: a concurrent change cannot cost a spurious restamp. It can still cost a clobber — a [`Self::mark_done`] landing between the read and the write is overwritten by this call's now-stale `SourceMissing`, since `'done' <> 'source_missing'` satisfies the guard. That is last-write-wins keyed on observation time, it predates task 57, and nothing here fixes it.
     ///

@@ -695,7 +695,7 @@ impl Reconciliation {
     /// that was [`ItemStatus::SourceMissing`] or [`ItemStatus::Retired`] and pairs now goes back on
     /// the work list through [`Manifest::reset`].
     ///
-    /// **The `SourceMissing` half serves a producer that does not exist yet** — a downloader marking
+    /// **The `SourceMissing` half serves a producer that does not exist yet** — a media producer marking
     /// a PAIRED item's source missing — and nothing in this module can reach it, because the only
     /// `mark_source_missing` here is on a synthetic id. In particular it is NOT what serves the
     /// export part that had not been extracted yet: an entry that was unpaired and pairs now
