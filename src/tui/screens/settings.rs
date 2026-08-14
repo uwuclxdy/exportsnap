@@ -306,11 +306,14 @@ impl Settings {
         self.write(config);
     }
 
-    /// Cycles the focused state row, writing the next value after the EFFECTIVE one: a row
-    /// overridden by the flag keeps showing the flag's value while each press writes another
-    /// value into the file — the visible inertness is the override's fault, and the row's
-    /// ` · flag` clause says why.
+    /// Cycles the focused state row, writing the next value after the EFFECTIVE one. A row the
+    /// flag pins writes nothing: the press would write the flag's own successor over the same
+    /// constant, churning the file under a value the row never shows — so the guard below
+    /// makes it inert, and the row's ` · flag` clause names the pin.
     fn commit_cycle(&mut self, row: FormRow) {
+        if self.provenance(row) == Some(Provenance::Flag) {
+            return;
+        }
         let mut config = self.layers.config.clone();
         match row {
             FormRow::Theme => config.theme = Some(self.effective_tier().next()),
@@ -330,13 +333,15 @@ impl Settings {
     /// Writes the file layer through `config::write` — the one write-back path (config.rs
     /// owns the temp-and-rename posture) — and swaps it into the layers only on success, so
     /// the rows keep reading the file state they wrote. A failed write is a DANGER toast,
-    /// never silent (cloudy-tui: a failed write is a surfaced error, and the toast is this
-    /// app's one notification surface).
+    /// never silent; a successful one clears any live failure toast, because the DANGER
+    /// resolves with the cause that raised it (cloudy-tui: a failed write is a surfaced
+    /// error, and the toast is this app's one notification surface).
     fn write(&mut self, config: Config) {
         let message = match &self.layers.config_dir {
             Some(dir) => match config::write(dir, &config) {
                 Ok(()) => {
                     self.layers.config = config;
+                    self.toast = None;
                     return;
                 }
                 Err(error) => error.to_string(),
@@ -740,7 +745,6 @@ mod tests {
     fn the_draft_window_keeps_the_caret_in_view() {
         assert_eq!(draft_window_start(0, 25), 0);
         assert_eq!(draft_window_start(24, 25), 0, "fits the slot: no windowing");
-        assert_eq!(draft_window_start(24, 25), 0, "caret before the slot's end");
         assert_eq!(draft_window_start(25, 25), 1, "caret at the slot's last cell");
         assert_eq!(draft_window_start(29, 25), 5, "caret at the text's end");
         // The window end stays one cell after the caret, so the caret column never clips —

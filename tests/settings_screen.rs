@@ -275,6 +275,29 @@ fn a_cycle_commit_writes_the_next_value_through_the_file() {
 }
 
 #[test]
+fn a_flag_pinned_state_row_writes_nothing_on_press() {
+    let dir = TempDir::new().unwrap();
+    // The flag pins the effective tier to `full`, while the file layer holds `full` too: a
+    // press writing the effective successor (`full` -> `compatible`) would flip the file to
+    // `compatible`. It must leave the file untouched, and raise no toast for a write that
+    // never happened — the row's ` · flag` clause is the only announcement. The file layer
+    // is written first and the screen's layer holds the same config: the restart-reads-back
+    // contract the commit tests pin.
+    let file_config = Config { theme: Some(Tier::Full), ..Config::default() };
+    config::write(dir.path(), &file_config).unwrap();
+    let mut settings =
+        Settings::with_layers(SettingsLayers { cli_tier: Some(Tier::Full), config: file_config, ..layers(Some(dir.path())) });
+    settings.set_source(PathBuf::from("/export"));
+
+    settings.handle_key(key(KeyCode::Down)); // theme
+    settings.handle_key(key(KeyCode::Enter));
+    assert_eq!(config::load(dir.path()).unwrap().theme, Some(Tier::Full), "the press writes nothing past the flag's pin");
+    assert!(!settings.toast_live(), "an inert press raises no toast");
+    let terminal = render_80(&settings);
+    assert_eq!(row(terminal.backend().buffer(), 2), panel_row("❯ theme  [full]  compatible · flag", 42));
+}
+
+#[test]
 fn the_transcode_toggle_flips_the_file_layer() {
     let dir = TempDir::new().unwrap();
     let mut settings = settings_in(&dir);
@@ -386,6 +409,28 @@ fn a_write_failure_names_the_file_and_the_fix() {
     let message = config::write(&blocked, &Config::default()).unwrap_err().to_string();
     assert!(message.starts_with("could not write config"), "{message}");
     assert!(message.contains("blocked"), "{message}");
+}
+
+#[test]
+fn a_successful_write_clears_the_failure_toast() {
+    let dir = TempDir::new().unwrap();
+    // A FILE standing where the config dir should be: the first commit fails and raises the
+    // DANGER toast. Clearing the obstruction, the same commit succeeds — and the success is
+    // the failure's cure, so the toast must go with the cause that raised it, not linger
+    // until the next failure or dismissal.
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"a file where the config dir should be").unwrap();
+    let mut settings = Settings::with_layers(layers(Some(&blocked)));
+    settings.set_source(PathBuf::from("/export"));
+
+    settings.handle_key(key(KeyCode::Down)); // theme
+    settings.handle_key(key(KeyCode::Enter));
+    assert!(settings.toast_live(), "the failed write raises the toast");
+
+    std::fs::remove_file(&blocked).unwrap();
+    settings.handle_key(key(KeyCode::Enter));
+    assert!(!settings.toast_live(), "the successful write resolves the toast");
+    assert_eq!(config::load(&blocked).unwrap().theme, Some(Tier::Full.next()), "the second commit really wrote");
 }
 
 #[test]
