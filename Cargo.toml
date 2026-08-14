@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TUI and CLI that repairs and exports a Snapchat data dump"
-# Deleted deliberately at phase 5, where decision 13 puts crates.io. Until then an accidental
-# publish would claim the name irreversibly: crates.io yanks versions but never unpublishes.
-publish = false
+repository = "https://github.com/uwuclxdy/exportsnap"
 
 [lints.rust]
 unsafe_code = "forbid"
