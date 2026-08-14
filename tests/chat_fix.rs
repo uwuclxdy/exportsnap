@@ -711,6 +711,21 @@ fn two_items_whose_overlay_filenames_collide_keep_both_of_them() {
 #[test]
 fn two_items_whose_filenames_differ_only_in_case_keep_both_of_them() {
     let work = Workspace::new();
+    // The fixture is two files whose names differ only in case, which a case-folding filesystem
+    // (the macos and windows runner disks) cannot hold: the second write silently replaces the
+    // first, so the premise collapses and every assertion below reads as a product defect. Probe
+    // the DESTINATION filesystem rather than a cfg — a case-sensitive APFS volume exists and a
+    // case-insensitive mount can sit on any OS, so the platform says nothing.
+    let probe = work.source().join("case_probe");
+    fs::create_dir_all(&probe).unwrap();
+    fs::write(probe.join("a"), b"lower").unwrap();
+    fs::write(probe.join("A"), b"UPPER").unwrap();
+    if fs::read(probe.join("a")).unwrap() == b"UPPER" {
+        println!(
+            "SKIPPED two_items_whose_filenames_differ_only_in_case_keep_both_of_them: this filesystem folds case, so the fixture's two spellings cannot exist side by side"
+        );
+        return;
+    }
     zip_pair_shaded(&work.source(), &format!("{ZIP_WORD}-0000004"), 10);
     zip_pair_shaded(&work.source(), &format!("{}-0000004", ZIP_WORD.to_uppercase()), 200);
 
