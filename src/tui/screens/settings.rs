@@ -23,7 +23,7 @@
 //! another row exits an edit, discarding the draft (cloudy-tui: Text input — edit off by
 //! default, `enter` toggles it, `esc` exits).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -75,9 +75,12 @@ const TAG_CELLS: usize = 12;
 /// The form panel's interior cells at its widest row.
 const FORM_INTERIOR: usize = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + VALUE_CELLS + TAG_CELLS;
 
-/// The form needs every row on screen at the shell's compact height; see overview's
-/// `GUARANTEED_INTERIOR_ROWS` terms.
-const _: () = assert!(FormRow::ALL.len() <= GUARANTEED_INTERIOR_ROWS as usize);
+/// The form scrolls with the focus below the height where all five rows fit (see `render`),
+/// so this pins only that the shell's compact height shows the whole form without scrolling.
+/// Below it the shell's size banner eats one body row (shell.rs), so the honest guarantee is
+/// one less than `GUARANTEED_INTERIOR_ROWS`'s own terms — the banner row was never
+/// subtracted.
+const _: () = assert!((FormRow::ALL.len() as u16) < GUARANTEED_INTERIOR_ROWS);
 
 // ---- the rows ----
 
@@ -369,8 +372,8 @@ impl Settings {
 
     /// The ffmpeg the startup would use: the file's path, then the probe's own answer.
     #[must_use]
-    pub fn effective_ffmpeg(&self) -> Option<&PathBuf> {
-        self.layers.config.ffmpeg_path.as_ref().or(self.layers.detected_ffmpeg.as_ref())
+    pub fn effective_ffmpeg(&self) -> Option<&Path> {
+        self.layers.config.ffmpeg_path.as_deref().or(self.layers.detected_ffmpeg.as_deref())
     }
 
     /// The transcode default: the file's answer, else on (decision 66).
@@ -480,13 +483,60 @@ fn option_path(draft: &str) -> Option<PathBuf> {
     if draft.is_empty() { None } else { Some(PathBuf::from(draft)) }
 }
 
-/// Where the draft's visible window starts: the caret stays in view, so once the caret
-/// reaches the slot's edge, the window ends one cell after the caret and starts just before
-/// what it cannot show. A caret exactly at the end of a draft that fills the slot is
-/// `visible` cells in and must scroll one cell to reveal itself — a `len`-bound would keep
-/// it hidden, so the bound is the caret alone.
-fn draft_window_start(caret: usize, visible: usize) -> usize {
-    (caret + 1).saturating_sub(visible)
+/// The draft's visible window, in display cells: `start` is the first visible char and
+/// `caret_cells` the caret's display-cell offset within the window. The model counts the
+/// caret in chars ([`EditSession::caret`]); a wide char (CJK, emoji) is 2 cells, so a char
+/// count would place the native cursor mid-char and could push the provenance clause past
+/// the slot's edge into the panel padding (cloudy-tui: the model tracks a character column,
+/// the render converts to display cells before placing the native cursor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DraftWindow {
+    /// Char index the window starts at.
+    start: usize,
+    /// The caret's display-cell offset within the window.
+    caret_cells: usize,
+}
+
+/// The window keeps the caret visible, ending one cell after it when the slot allows: the
+/// desired start cell is `caret + 1 - visible`, and the window starts at the first char
+/// whose start cell reaches it. A wide char straddling the cut is never split — the cut
+/// moves before it, showing one more cell of history than the budget names. The window's
+/// own end is bounded at the slot by [`draft_window_text`].
+fn draft_window(draft: &str, caret: usize, visible_cells: usize) -> DraftWindow {
+    // The caret is a CHAR index, so the slice must land on the caret-th char's byte offset,
+    // never on the char itself — `&draft[..caret]` would split a wide char mid-glyph.
+    let caret_byte = draft.char_indices().nth(caret).map(|(byte, _)| byte).unwrap_or(draft.len());
+    let caret_cells = cells(&draft[..caret_byte]);
+    let desired = (caret_cells + 1).saturating_sub(visible_cells);
+    let mut start = caret;
+    let mut start_cells = 0;
+    for (index, ch) in draft.chars().take(caret + 1).enumerate() {
+        if start_cells >= desired {
+            start = index;
+            break;
+        }
+        start_cells += cells(&ch.to_string());
+    }
+    DraftWindow { start, caret_cells: caret_cells.saturating_sub(start_cells) }
+}
+
+/// The window's text: the chars from `window.start` while their cells stay within
+/// `visible_cells`, ending before a char that would overflow — a wide char is included
+/// whole or not at all.
+fn draft_window_text(draft: &str, window: DraftWindow, visible_cells: usize) -> String {
+    draft
+        .chars()
+        .skip(window.start)
+        .scan(0usize, |used, ch| {
+            let width = cells(&ch.to_string());
+            if *used + width > visible_cells {
+                None
+            } else {
+                *used += width;
+                Some(ch)
+            }
+        })
+        .collect()
 }
 
 /// One editing key against the draft. `false` for a key the field does not own, so the
@@ -578,14 +628,32 @@ pub fn render(frame: &mut Frame, palette: &Palette, settings: &Settings, area: R
     if usize::from(inner.width) < FORM_INTERIOR {
         return;
     }
-    frame.render_widget(Paragraph::new(form_panel(palette, settings, usize::from(inner.width))), inner);
+    // The form scrolls with the focus once the rows outgrow the panel's interior, so the
+    // caret row stays on screen below the shell's compact height: the view starts at an
+    // offset that keeps the focused row last, and only slides once the focus walks past the
+    // visible span (cloudy-tui: Text input — the cursor marks the caret, which must sit on a
+    // row the panel actually draws).
+    let visible_rows = usize::from(inner.height).min(FormRow::ALL.len());
+    if visible_rows == 0 {
+        return;
+    }
+    let offset = (settings.form_focus as isize - (visible_rows as isize - 1))
+        .max(0)
+        .min(FormRow::ALL.len() as isize - visible_rows as isize) as usize;
+    let rows = form_panel(palette, settings, usize::from(inner.width)).into_iter().skip(offset).take(visible_rows).collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(rows), inner);
 
     // The native cursor sits at the caret while a text input is being edited (cloudy-tui:
     // Text input — the terminal's own cursor marks the position). Nothing sets one otherwise.
     if let Some(session) = &settings.editing {
-        let start = draft_window_start(session.caret, VALUE_CELLS);
-        let value_x = inner.x + (CARET_GUTTER + cells(session.row.label()) + LABEL_GAP + (session.caret - start)) as u16;
-        frame.set_cursor_position(Position::new(value_x, inner.y + session.row.index() as u16));
+        let window = draft_window(&session.draft, session.caret, VALUE_CELLS);
+        let value_x = inner.x + (CARET_GUTTER + cells(session.row.label()) + LABEL_GAP + window.caret_cells) as u16;
+        // The offset never reaches past the caret row: it clamps at the focus, and while a
+        // session is live the session's row IS the focus row — `begin_edit` opens only the
+        // focused row and a row move closes the session first — so the subtraction cannot
+        // underflow.
+        let caret_y = inner.y + (session.row.index() - offset) as u16;
+        frame.set_cursor_position(Position::new(value_x, caret_y));
     }
 }
 
@@ -637,8 +705,8 @@ fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool
     };
     let mut spans = vec![caret_span, form_label(palette, row.label(), focused), Span::raw("  ")];
     let value_span = if let Some(session) = editing {
-        let start = draft_window_start(session.caret, VALUE_CELLS);
-        let window: String = session.draft.chars().skip(start).take(VALUE_CELLS).collect();
+        let placement = draft_window(&session.draft, session.caret, VALUE_CELLS);
+        let window = draft_window_text(&session.draft, placement, VALUE_CELLS);
         if window.is_empty() {
             // The draft is empty: the placeholder names what committing it would apply — the
             // effective value, or the honest "not found" when nothing was ever detected.
@@ -743,21 +811,50 @@ mod tests {
 
     #[test]
     fn the_draft_window_keeps_the_caret_in_view() {
-        assert_eq!(draft_window_start(0, 25), 0);
-        assert_eq!(draft_window_start(24, 25), 0, "fits the slot: no windowing");
-        assert_eq!(draft_window_start(25, 25), 1, "caret at the slot's last cell");
-        assert_eq!(draft_window_start(29, 25), 5, "caret at the text's end");
+        assert_eq!(draft_window("", 0, 25), DraftWindow { start: 0, caret_cells: 0 });
+        assert_eq!(draft_window(&"a".repeat(24), 24, 25), DraftWindow { start: 0, caret_cells: 24 }, "fits the slot: no windowing");
+        assert_eq!(draft_window(&"a".repeat(25), 25, 25), DraftWindow { start: 1, caret_cells: 24 }, "caret at the slot's last cell");
+        assert_eq!(draft_window(&"a".repeat(29), 29, 25), DraftWindow { start: 5, caret_cells: 24 }, "caret at the text's end");
         // The window end stays one cell after the caret, so the caret column never clips —
         // including a caret exactly one past a draft that fills the slot, which must scroll
-        // one cell to reveal itself.
+        // one cell to reveal itself. `a` is 1 cell, so the char index and the cell count
+        // agree and the shape matches the old char-based formula exactly.
         for len in 0..40 {
+            let draft = "a".repeat(len);
             for caret in 0..=len {
-                let start = draft_window_start(caret, 25);
-                assert!(start <= len, "start within the draft");
-                assert!(caret >= start, "caret after the window start");
-                assert!(caret - start < 25, "caret within the window");
+                let window = draft_window(&draft, caret, 25);
+                assert!(window.start <= caret, "start within the draft");
+                assert!(window.caret_cells < 25, "caret within the slot");
+                let text = draft_window_text(&draft, window, 25);
+                assert!(cells(&text) <= 25, "window never exceeds the slot");
+                assert_eq!(text.is_empty(), len == 0, "a non-empty draft always shows the caret's char");
             }
         }
+    }
+
+    #[test]
+    fn a_wide_char_straddling_the_cut_stays_whole() {
+        // The caret's slot offset is display cells and the window is bounded in cells too:
+        // a char count would place the native cursor mid-char and let a window of wide chars
+        // push the provenance clause past the slot's edge (cloudy-tui: the model tracks a
+        // character column, the render converts to display cells before placing the cursor).
+        assert_eq!(draft_window(&"中".repeat(5), 5, 4), DraftWindow { start: 4, caret_cells: 2 });
+        assert_eq!(
+            draft_window_text(&"中".repeat(5), DraftWindow { start: 4, caret_cells: 2 }, 4),
+            "中",
+            "the cut moves before the wide char, not through it"
+        );
+        assert_eq!(draft_window("中", 1, 25), DraftWindow { start: 0, caret_cells: 2 });
+        assert_eq!(
+            draft_window("A中B", 3, 2),
+            DraftWindow { start: 2, caret_cells: 1 },
+            "the cut lands on a char boundary, after the wide char, never through it"
+        );
+        assert_eq!(draft_window_text("A中B", DraftWindow { start: 2, caret_cells: 1 }, 2), "B");
+        // A trailing wide char that cannot fit shows nothing rather than hiding the caret
+        // mid-char: the window starts AT the caret, which stays visible at the slot's edge.
+        assert_eq!(draft_window("A中", 2, 2), DraftWindow { start: 2, caret_cells: 0 });
+        assert_eq!(draft_window_text("A中", DraftWindow { start: 2, caret_cells: 0 }, 2), "");
     }
 
     #[test]
@@ -801,16 +898,16 @@ mod tests {
 
     #[test]
     fn a_multi_byte_character_never_splits() {
-        // The caret is a char index: backspacing over a wide char removes it whole, and the
-        // draft is intact between edits.
-        let mut session = EditSession { row: FormRow::OutputDir, draft: "a→b".to_owned(), caret: 3 };
+        // The caret is a char index: a wide char is 2 display cells but one caret step, so
+        // backspacing over it removes it whole, and the draft is intact between edits.
+        let mut session = EditSession { row: FormRow::OutputDir, draft: "a中b".to_owned(), caret: 3 };
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         assert!(edit_session_key(&mut session, key(KeyCode::Backspace)));
-        assert_eq!(session.draft, "a→");
+        assert_eq!(session.draft, "a中");
         assert_eq!(session.caret, 2);
         assert!(edit_session_key(&mut session, key(KeyCode::Left)));
         assert!(edit_session_key(&mut session, key(KeyCode::Backspace)));
-        assert_eq!(session.draft, "→");
+        assert_eq!(session.draft, "中");
         assert_eq!(session.caret, 0);
     }
 }

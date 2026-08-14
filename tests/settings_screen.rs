@@ -20,6 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
 use tempfile::TempDir;
 
@@ -359,6 +360,107 @@ fn the_caret_wraps_around_the_form() {
     settings.handle_key(key(KeyCode::Up));
     settings.handle_key(key(KeyCode::Enter));
     assert_eq!(config::load(dir.path()).unwrap().overlay_mode, Some(OverlayMode::default().next()), "Up wrapped onto the overlay row");
+}
+
+// ---- the form below the compact height ----
+
+#[test]
+fn the_form_scrolls_with_the_focus_at_nine_rows_high() {
+    // 9 terminal rows: the shell's size banner eats one body row (shell.rs), so the panel
+    // interior is 4 rows for 5 form rows. The caret must stay on a row the panel draws, and
+    // the list slides once the focus walks past the visible span — the contract's
+    // scroll-follow, not a clipped caret (cloudy-tui: Text input — the cursor marks the
+    // caret, which must sit on a row the panel actually shows).
+    let mut app = on_settings();
+    let terminal = draw(&mut app, 80, 9);
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(2, 3)].symbol(), "❯");
+    assert!(row(buffer, 3).contains("output dir"));
+    for (label, y) in [("theme", 4), ("ffmpeg path", 5), ("transcode", 6), ("overlay mode", 6)] {
+        press(&mut app, KeyCode::Down);
+        let terminal = draw(&mut app, 80, 9);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, y)].symbol(), "❯", "the caret sits on the focused row at y {y}");
+        assert!(row(buffer, y).contains(label), "the focused {label} row is visible at y {y}");
+    }
+    // With the focus on the last row the view has scrolled: the first rows are off the panel
+    // above, not clipped below — the scroll-follow's visible span.
+    let terminal = draw(&mut app, 80, 9);
+    let buffer = terminal.backend().buffer();
+    assert!(!row(buffer, 3).contains("output dir"), "the first row scrolled off above the view");
+
+    // The native cursor marks the caret on the same scrolled row: at height 9 (offset 0)
+    // and height 7 (offset 1 — the view slid for the ffmpeg row) it stays on a row the
+    // panel draws, never on one clipped off.
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    let terminal = draw(&mut app, 80, 9);
+    assert_eq!(terminal.backend().cursor_position(), Position::new(17, 5), "the native cursor sits on the caret row at height 9");
+    let terminal = draw(&mut app, 80, 7);
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(2, 4)].symbol(), "✎", "the edit glyph sits on the scrolled row");
+    assert!(row(buffer, 4).contains("ffmpeg path"));
+    assert_eq!(terminal.backend().cursor_position(), Position::new(17, 4), "the native cursor follows the scroll");
+}
+
+#[test]
+fn a_wide_char_draft_places_the_cursor_and_tag_in_display_cells() {
+    // The caret is a char index, but the native cursor and the draft window are display
+    // cells: a 2-cell char moves the cursor one cell further than a char count would, and a
+    // window bounded in cells keeps the provenance clause inside the panel (cloudy-tui: the
+    // model tracks a character column, the render converts to display cells before placing
+    // the native cursor).
+    let dir = TempDir::new().unwrap();
+    let mut settings = settings_in(&dir);
+    settings.handle_key(key(KeyCode::Enter));
+    settings.handle_key(key(KeyCode::Char('中')));
+    settings.handle_key(key(KeyCode::Char('A')));
+    let terminal = render_80(&settings);
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        terminal.backend().cursor_position(),
+        Position::new(19, 1),
+        "the cursor lands 3 cells into the slot — a char count would land at 18"
+    );
+    // `row` reads each cell's symbol, and a wide char's continuation cell is an empty " ",
+    // so the expected row spells the slot "中 A".
+    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  中 A{} · default", " ".repeat(22)), 27));
+
+    // 23 more wide chars: the window slides to keep the caret visible, holding at most
+    // VALUE_CELLS cells, so the clause stays at its column instead of being pushed past the
+    // panel edge.
+    for _ in 0..23 {
+        settings.handle_key(key(KeyCode::Char('中')));
+    }
+    let terminal = render_80(&settings);
+    let buffer = terminal.backend().buffer();
+    assert_eq!(terminal.backend().cursor_position(), Position::new(40, 1), "the caret stays at the last cell of the slid window");
+    assert_eq!(buffer[(42, 1)].symbol(), "·", "the provenance clause stays inside the interior");
+    // The window holds 12 wide chars, not 24 — a char-bounded window would spill 47 cells
+    // and push the clause past the panel edge.
+    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}{} · default", "中 ".repeat(12), " "), 27));
+
+    // A mid-draft caret is where the window's cell cap binds: 25 chars of wide text after
+    // the cut would spill 50 cells, so the window must hold 12 wide chars (24 cells) plus
+    // one pad cell, and the clause stays at its column.
+    let mut settings = settings_in(&dir);
+    settings.handle_key(key(KeyCode::Enter));
+    for _ in 0..40 {
+        settings.handle_key(key(KeyCode::Char('中')));
+    }
+    for _ in 0..13 {
+        settings.handle_key(key(KeyCode::Left));
+    }
+    let terminal = render_80(&settings);
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        terminal.backend().cursor_position(),
+        Position::new(40, 1),
+        "the caret keeps its display-cell offset within the mid-draft window"
+    );
+    assert_eq!(buffer[(42, 1)].symbol(), "·", "the clause stays put with wide chars still in the draft");
+    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}{} · default", "中 ".repeat(12), " "), 27));
 }
 
 // ---- the DANGER toast ----
