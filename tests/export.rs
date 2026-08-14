@@ -20,8 +20,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use exportsnap::export::model::{
-    Account, ChatMessage, ConversationId, DownloadUrl, Field, Friend, LocationPoint, MediaKind, MessageText, ParseErrorKind, Timestamp,
-    Username,
+    Account, ChatMessage, ConversationId, DownloadUrl, Field, Friend, LocationPoint, MediaKind, Memories, MessageText, ParseErrorKind,
+    Timestamp, Username,
 };
 use exportsnap::export::{ExportJson, LoadError, SCHEMA_FILES, schema};
 
@@ -276,6 +276,57 @@ fn a_rejected_coordinate_pair_names_its_kind() {
     let error = LocationPoint::parse(Field::Location, "Latitude, Longitude: 91.0, 0.0").unwrap_err();
     assert_eq!(error.kind(), ParseErrorKind::Coordinates);
     assert_eq!(error.field(), Field::Location);
+}
+
+/// **Decision 76's split, pinned at the model.** A coordinate-shaped `Location` string keeps the
+/// strict coordinate parse, any other non-empty string becomes a place name held verbatim, and
+/// the empty string is absent in both — and the two halves are mutually exclusive.
+#[test]
+fn a_place_name_location_stays_text_and_a_coordinate_stays_a_point() {
+    let memories = Memories::try_from(schema::MemoriesHistory {
+        saved_media: vec![
+            schema::SavedMediaEntry {
+                location: "Wurstelstand at the Danube River promenade, Vienna".to_owned(),
+                ..schema::SavedMediaEntry::default()
+            },
+            schema::SavedMediaEntry { location: "Latitude, Longitude: 48.2, 16.37".to_owned(), ..schema::SavedMediaEntry::default() },
+            schema::SavedMediaEntry { location: String::new(), ..schema::SavedMediaEntry::default() },
+            // Surrounding whitespace: the string is stored verbatim, never trimmed — a trim
+            // mutation must red this assertion.
+            schema::SavedMediaEntry { location: "  Danube promenade  ".to_owned(), ..schema::SavedMediaEntry::default() },
+        ],
+    })
+    .unwrap();
+    let [place, point, absent, padded] = &memories.saved_media[..] else { panic!("the fixture has four entries") };
+
+    assert_eq!(place.place_name.as_deref(), Some("Wurstelstand at the Danube River promenade, Vienna"));
+    assert!(place.location.is_none(), "a place name is never also a coordinate");
+    assert!(point.location.is_some(), "a coordinate-shaped string keeps the strict coordinate parse");
+    assert_eq!(point.location.unwrap().latitude(), 48.2);
+    assert_eq!(point.location.unwrap().longitude(), 16.37);
+    assert!(point.place_name.is_none(), "a coordinate is never also a place name");
+    assert!(absent.location.is_none() && absent.place_name.is_none(), "the empty string is absent in both halves");
+    assert_eq!(
+        padded.place_name.as_deref(),
+        Some("  Danube promenade  "),
+        "the place name is kept byte-identical, surrounding spaces included"
+    );
+    assert!(padded.location.is_none(), "a padded string is still never a coordinate");
+}
+
+#[test]
+fn a_coordinate_shaped_location_that_will_not_parse_still_fails_the_load() {
+    let error = Memories::try_from(schema::MemoriesHistory {
+        saved_media: vec![schema::SavedMediaEntry {
+            location: "Latitude, Longitude: 91.858844, 2.294351".to_owned(),
+            ..schema::SavedMediaEntry::default()
+        }],
+    })
+    .unwrap_err();
+    assert_eq!(error.field(), Field::Location);
+    assert_eq!(error.kind(), ParseErrorKind::Coordinates);
+    // The value stays out of any rendered message, exactly as before the split.
+    assert!(!error.to_string().contains("91.858844"), "{}", error.to_string());
 }
 
 #[test]

@@ -352,6 +352,14 @@ pub struct LocationPoint {
 impl LocationPoint {
     const LABEL: &'static str = "latitude, longitude:";
 
+    /// Whether `text` is shaped like a coordinate: the `latitude, longitude:` label, matched
+    /// case-insensitively. The one spelling of the shape check, shared by [`Self::try_parse`] and
+    /// the memories model's `Location` split (decision 76), so a string can never be a place name
+    /// under one and a coordinate under the other.
+    pub(crate) fn shaped(text: &str) -> bool {
+        text.get(..Self::LABEL.len()).is_some_and(|head| head.eq_ignore_ascii_case(Self::LABEL))
+    }
+
     /// Parses the export's `"Latitude, Longitude: <lat>, <lon>"` form. The label is matched
     /// case-insensitively; both numbers must be finite and in range.
     ///
@@ -363,8 +371,7 @@ impl LocationPoint {
     }
 
     fn try_parse(text: &str) -> Option<Self> {
-        let head = text.get(..Self::LABEL.len())?;
-        if !head.eq_ignore_ascii_case(Self::LABEL) {
+        if !Self::shaped(text) {
             return None;
         }
         let (latitude, longitude) = text[Self::LABEL.len()..].split_once(',')?;
@@ -644,11 +651,19 @@ const fn optional_epoch_ms(raw: Option<i64>) -> Option<i64> {
     }
 }
 
-fn optional_location(field: Field, raw: &str) -> Result<Option<LocationPoint>, ParseError> {
+/// Splits the `Location` field under decision 76: a coordinate-shaped string keeps the strict
+/// coordinate parse — an invalid coordinate still fails the load — any other non-empty string is
+/// a place name held verbatim, and the empty string is absent in both. The halves are mutually
+/// exclusive because [`LocationPoint::shaped`] is the one spelling of the shape check, shared
+/// with the parse itself.
+fn split_location(field: Field, raw: &str) -> Result<(Option<LocationPoint>, Option<String>), ParseError> {
     if raw.is_empty() {
-        return Ok(None);
+        return Ok((None, None));
     }
-    LocationPoint::parse(field, raw).map(Some)
+    if LocationPoint::shaped(raw) {
+        return Ok((Some(LocationPoint::parse(field, raw)?), None));
+    }
+    Ok((None, Some(raw.to_owned())))
 }
 
 // ---- account.json ----
@@ -907,6 +922,10 @@ pub struct Memory {
     pub date: Option<Timestamp>,
     pub media_type: MediaKind,
     pub location: Option<LocationPoint>,
+    /// The entry's `Location` string when it is not a coordinate: a place name the table shows
+    /// verbatim (decision 76). Mutually exclusive with [`Self::location`] — a coordinate-shaped
+    /// string is never a place name and a place name is never a coordinate.
+    pub place_name: Option<String>,
     /// Both urls expire roughly 7 days after the export is cut, which is the race phase 2 runs.
     pub download_link: Option<DownloadUrl>,
     pub media_download_url: Option<DownloadUrl>,
@@ -921,10 +940,12 @@ impl TryFrom<schema::MemoriesHistory> for Memories {
                 .saved_media
                 .into_iter()
                 .map(|entry| {
+                    let (location, place_name) = split_location(Field::Location, &entry.location)?;
                     Ok(Memory {
                         date: optional_timestamp(Field::Date, &entry.date)?,
                         media_type: MediaKind::from_wire(&entry.media_type),
-                        location: optional_location(Field::Location, &entry.location)?,
+                        location,
+                        place_name,
                         download_link: optional_text(entry.download_link).map(DownloadUrl::new),
                         media_download_url: optional_text(entry.media_download_url).map(DownloadUrl::new),
                     })

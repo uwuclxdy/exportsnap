@@ -25,6 +25,7 @@
 //! (see `src/tui/screens/memories.rs`), which is what "never panics" means at the composition
 //! boundary.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
@@ -59,6 +60,9 @@ pub struct PlanRow {
     /// The output file's name, e.g. `20210115_143005.jpg`. Not the path: the year and month
     /// directories are implied chrome, and the name is what a table row can hold.
     pub output_name: String,
+    /// The entry's `Location` string when it is not a coordinate (decision 76). `None` renders an
+    /// empty cell and no tooltip.
+    pub place_name: Option<String>,
     /// Which leg fixes it: decides the kind a row reports.
     pub leg: Leg,
 }
@@ -265,12 +269,25 @@ fn prepare(inputs: &RunInputs) -> Result<Prepared, RunError> {
     // load-bearing with no test to say so.
     let recorded = RecordedOutputs::read(&manifest, ItemKind::Memory).map_err(RunError::Manifest)?;
     let plan = Plan::build(&memories, &reconciliation, &inputs.out_root, &recorded).map_err(RunError::InvalidOutRoot)?;
+    // Decision 76's place names, keyed by the manifest identity so each row shows its own entry's
+    // string. Reconcile hands every entry exactly one item with an injective source_id — a uuid
+    // or a synthetic id built from the entry index — so the map resolves each row to exactly its
+    // entry, and an entry without a place name simply has no entry in the map.
+    let place_names: HashMap<&str, &str> = reconciliation
+        .items
+        .iter()
+        .filter_map(|item| {
+            let name = memories.saved_media.get(item.entry_index)?.place_name.as_deref()?;
+            Some((item.source_id.as_str(), name))
+        })
+        .collect();
     let rows = plan
         .items
         .iter()
         .map(|item| PlanRow {
             source_id: item.source_id.clone(),
             output_name: item.output.file_name().and_then(|name| name.to_str()).unwrap_or("?").to_owned(),
+            place_name: place_names.get(item.source_id.as_str()).copied().map(|name| name.to_owned()),
             leg: item.leg,
         })
         .collect();

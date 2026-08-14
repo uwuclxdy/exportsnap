@@ -2,9 +2,12 @@
 //! screen map).
 //!
 //! **Metadata only, exactly like the overview.** The table shows a memory's uuid, its manifest
-//! status and its output file name. No coordinate, no message text, no username ever reaches this
-//! module — the run composition in `export::memories_run` is what feeds it, and the poll reads
-//! statuses off the manifest, which holds no user content.
+//! status and its output file name. The entries' `Location` strings do reach this module, as
+//! place names only (decision 76): a non-coordinate string renders in the LOCATION column and in
+//! the focused row's tooltip. A coordinate-shaped string is never a place name — it stays a
+//! parsed coordinate or fails the load — so no coordinate, no message text, and no username ever
+//! reaches this module. The run composition in `export::memories_run` is what feeds it, and the
+//! poll reads statuses off the manifest, which holds no user content.
 //!
 //! # How a run is driven
 //!
@@ -45,8 +48,9 @@ use crate::tui::format::{cells, head_ellipsis, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::Palette;
 use crate::tui::widgets::{
-    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, disk_free_value, empty_state,
-    form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row, tint_to_edge, tooltip,
+    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret,
+    disk_free_value, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row,
+    tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -62,7 +66,7 @@ const OUTPUT_MIN: usize = 6;
 /// The form panel's interior cells at the widest ragged row (`output dir` + gap + value).
 const FORM_INTERIOR: usize = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + PATH_CELLS;
 /// The table's interior cells when every column is at its narrowest.
-const TABLE_INTERIOR_MIN: usize = CARET_GUTTER + IDENTITY_CELLS + 2 + STATUS_CELLS + 2 + OUTPUT_MIN;
+const TABLE_INTERIOR_MIN: usize = CARET_GUTTER + IDENTITY_CELLS + 2 + LOCATION_CELLS + 2 + STATUS_CELLS + 2 + OUTPUT_MIN;
 /// The table's fixed rows on top of the list: overall bar, header, and the panel's two borders.
 const TABLE_FLOOR_ROWS: u16 = 2 + 1 + 1 + widgets::BORDER_ROWS;
 
@@ -649,7 +653,12 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
         .rows
         .iter()
         .zip(&view.statuses)
-        .map(|(row, status)| ProgressRow { identity: &row.source_id, output: &row.output_name, status: *status })
+        .map(|(row, status)| ProgressRow {
+            identity: &row.source_id,
+            location: row.place_name.as_deref(),
+            output: &row.output_name,
+            status: *status,
+        })
         .collect();
     progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, inner.right());
 }

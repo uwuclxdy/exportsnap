@@ -39,6 +39,10 @@ const EXPORT_ID: &str = "1784667002819";
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;
 
+/// The 50-char place name the reach pins feed: long enough to middle-ellipsise in the 29-cell
+/// column, distinctive enough that an assertion on its head/tail cannot match by accident.
+const LONG_PLACE: &str = "Wurstelstand at the Danube River promenade, Vienna";
+
 // ---- fixtures ----
 
 fn uuid(seed: u32) -> String {
@@ -416,6 +420,10 @@ fn cell_run(buffer: &Buffer, y: u16) -> String {
     row(buffer, y).trim_end().to_owned()
 }
 
+fn screen_text(buffer: &Buffer) -> String {
+    (0..buffer.area.height).map(|y| row(buffer, y)).collect::<Vec<_>>().join("\n")
+}
+
 /// An app on the memories tab with a real (tempdir) export tree behind it and a disk-probe
 /// environment handed in, so the form rows are deterministic.
 fn app_on_memories(dir: &TempDir) -> App {
@@ -539,19 +547,22 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
         &mut app,
         state.path(),
         vec![
-            PlanRow { source_id: uuid(1), output_name: "20210115_133005.jpg".to_owned(), leg: Leg::Image },
-            PlanRow { source_id: uuid(2), output_name: "20210115_133005_2.jpg".to_owned(), leg: Leg::Image },
-            PlanRow { source_id: uuid(3), output_name: "20210115_133005_3.jpg".to_owned(), leg: Leg::Image },
+            PlanRow { source_id: uuid(1), output_name: "20210115_133005.jpg".to_owned(), place_name: None, leg: Leg::Image },
+            PlanRow { source_id: uuid(2), output_name: "20210115_133005_2.jpg".to_owned(), place_name: None, leg: Leg::Image },
+            PlanRow { source_id: uuid(3), output_name: "20210115_133005_3.jpg".to_owned(), place_name: None, leg: Leg::Image },
         ],
     );
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    // Wide enough that the 19-char output name below still renders whole in the output column:
+    // at 120 wide the location column leaves the output only 10 cells, so the name ellipsises.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     // The overall bar reads 0% with three rows pending (whole percentage).
     assert!(cell_run(buffer, 2).contains("0%"), "{:?}", cell_run(buffer, 2));
-    // The header names the three columns.
+    // The header names the four columns.
     assert!(cell_run(buffer, 3).contains("IDENTITY"), "{:?}", cell_run(buffer, 3));
+    assert!(cell_run(buffer, 3).contains("LOCATION"));
     assert!(cell_run(buffer, 3).contains("STATUS"));
     // Both rows render, each with a pending pill.
     let first = cell_run(buffer, 4);
@@ -662,7 +673,11 @@ fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
     let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
-    feed_plan(&mut app, state.path(), vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }]);
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+    );
 
     // Enter on the static source row descends.
     press(&mut app, KeyCode::Enter);
@@ -699,7 +714,11 @@ fn arrows_are_trapped_while_descended_but_the_alt_jump_still_lands() {
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
     let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
-    feed_plan(&mut app, state.path(), vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }]);
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+    );
 
     press(&mut app, KeyCode::Enter);
     assert!(app.memories().descended());
@@ -900,7 +919,7 @@ fn a_worker_that_panics_after_planning_keeps_the_table_and_reports_the_panic() {
             let _ = sender.send(RunEvent::Planned(PlanSnapshot {
                 export_id: ExportId::new(EXPORT_ID).unwrap(),
                 manifest_dir: manifest_dir.clone(),
-                rows: vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }],
+                rows: vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
             }));
             panic!("boom");
         },
@@ -990,7 +1009,11 @@ fn the_selected_form_row_keeps_its_tint_while_the_table_is_descended() {
     let mut writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
     writer.enroll(&[exportsnap::export::manifest::NewItem { kind: ItemKind::Memory, source_id: &uuid(1), url: None }]).unwrap();
     drop(writer);
-    let sender = feed_plan(&mut app, state.path(), vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }]);
+    let sender = feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+    );
     let _ = sender;
     let palette = Palette::new(Tier::Full);
 
@@ -1075,19 +1098,198 @@ fn the_output_column_keeps_the_extension_under_head_ellipsis() {
     let sender = feed_plan(
         &mut app,
         state.path(),
-        vec![PlanRow { source_id: uuid(1), output_name: "20210115_133005_2.jpg".to_owned(), leg: Leg::Image }],
+        vec![PlanRow { source_id: uuid(1), output_name: "20210115_133005_2.jpg".to_owned(), place_name: None, leg: Leg::Image }],
     );
     let _ = sender;
-    // A narrow table (stacked arm) forces the output column small enough to truncate.
-    let mut terminal = Terminal::new(TestBackend::new(50, 30)).unwrap();
+    // A narrow table (stacked arm) forces the output column small enough to truncate. 80 is the
+    // narrowest width that still renders the table at all (its interior floor is 72 cells with the
+    // location column), and there the output column is 10 cells — the name has to truncate.
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    // At 50 wide the panels stack: form on top, table below. Find the row holding the id.
+    // At 80 wide the panels stack: form on top, table below. Find the row holding the id.
     let row_text =
         (0..30).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1)[..8])).unwrap_or_else(|| panic!("no table row rendered"));
     let content = row_text.trim_end_matches('│').trim_end();
     assert!(content.ends_with(".jpg"), "the extension must survive the cut: {row_text}");
     assert!(content.contains('…'), "the name must actually be truncated at this width: {row_text}");
+}
+
+/// **Reach pin: the place name renders in the LOCATION column, middle-ellipsised.** A 50-char
+/// name cuts to head + ellipsis + tail in the 29-cell column, a short one renders whole, and an
+/// absent one renders as a blank column that still holds its width — the pill lands on the same
+/// column whatever the name does.
+#[test]
+fn the_location_column_middle_ellipsises_long_place_names_and_holds_short_ones_whole() {
+    let mut app = app_on_fixed_source();
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![
+            PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: Some(LONG_PLACE.to_owned()), leg: Leg::Image },
+            PlanRow { source_id: uuid(2), output_name: "y.jpg".to_owned(), place_name: Some("Dresden".to_owned()), leg: Leg::Image },
+            PlanRow { source_id: uuid(3), output_name: "z.jpg".to_owned(), place_name: None, leg: Leg::Image },
+        ],
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // 29 cells is the observed range's lower bound: the 50-char name cuts to 14 + ellipsis + 14.
+    let first = cell_run(buffer, 4);
+    assert!(first.contains("Wurstelstand a…menade, Vienna"), "the ellipsised place name: {first}");
+    assert!(!first.contains(LONG_PLACE), "the name must not render whole at this width: {first}");
+    let second = cell_run(buffer, 5);
+    // The row's identity cell always carries an ellipsis of its own, so the whole-row check would
+    // be blind to the question: read only the slice between the name and the status pill.
+    let short_name_start = second.find("Dresden").unwrap();
+    let short_name_end = second.find("[ pending ]").unwrap();
+    assert_eq!(second[short_name_start..short_name_end].trim(), "Dresden", "a short place name renders whole: {second}");
+    assert!(!second[short_name_start..short_name_end].contains('…'), "nothing about a short name may ellipsise: {second}");
+    let third = cell_run(buffer, 6);
+    assert!(third.contains(&uuid(3)[..8]), "the nameless row is still a row: {third}");
+    // The column holds its width whatever the name: the pill lands on the same column in all
+    // three rows — the blank is a blank COLUMN, not a shrunken one. The column is a CELL count,
+    // so the byte index `find` yields is the wrong measure: the form panel's left half carries
+    // different multi-byte glyphs per row (the disk bar, the cycle chip), which shift the bytes
+    // while the cells hold still.
+    let pill_column = |line: &str| {
+        let byte = line.find("[ pending ]").unwrap();
+        line[..byte].chars().count()
+    };
+    assert_eq!(pill_column(&first), pill_column(&second), "the status pill must not shift between rows:\n{first}\n{second}");
+    assert_eq!(pill_column(&second), pill_column(&third), "a blank location must hold its width:\n{second}\n{third}");
+}
+
+/// **Reach pin: the focused row's place name grows a tooltip right below it, with the FULL
+/// name, only while the pane is descended.** A nameless row grows none, and the tooltip is an
+/// item of its own — it never takes the caret or the highlight, and the rows below it shift.
+#[test]
+fn the_focused_rows_place_name_grows_a_tooltip_below_it_only_while_descended() {
+    let mut app = app_on_fixed_source();
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![
+            PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: Some(LONG_PLACE.to_owned()), leg: Leg::Image },
+            PlanRow { source_id: uuid(2), output_name: "y.jpg".to_owned(), place_name: None, leg: Leg::Image },
+        ],
+    );
+
+    // The form owns the caret: no tooltip anywhere, on either row.
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    for y in 4..=8 {
+        assert!(!cell_run(buffer, y).contains('└'), "a tooltip rendered while the form owned the caret: {:?}", cell_run(buffer, y));
+    }
+
+    // Descend: the selection follows the tail, which is the row WITHOUT a name — still no tooltip.
+    press(&mut app, KeyCode::Enter);
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    for y in 4..=8 {
+        assert!(!cell_run(buffer, y).contains('└'), "a nameless row grew a tooltip: {:?}", cell_run(buffer, y));
+    }
+
+    // Up onto the named row: the full, un-ellipsised name lands as its own row right below it,
+    // and the row below the tooltip is the shifted second row.
+    press(&mut app, KeyCode::Up);
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(cell_run(buffer, 4).contains("❯ 00000001"), "{:?}", cell_run(buffer, 4));
+    let tooltip = cell_run(buffer, 5);
+    assert!(tooltip.contains("└ "), "{tooltip}");
+    assert!(tooltip.contains(LONG_PLACE), "the tooltip shows the FULL place name: {tooltip}");
+    assert!(!tooltip.contains('…'), "the tooltip never ellipsises the name: {tooltip}");
+    assert!(!tooltip.contains('❯'), "the tooltip must not carry the selection caret: {tooltip}");
+    assert_ne!(buffer[(2, 5)].style().bg, Some(Palette::new(Tier::Full).bg_hover), "the tooltip must not take the highlight");
+    assert!(cell_run(buffer, 6).contains(&uuid(2)[..8]), "the row below the tooltip is the shifted second row: {:?}", cell_run(buffer, 6));
+
+    // Ascend with the selection still on the named row: the tooltip's gate is the pane's focus,
+    // so it must vanish even though the row that grew it is still selected. Whole-frame sweep,
+    // because the gate's absence would drop the tooltip below the row, not above the form.
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.memories().descended(), "esc must ascend from the table");
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(!screen_text(buffer).contains('└'), "a tooltip rendered while the form owned the caret and a named row was selected");
+
+    // Re-descend: the selection survived the ascend, so the tooltip returns — the phase above
+    // measured the focus gate, not the selection moving.
+    press(&mut app, KeyCode::Enter);
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(cell_run(buffer, 5).contains(LONG_PLACE), "the tooltip must return on re-descend: {:?}", cell_run(buffer, 5));
+}
+
+/// **The privacy pin for decision 76.** A distinctive place-name token rides an entry's
+/// `Location` string through a REAL run, and one item is doomed to fail so the run produces a
+/// genuine error message and a manifest row with `last_error` set. The token must appear exactly
+/// where it is supposed to — the two location cells — and nowhere else: not in the identity or
+/// output columns, not in the alert, not in any path the run wrote, and not in any manifest
+/// field.
+#[test]
+fn a_place_name_token_reaches_no_output_path_error_or_manifest_field() {
+    const TOKEN: &str = "zqxhiddengullyzqx";
+    // Distinct days, so each bucket holds one entry and one media file and the pairing is Exact:
+    // an ambiguous bucket would make the capture fall to the file's day at midnight and the
+    // occupied path below would never be the first item's write target.
+    let dir =
+        export_tree("place-privacy", &[(&at("2021-01-15", "13:30:05"), "Image", TOKEN), (&at("2021-02-20", "01:00:00"), "Image", TOKEN)]);
+    // The first item's output path is pre-occupied by a directory, so its write fails
+    // deterministically and the run really produces an error message and a `last_error` row.
+    let out = dir.path().join("out");
+    fs::create_dir_all(out.join("2021/01")).unwrap();
+    fs::create_dir(out.join("2021/01/20210115_133005.jpg")).unwrap();
+    let mut app = app_on_memories(&dir);
+    let state = TempDir::new().unwrap();
+    app.memories_mut().set_manifest_dir(state.path().to_path_buf());
+
+    press(&mut app, KeyCode::Enter);
+    wait_for_alert(&mut app);
+    let alert = app.memories().alert().unwrap();
+    let alert_kind = alert.kind;
+    let alert_message = alert.message.clone();
+    assert_eq!(alert_kind, AlertKind::Warning, "the occupied path must fail one item: {alert_message}");
+    assert!(alert_message.contains("1 failed"), "the failing item must be the one the alert counts: {alert_message}");
+
+    // The control, and it is what makes the sweeps below mean something: the token really is in
+    // play — it rendered in exactly the two location cells and nowhere else on the whole screen.
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let text = screen_text(terminal.backend().buffer());
+    assert_eq!(text.matches(TOKEN).count(), 2, "the token must reach the two location cells and nowhere else:\n{text}");
+
+    // The good item really was written, so the tree scan below has a tree to scan.
+    assert!(dir.path().join("out/2021/02/20210220_010000.jpg").is_file());
+    let mut walk: Vec<_> = fs::read_dir(out).unwrap().flat_map(Result::ok).collect();
+    while let Some(entry) = walk.pop() {
+        assert!(!entry.file_name().to_string_lossy().contains(TOKEN), "a place name named a file or dir: {:?}", entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            walk.extend(fs::read_dir(entry.path()).unwrap().flat_map(Result::ok));
+        }
+    }
+
+    // The manifest, `last_error` included: the failed row really carries one, so the sweep is live.
+    let manifest = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    let rows = manifest.items(ItemKind::Memory).unwrap();
+    assert!(rows.iter().any(|row| row.last_error.is_some()), "the failure must reach a manifest row's last_error");
+    for item in rows {
+        assert!(!item.source_id.contains(TOKEN), "{:?}", item.source_id);
+        assert!(!item.last_error.as_deref().unwrap_or("").contains(TOKEN), "{:?}", item.last_error);
+        if let Some(path) = &item.output_path {
+            assert!(!path.to_string_lossy().contains(TOKEN), "a place name reached an output path: {path:?}");
+        }
+    }
+
+    // The alert message itself, the one error text the run produced.
+    assert!(!alert_message.contains(TOKEN), "a place name reached the alert: {alert_message}");
 }
 
 #[test]

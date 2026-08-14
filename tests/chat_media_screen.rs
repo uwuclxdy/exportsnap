@@ -453,7 +453,9 @@ fn a_history_with_no_messages_is_not_described_as_an_unmatched_one() {
     let state = TempDir::new().unwrap();
     let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
     feed_plan(&mut app, state.path(), Vec::new(), counts);
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    // The counts line is read at its side-by-side position, so the frame must clear the arm's
+    // floor: the location column (decision 76) raised it from 90 to 121 cells.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let line = cell_run(terminal.backend().buffer(), 2);
     assert!(line.contains("chat history read, nothing attributed"), "{line}");
@@ -723,7 +725,9 @@ fn clean_counts() -> PlanCounts {
 #[test]
 fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     let mut app = app_on_fixed_source(Tier::Full);
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    // The empty state and the PROGRESS header are read at their side-by-side positions, so the
+    // frame must clear the arm's floor: the location column (decision 76) raised it from 90 to 121.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
 
@@ -847,7 +851,9 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
         PlanCounts { unmatched_overlays: 224, excluded: 44, history: HistoryOutcome::Joined, ..PlanCounts::default() },
     );
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    // Wide enough that the 19-char output name below still renders whole in the output column:
+    // at 120 wide the location column leaves the output only 10 cells, so the name ellipsises.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
 
@@ -974,7 +980,9 @@ fn the_counts_lines_lower_bound_qualifier_survives_the_compatible_tier() {
         let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
         feed_plan(&mut app, state.path(), Vec::new(), PlanCounts { partial: true, unmatched_overlays: 2, ..clean_counts() });
 
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        // The counts line is read at its side-by-side position, so the frame must clear the arm's
+        // floor: the location column (decision 76) raised it from 90 to 121 cells.
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
 
@@ -1394,6 +1402,7 @@ fn the_alt_jump_ascends_the_pane_it_leaves_on_either_screen() {
             rows: vec![exportsnap::export::memories_run::PlanRow {
                 source_id: "2ca92da1-3ff7-45f1-95f9-a2fda6ba0f8e".to_owned(),
                 output_name: "y.jpg".to_owned(),
+                place_name: None,
                 leg: Leg::Image,
             }],
         }))
@@ -1422,7 +1431,9 @@ fn a_worker_that_panics_still_yields_a_panic_alert_and_no_stuck_spinner() {
     assert_eq!(alert.kind, AlertKind::Warning);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    // The empty state is read at its side-by-side position, so the frame must clear the arm's
+    // floor: the location column (decision 76) raised it from 90 to 121 cells.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let progress = cell_run(terminal.backend().buffer(), 11);
     assert!(progress.contains("no run yet"), "{progress}");

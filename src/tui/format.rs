@@ -86,8 +86,12 @@ pub fn head_ellipsis(text: &str, budget: usize) -> String {
 /// there `cells > budget` implies `chars > keep`.
 ///
 /// Being `pub`, this promises a caller outside the crate none of the above; the convention covers
-/// the crate's two call sites, which are the progress table both legs render through and the
-/// history picker's conversation labels.
+/// the crate's four call sites. The progress table's identity column — a uuid or `b~<id>` — is
+/// ascii-gated by the filename grammar that minted it. The account screen's username, the history
+/// picker's conversation labels, and the progress table's place-name column (decision 76) are
+/// free-form user data with no grammar gate: `Username::new` and the place-name split check
+/// emptiness only; `ConversationId::new` accepts even empty. The wide-char cost above is accepted
+/// for all three, not refused.
 #[must_use]
 pub fn middle_ellipsis(text: &str, budget: usize) -> String {
     if cells(text) <= budget {

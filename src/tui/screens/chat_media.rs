@@ -50,9 +50,9 @@ use crate::tui::format::{cells, head_ellipsis, plural, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
-    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret, cycle_options,
-    disk_free_value, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row,
-    tint_to_edge, tooltip,
+    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret,
+    cycle_options, disk_free_value, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header, progress_list,
+    static_row, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -93,8 +93,10 @@ const fn widest_value() -> usize {
     if CYCLE_CELLS > PATH_CELLS { CYCLE_CELLS } else { PATH_CELLS }
 }
 
-/// The table's interior cells when every column is at its narrowest.
-const TABLE_INTERIOR_MIN: usize = CARET_GUTTER + IDENTITY_CELLS + 2 + STATUS_CELLS + 2 + OUTPUT_MIN;
+/// The table's interior cells when every column is at its narrowest. The location column is
+/// shared chrome (decision 76), so the chat screen's floor grows by the same amount as the
+/// memories screen's, even though no chat row ever fills one.
+const TABLE_INTERIOR_MIN: usize = CARET_GUTTER + IDENTITY_CELLS + 2 + LOCATION_CELLS + 2 + STATUS_CELLS + 2 + OUTPUT_MIN;
 /// The table's fixed rows on top of the list: the counts line, the overall bar, the header, and the
 /// panel's two borders.
 const TABLE_FLOOR_ROWS: u16 = 1 + 2 + 1 + 1 + widgets::BORDER_ROWS;
@@ -703,7 +705,11 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
         .rows
         .iter()
         .zip(&view.statuses)
-        .map(|(row, status)| ProgressRow { identity: &row.source_id, output: &row.output_name, status: *status })
+        .map(|(row, status)| {
+            // The chat leg has no place-name concept (decision 76's field is memories-only): the
+            // column renders blank and no tooltip ever grows on this screen.
+            ProgressRow { identity: &row.source_id, location: None, output: &row.output_name, status: *status }
+        })
         .collect();
     progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, inner.right());
 }

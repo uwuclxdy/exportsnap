@@ -80,6 +80,10 @@ pub(crate) const LABEL_GAP: usize = 2;
 pub(crate) const DISK_BAR_CELLS: usize = 9;
 /// Cells a progress table's identity column occupies (a middle-ellipsised id).
 pub(crate) const IDENTITY_CELLS: usize = 18;
+/// Cells a progress table's location column occupies (decision 76) — sized for the observed
+/// place-name range, 29-42 chars: the shortest observed name renders whole, longer ones
+/// middle-ellipsise and the focused row's tooltip shows the full name.
+pub(crate) const LOCATION_CELLS: usize = 29;
 /// Cells a progress table's status column occupies — the widest pill, `[ pending ]`.
 pub(crate) const STATUS_CELLS: usize = 11;
 /// The gap between two of a progress table's columns.
@@ -276,22 +280,28 @@ pub(crate) fn empty_state(frame: &mut Frame, palette: &Palette, inner: Rect, hin
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ProgressRow<'a> {
     pub identity: &'a str,
+    /// The entry's place name (decision 76). `None` renders an empty cell and no tooltip; the chat
+    /// leg has no such concept and passes `None` for every row.
+    pub location: Option<&'a str>,
     pub output: &'a str,
     pub status: ItemStatus,
 }
 
-/// The progress table's list and its scrollbar: caret gutter, middle-ellipsised identity, status
-/// pill, output name.
+/// The progress table's list and its scrollbar: caret gutter, middle-ellipsised identity, place
+/// name, status pill, output name.
 ///
 /// The selected row's identity promotes to `TEXT + bold` only while the pane is descended; the tint
 /// comes from the `List`'s highlight style, which paints the background alone (contract: only the
-/// label promotes).
+/// label promotes). A focused row that carries a place name grows the `└ name` tooltip as a
+/// separate item right below it (decision 76) — a separate item, never a second highlighted line,
+/// because the highlight style would tint that line too.
 pub(crate) fn progress_list(
     frame: &mut Frame, palette: &Palette, rows: &[ProgressRow<'_>], descended: bool, state: &mut ListState, area: Rect,
     scrollbar_column: u16,
 ) {
-    let output_cells = usize::from(area.width).saturating_sub(CARET_GUTTER + IDENTITY_CELLS + COLUMN_GAP + STATUS_CELLS + COLUMN_GAP);
-    let items: Vec<ListItem<'_>> = rows
+    let output_cells = usize::from(area.width)
+        .saturating_sub(CARET_GUTTER + IDENTITY_CELLS + COLUMN_GAP + LOCATION_CELLS + COLUMN_GAP + STATUS_CELLS + COLUMN_GAP);
+    let mut items: Vec<ListItem<'_>> = rows
         .iter()
         .enumerate()
         .map(|(index, row)| {
@@ -302,6 +312,10 @@ pub(crate) fn progress_list(
                 Span::styled(middle_ellipsis(row.identity, IDENTITY_CELLS), identity_style),
                 Span::raw("  "),
             ];
+            // The empty name is the padded blank `middle_ellipsis` produces — a leg without the
+            // concept (chat) shows an empty cell, never a placeholder.
+            spans.push(Span::styled(middle_ellipsis(row.location.unwrap_or(""), LOCATION_CELLS), Style::new().fg(palette.text_dim)));
+            spans.push(Span::raw("  "));
             spans.extend(status_pill(palette, row.status));
             spans.push(Span::raw("  "));
             // Head-ellipsis, not trailing: the output name's leaf — its extension — is the point,
@@ -310,11 +324,21 @@ pub(crate) fn progress_list(
             ListItem::new(Line::from(spans))
         })
         .collect();
+    // The tooltip is an item of its own, inserted right below the focused row, so the selection
+    // index stays the real row's and the highlight never lands on the tooltip. The name is shown
+    // whole — this is the one place the place name is never truncated.
+    if descended
+        && let Some(index) = state.selected()
+        && let Some(name) = rows.get(index).and_then(|row| row.location)
+    {
+        items.insert(index + 1, ListItem::new(tooltip(palette, name)));
+    }
+    let item_count = items.len();
     let list = List::new(items).highlight_style(Style::new().bg(palette.bg_hover)).scroll_padding(3);
     frame.render_stateful_widget(&list, area, state);
 
     let viewport = usize::from(area.height);
-    list_scrollbar(frame, palette, rows.len(), state.offset(), viewport, scrollbar_column, area);
+    list_scrollbar(frame, palette, item_count, state.offset(), viewport, scrollbar_column, area);
 }
 
 /// The scrollbar a scrollable list grows in its panel's right padding column, so the content never
@@ -343,6 +367,8 @@ pub(crate) fn progress_header(palette: &Palette) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
         Span::styled(right_pad("IDENTITY", IDENTITY_CELLS), header),
+        Span::raw("  "),
+        Span::styled(right_pad("LOCATION", LOCATION_CELLS), header),
         Span::raw("  "),
         Span::styled(right_pad("STATUS", STATUS_CELLS), header),
         Span::raw("  "),
