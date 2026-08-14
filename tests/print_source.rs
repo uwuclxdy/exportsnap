@@ -24,7 +24,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)] // config_dirs' signature, and config_dirs is unix-gated for the sandbox reason above
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use exportsnap::export::env;
@@ -204,6 +206,7 @@ fn the_out_root_the_binary_was_given_reaches_both_media_screens() {
 /// organization and application). Writing both spellings keeps one test body on both legs, with
 /// the unread one inert. Windows reads the shell folders that no env var can redirect, so it has
 /// no sandbox to write into — the same split `tests/config.rs` documents.
+#[cfg(unix)] // every caller below is unix-gated for the sandbox reason above; ungated it is dead code on windows
 fn config_dirs(home: &Path) -> [PathBuf; 2] {
     [home.join("exportsnap"), home.join("Library/Application Support/dev.uwuclxdy.exportsnap")]
 }

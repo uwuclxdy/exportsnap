@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use exportsnap::export::env::{Environment, Tool, available_space, locate_in};
+#[cfg(unix)] // only the unix-gated path-collision test below calls it
+use exportsnap::export::env::locate_in;
+use exportsnap::export::env::{Environment, Tool, available_space};
 
 /// A path under cargo's own test tmpdir that is guaranteed not to exist.
 fn missing_path() -> PathBuf {
