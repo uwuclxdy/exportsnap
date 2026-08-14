@@ -1,0 +1,161 @@
+# Release workflow for exportsnap, from cloudify's rust release template, customized:
+#   - matrix is exactly three targets (task 93 pick, 2026-08-14): linux x86_64,
+#     macos aarch64, windows x86_64 — no Intel mac, no musl, no linux-aarch64.
+#     The template's optional-target rows and its cross-linker step are gone
+#     with them; install.sh's darwin/x86_64 branch fails closed to match.
+#   - builds `--locked`: Cargo.lock is committed and the shipped binary must
+#     build against exactly it.
+#   - NO LTO/codegen-units env overrides (ci.yml's are throwaway-build knobs):
+#     the shipped binary must come from the crate's declared [profile.release].
+#   - the publish job regenerates THIRD-PARTY-LICENSES and ships it as a release
+#     asset (ODbL attribution obligation, decision 35), with cargo-about pinned
+#     to 0.9.1 — the version the committed file was generated with.
+#   - the AUR package is scaffolded under aur/exportsnap/ and intentionally NOT
+#     enabled in this workflow yet (task 93 pick, 2026-08-14).
+#
+# The GitHub release is NOT created here with notes — a release script owns that
+# (right after the tag push, so the notes ride GitHub's release email); this
+# workflow only builds the binaries and uploads them (plus sums) to that release
+# from ONE job, so no concurrent find-or-create can duplicate it. exportsnap has
+# no release script yet, so today every tag takes the bare-release fallback in
+# the publish job (no notes). A hand-pushed tag gets its binaries either way.
+#
+# Each target builds on its NATIVE runner (linux→ubuntu, macos→macos-latest,
+# windows→windows-latest, MSVC): a dep that vendors a C/C++ build (rusqlite's
+# bundled sqlite, image's codecs) links correctly with the platform's own
+# toolchain — no cross guesswork.
+#
+# This is the UNSIGNED variant (sha256-only). Asset names MUST match install.sh's
+# OS/arch map and the aur/exportsnap source URL.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write      # gh release upload attaches assets to the release
+  id-token: write      # GitHub OIDC — keyless build-provenance attestation (optional)
+  attestations: write  # actions/attest-build-provenance (optional)
+
+# Transport-only knobs for the same measured crates.io HTTP/2 framing failures
+# ci.yml documents: retries + HTTP/1.1 for registry fetches, nothing else. NOT
+# profile overrides — the shipped binary still comes from the crate's declared
+# [profile.release]; the LTO/codegen-units env from ci.yml stays out.
+env:
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+jobs:
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag is semver
+        # Tightens the `v*` trigger to strict vX.Y.Z before any build minutes burn —
+        # a malformed tag otherwise ends up on a bare fallback release. Pre-release
+        # suffixes (`v1.2.3-rc1`) need the regex relaxed.
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not vX.Y.Z"; exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.asset_name }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash  # windows-latest ships Git Bash; keeps cp + forward-slash paths uniform across OSes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            asset_name: exportsnap-linux-x86_64
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset_name: exportsnap-macos-aarch64
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset_name: exportsnap-windows-x86_64
+            ext: .exe
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        # --locked: Cargo.lock is committed; the shipped binary builds against
+        # exactly it. No profile env overrides — the crate's declared release
+        # profile is the shipped one (unlike ci.yml's throwaway knobs).
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Prepare asset
+        run: cp "target/${{ matrix.target }}/release/exportsnap${{ matrix.ext }}" "${{ matrix.asset_name }}${{ matrix.ext }}"
+      - name: Attest build provenance   # optional supply-chain: keyless SLSA provenance for the asset
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ matrix.asset_name }}${{ matrix.ext }}
+      - name: Upload artifact for the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}${{ matrix.ext }}
+          path: ${{ matrix.asset_name }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish assets
+    needs: [build]
+    # Run even when a build leg fails so the binaries that DID ship still get
+    # attached with a matching sums file covering exactly what was published.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Regenerate THIRD-PARTY-LICENSES
+        # The ODbL attribution obligation (decision 35) ships with the release:
+        # the notice is generated, never hand-edited (tests/attribution.rs pins
+        # it), and rides the release as an asset alongside the binaries.
+        # cargo-about is pinned to 0.9.1 — the version the committed
+        # THIRD-PARTY-LICENSES was generated with; a newer one may drift the
+        # output format. `cli` is NOT a default feature: without it cargo
+        # install exits 0 having installed NOTHING (warning only), and the
+        # generate line below then dies on a missing subcommand.
+        run: |
+          cargo install cargo-about --version 0.9.1 --locked --features cli
+          cargo about --version   # assert the install actually landed a binary
+          cargo about generate about.hbs -o artifacts/THIRD-PARTY-LICENSES
+      - name: Generate sha256sums.txt
+        # OPTIONAL / back-compat, on a removal path. GitHub stamps an immutable
+        # per-asset sha256 `digest` (releases API, June 2025), so the checksum is
+        # provided automatically. This sums file stays only while install.sh
+        # still verifies against it. MILESTONE: migrate install.sh to the API
+        # digest, then drop this step. Glob whatever was actually built so a
+        # partial release still matches.
+        run: |
+          cd artifacts
+          sha256sum exportsnap-* > sha256sums.txt
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A release script normally creates the release (with the full notes)
+        # moments after the tag push; fall back to a bare release so a
+        # hand-pushed tag still gets its binaries. Never generate notes here --
+        # the script owns them. --clobber keeps re-runs idempotent.
+        run: |
+          cd artifacts
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --notes "" --verify-tag
+          gh release upload "${GITHUB_REF_NAME}" exportsnap-* THIRD-PARTY-LICENSES sha256sums.txt --clobber --repo "${GITHUB_REPOSITORY}"
