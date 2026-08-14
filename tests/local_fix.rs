@@ -1506,6 +1506,30 @@ fn a_dimension_past_four_thousand_pixels_reaches_the_written_exif_tag_on_either_
     assert_eq!(wide_tags.get("Validate").map(String::as_str), Some("OK"), "{wide_tags:#?}");
     assert_eq!(wide_tags.get("ExifImageWidth").map(String::as_str), Some(&*LONG.to_string()), "{wide_tags:#?}");
     assert_eq!(wide_tags.get("ExifImageHeight").map(String::as_str), Some(&*SHORT.to_string()), "{wide_tags:#?}");
+    // The four remaining Exif 2.32 mandatory tags. `FlashpixVersion` reads back off the plain map;
+    // the resolution trio needs a group-qualified read instead, because the source's JFIF block
+    // carries its own `XResolution`/`YResolution`/`ResolutionUnit` and the map above collapses
+    // both groups onto one key, so an unqualified read cannot tell the two apart. Pinned by value
+    // rather than through `Validate`: exiftool 13.x stopped flagging their absence, so only a
+    // direct read catches a regression on a box running 13.x (the CI runner's 12.76 still flags
+    // it via `Validate`).
+    assert_eq!(wide_tags.get("FlashpixVersion").map(String::as_str), Some("0100"), "{wide_tags:#?}");
+    let grouped_of = |source: &Path| {
+        let item = plan.items.iter().find(|item| item.media.main == source).expect("the fixture must reach the plan");
+        let output = Command::new("exiftool")
+            .args(["-s", "-G0:1", "-XResolution", "-YResolution", "-ResolutionUnit"])
+            .arg(&item.output)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let wide_grouped = grouped_of(&wide_source);
+    assert!(wide_grouped.lines().any(|l| l.contains("[EXIF:IFD0]") && l.contains("XResolution") && l.ends_with("72")), "{wide_grouped}");
+    assert!(wide_grouped.lines().any(|l| l.contains("[EXIF:IFD0]") && l.contains("YResolution") && l.ends_with("72")), "{wide_grouped}");
+    assert!(
+        wide_grouped.lines().any(|l| l.contains("[EXIF:IFD0]") && l.contains("ResolutionUnit") && l.ends_with("inches")),
+        "{wide_grouped}"
+    );
 
     let tall_tags = tags_of(&tall_source);
     assert_eq!(tall_tags.get("Validate").map(String::as_str), Some("OK"), "{tall_tags:#?}");

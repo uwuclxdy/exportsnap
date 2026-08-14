@@ -143,6 +143,11 @@ const COLOR_SPACE_SRGB: u16 = 1;
 
 /// `YCbCrPositioning` 1 is "centered", the value baseline JPEG chroma subsampling implies.
 const YCBCR_POSITIONING_CENTERED: u16 = 1;
+/// The display default: a repaired memory has no physical size, so the resolution pair carries the
+/// value every screen assumes rather than a measured one.
+const RESOLUTION_DPI: u32 = 72;
+const RESOLUTION_UNIT_INCHES: u16 = 2;
+const FLASHPIX_VERSION: [u8; 4] = *b"0100";
 
 /// GPS tag version 2.3.0.0, the version the coordinate tags below are defined by.
 const GPS_VERSION: [u8; 4] = [2, 3, 0, 0];
@@ -403,6 +408,14 @@ impl Jpeg {
         metadata.set_tag(ExifTag::ExifImageWidth(vec![stamp.width]));
         metadata.set_tag(ExifTag::ExifImageHeight(vec![stamp.height]));
         metadata.set_tag(ExifTag::YCbCrPositioning(vec![YCBCR_POSITIONING_CENTERED]));
+        // The rest of the Exif 2.32 mandatory set. exiftool 12.76's `-validate` names these four
+        // when they are absent and 13.x stopped naming them, so they are written rather than
+        // version-pinned: `FlashpixVersion` is the one value the spec defines, and the resolution
+        // pair is the display default with the unit the spec assumes.
+        metadata.set_tag(ExifTag::XResolution(vec![uR64 { nominator: RESOLUTION_DPI, denominator: 1 }]));
+        metadata.set_tag(ExifTag::YResolution(vec![uR64 { nominator: RESOLUTION_DPI, denominator: 1 }]));
+        metadata.set_tag(ExifTag::ResolutionUnit(vec![RESOLUTION_UNIT_INCHES]));
+        metadata.set_tag(ExifTag::FlashpixVersion(FLASHPIX_VERSION.to_vec()));
         metadata.set_tag(ExifTag::GPSVersionID(GPS_VERSION.to_vec()));
 
         let local = stamp.local.format(EXIF_DATETIME).to_string();
