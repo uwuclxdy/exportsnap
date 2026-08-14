@@ -398,10 +398,10 @@ impl Jpeg {
             Metadata::new()
         };
 
-        // The six EXIF-mandatory tags plus `GPSVersionID`. Measured: writing them takes
-        // `exiftool -validate` from six warnings to `Validate: OK` on an APP1 built from nothing,
-        // and they are facts about the image rather than guesses, so they are written on the
-        // read-modify-write path too.
+        // The first six EXIF-mandatory tags plus `GPSVersionID` below. They are facts about the
+        // image rather than guesses, so they are written on the read-modify-write path too.
+        // Together with the four below the whole set takes `exiftool -validate` to `Validate: OK`
+        // on an APP1 built from nothing.
         metadata.set_tag(ExifTag::ExifVersion(EXIF_VERSION.to_vec()));
         metadata.set_tag(ExifTag::ComponentsConfiguration(YCBCR_COMPONENTS.to_vec()));
         metadata.set_tag(ExifTag::ColorSpace(vec![COLOR_SPACE_SRGB]));
