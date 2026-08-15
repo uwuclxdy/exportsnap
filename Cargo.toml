@@ -3,7 +3,7 @@ name = "exportsnap"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "TUI and CLI that repairs and exports a Snapchat data dump"
+description = "TUI that repairs a Snapchat data export: real capture dates, merged captions, media filed by conversation"
 repository = "https://github.com/uwuclxdy/exportsnap"
 
 [lints.rust]
