@@ -424,34 +424,6 @@ fn screen_text(buffer: &Buffer) -> String {
     (0..buffer.area.height).map(|y| row(buffer, y)).collect::<Vec<_>>().join("\n")
 }
 
-/// The decision 79 density pin: every panel's content must reach within two rows of its bottom
-/// border. Walks the frame for panel top-left corners (`╭`), finds each panel's bottom border
-/// (`╰` in the same column), and requires a non-blank interior cell within the two rows above
-/// it — a panel whose last content row sits higher than that is dead space.
-///
-/// The interior scan stops at the panel's right border (`│`), so a neighbouring panel's cells on
-/// the same row cannot satisfy this panel's check; the progress panel's nested empty-state frame
-/// is content and passes off its own corners.
-fn assert_panels_hug(buffer: &Buffer, top: u16) {
-    for y in top..buffer.area.height {
-        for x in 0..buffer.area.width {
-            if buffer[(x, y)].symbol() != "╭" {
-                continue;
-            }
-            let bottom = (y + 1..buffer.area.height)
-                .find(|&by| buffer[(x, by)].symbol() == "╰")
-                .unwrap_or_else(|| panic!("the panel at ({x}, {y}) has no bottom border"));
-            let first = (bottom.saturating_sub(2)).max(y + 1);
-            let content = (first..bottom).any(|cy| {
-                (x.saturating_add(2)..buffer.area.width)
-                    .take_while(|&cx| buffer[(cx, cy)].symbol() != "│")
-                    .any(|cx| buffer[(cx, cy)].symbol() != " ")
-            });
-            assert!(content, "the panel at ({x}, {y}) has no content within two rows of its bottom border at row {bottom}");
-        }
-    }
-}
-
 /// An app on the memories tab with a real (tempdir) export tree behind it and a disk-probe
 /// environment handed in, so the form rows are deterministic.
 fn app_on_memories(dir: &TempDir) -> App {
@@ -514,11 +486,10 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     assert!(cell_run(buffer, 4).contains("40%"));
     assert!(cell_run(buffer, 5).contains("transcode"));
     assert!(cell_run(buffer, 6).contains("start run"));
-    // The empty state names the key that starts the run. The progress panel hugs the frame
-    // (decision 79), so the two copy rows sit right under the panel's top border instead of
-    // floating in a body-height panel.
-    assert!(cell_run(buffer, 3).contains("no run yet"), "{:?}", cell_run(buffer, 3));
-    assert!(cell_run(buffer, 4).contains("↵"), "{:?}", cell_run(buffer, 4));
+    // The empty state names the key that starts the run, centered in the full-height progress
+    // panel: 21 interior rows, a 4-row frame, 8 above and 8 below.
+    assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
+    assert!(cell_run(buffer, 12).contains("↵"), "{:?}", cell_run(buffer, 12));
     // The footer hint bar advertises the shell keys.
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));
 
@@ -559,17 +530,22 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
 }
 
 #[test]
-fn the_panels_hug_their_content_at_the_designed_sizes() {
-    // Decision 79: a panel sizes to the rows it renders. At both designed sizes the panels
-    // stack (the location column keeps the side-by-side floor at 116), and each must carry
-    // content to its bottom border: the form's last row is `start run`, the idle progress
-    // panel's is the empty state's action line. The fixed budgets used to leave a blank tail
-    // under the form and a body-height progress panel around the centered frame.
+fn the_progress_panel_fills_the_body_below_the_form_at_the_designed_sizes() {
+    // The fill contract: the form keeps its `Length` rows at the top and the progress panel
+    // takes the rest of the body, so its bottom border sits on the body's last row rather than
+    // closing under the empty-state frame the density pass hugged it to. At both designed sizes
+    // the panels stack (the location column keeps the side-by-side floor at 116).
     for (width, height) in [(80, 24), (110, 32)] {
         let mut app = app_on_fixed_source();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-        assert_panels_hug(terminal.backend().buffer(), 1);
+        let buffer = terminal.backend().buffer();
+        // The form opens on the body's first row and closes after its seven rows, top-aligned.
+        assert_eq!(buffer[(0, 1)].symbol(), "╭", "the form panel opens on the body's first row");
+        assert_eq!(buffer[(0, 7)].symbol(), "╰", "the form keeps its Length rows at the top");
+        // The progress panel opens right below the form and fills down to the body's last row.
+        assert_eq!(buffer[(0, 8)].symbol(), "╭", "the progress panel opens on the row below the form");
+        assert_eq!(buffer[(0, height - 2)].symbol(), "╰", "the progress panel's bottom border sits on the body's last row");
     }
 }
 
@@ -1193,12 +1169,12 @@ fn a_worker_that_panics_still_yields_a_panic_alert_and_no_stuck_spinner() {
     assert_eq!(alert.kind, AlertKind::Warning);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 
-    // No stuck spinner: the progress panel shows the empty state, not the plan phase. The
-    // panel hugs the frame (decision 79), so the hint is the panel's first interior row.
+    // No stuck spinner: the progress panel shows the empty state, not the plan phase. The frame
+    // is centered in the full-height panel, so the hint is its first interior row.
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    let progress = cell_run(buffer, 3);
+    let progress = cell_run(buffer, 11);
     assert!(progress.contains("no run yet"), "{progress}");
     assert!(!progress.contains('\u{280b}'), "{progress}");
 }
@@ -1263,11 +1239,11 @@ fn the_empty_state_action_line_names_a_key_that_actually_starts_the_run() {
     app.memories_mut().set_manifest_dir(state.path().to_path_buf());
 
     // The empty state says "press ↵ to start" — and with the caret on the first static row,
-    // enter really does start the run (there is no table yet to descend into). The progress
-    // panel hugs the frame (decision 79), so the action line is the panel's last interior row.
+    // enter really does start the run (there is no table yet to descend into). The frame is
+    // centered in the full-height panel, so the action line is its last interior row.
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    assert!(cell_run(terminal.backend().buffer(), 4).contains("press ↵ to start"), "{:?}", cell_run(terminal.backend().buffer(), 4));
+    assert!(cell_run(terminal.backend().buffer(), 12).contains("press ↵ to start"), "{:?}", cell_run(terminal.backend().buffer(), 12));
 
     press(&mut app, KeyCode::Enter);
     wait_for_alert(&mut app);

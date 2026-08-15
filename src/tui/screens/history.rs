@@ -629,66 +629,13 @@ pub fn render(frame: &mut Frame, palette: &Palette, history: &mut History, area:
         history.descended = false;
     }
 
-    // Both panes hug their content (decision 79): the picker is its conversation rows (or its
-    // house empty frame), the formats pane its toggles, chip, tooltip and counter slot. A long
-    // conversation list still fills the body and scrolls, since the hug caps at the area's
-    // height. The failed-load prose is the one state that keeps the body's height — it wraps
-    // over a row count the wrap does not expose, so [`picker_height`] answers `None` there.
     if side_by_side {
         let [left, right] = Layout::horizontal([Constraint::Length(PICKER_PANEL_WIDTH), Constraint::Fill(1)]).areas(area);
-        let picker = picker_height(history, false, left.width).map_or(left, |height| widgets::hug(left, height));
-        render_picker(frame, palette, history, picker, false);
-        render_formats(frame, palette, history, widgets::hug(right, formats_height(history, right.width)));
+        render_picker(frame, palette, history, left, false);
+        render_formats(frame, palette, history, right);
     } else {
-        let picker = picker_height(history, true, area.width).map_or(area, |height| widgets::hug(area, height));
-        render_picker(frame, palette, history, picker, true);
+        render_picker(frame, palette, history, area, true);
     }
-}
-
-/// The picker panel's content height when it hugs: the loaded list's rows or the house empty
-/// frame, plus the chip slot and counter in the picker-only arm. `None` is the failed-load
-/// state — its prose word-wraps over a row count the wrap does not expose, so that one state
-/// keeps the body's height.
-fn picker_height(history: &History, chip_in_pane: bool, panel_width: u16) -> Option<u16> {
-    let list = match &history.picker {
-        Picker::Unloaded => 0,
-        Picker::Failed(_) => return None,
-        Picker::Loaded { rows } if rows.is_empty() => EMPTY_FRAME_ROWS,
-        Picker::Loaded { rows } => u16::try_from(rows.len()).unwrap_or(u16::MAX),
-    };
-    let extra = if chip_in_pane {
-        // Mirrors render_picker's slot reservation: it reserves the wrapped reason whenever the
-        // chip is disabled, so the pane's rows do not jump when the caret reaches the chip.
-        2 + if history.start_enabled() { 0 } else { tooltip_rows(history, interior_width(panel_width)) }
-    } else {
-        0
-    };
-    Some(list.saturating_add(extra).saturating_add(widgets::BORDER_ROWS))
-}
-
-/// The formats pane's content height: the four toggles, the export chip, the reserved counter
-/// slot, and the disabled chip's wrapped tooltip while it shows. The pane hugs this (decision
-/// 79) and the rows clip one at a time below it.
-fn formats_height(history: &History, panel_width: u16) -> u16 {
-    let tooltip = if history.descended && history.formats_focus == FormatsRow::Export.index() {
-        tooltip_rows(history, interior_width(panel_width))
-    } else {
-        0
-    };
-    u16::try_from(FormatsRow::ALL.len() + 1).unwrap_or(u16::MAX).saturating_add(tooltip).saturating_add(widgets::BORDER_ROWS)
-}
-
-/// A panel's interior cells for `panel_width` — the width both the hug and the render build
-/// their rows against.
-fn interior_width(panel_width: u16) -> usize {
-    usize::from(panel_width).saturating_sub(usize::from(widgets::CHROME_COLUMNS))
-}
-
-/// The disabled chip's wrapped tooltip rows at `interior` — the same wrap [`wrapped_tooltip`]
-/// renders, so the hug and the render cannot disagree.
-fn tooltip_rows(history: &History, interior: usize) -> u16 {
-    let Some(reason) = history.chip_reason() else { return 0 };
-    u16::try_from(wrap_words(reason, interior.saturating_sub(TOOLTIP_LEADER)).len()).unwrap_or(u16::MAX)
 }
 
 /// Draws the conversation picker into `area`. `chip_in_pane` is the picker-only fallback: the
@@ -892,8 +839,8 @@ fn chip_label(history: &History) -> String {
     if selected == 0 { "export".to_owned() } else { format!("export {}", grouped(selected)) }
 }
 
-/// The tooltip leader's cells: two-space pad, then the corner and its space — the width both
-/// the hug's row count ([`tooltip_rows`]) and the render's wrap subtract.
+/// The tooltip leader's cells: two-space pad, then the corner and its space — the width the
+/// render's wrap subtracts.
 const TOOLTIP_LEADER: usize = 4;
 
 /// The tooltip's word-wrapped form. The shared `tooltip` widget renders one line, and the pane's
@@ -938,8 +885,7 @@ fn wrap_words(text: &str, budget: usize) -> Vec<String> {
     lines
 }
 
-/// The house empty state's frame rows: the hint line and the frame's own two borders. The
-/// picker hugs to this when it loads no conversations (decision 79).
+/// The house empty state's frame rows: the hint line and the frame's own two borders.
 const EMPTY_FRAME_ROWS: u16 = 3;
 
 /// The house empty state for a picker that loaded nothing, minus the action line: an empty

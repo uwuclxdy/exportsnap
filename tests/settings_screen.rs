@@ -109,13 +109,11 @@ fn panel_row(prefix: &str, fill: usize) -> String {
     format!("│ {} │", padded(prefix, fill))
 }
 
-/// The decision 79 density pin: every panel's content must reach within two rows of its bottom
-/// border. Walks the frame for panel top-left corners (`╭`), finds each panel's bottom border
-/// (`╰` in the same column), and requires a non-blank interior cell within the two rows above
-/// it — a panel whose last content row sits higher than that is dead space.
-///
-/// The interior scan stops at the panel's right border (`│`).
-fn assert_panels_hug(buffer: &Buffer, top: u16) {
+/// The fill pin: the settings panel spans its full allotted body height — its bottom border
+/// closes on the body's last row, not capped under its five rows. Walks the frame for panel
+/// top-left corners (`╭`), finds each panel's bottom border (`╰` in the same column), and
+/// requires it to close at the body's bottom row (`height - 2`, one above the footer).
+fn assert_panel_fills(buffer: &Buffer, top: u16) {
     for y in top..buffer.area.height {
         for x in 0..buffer.area.width {
             if buffer[(x, y)].symbol() != "╭" {
@@ -124,26 +122,25 @@ fn assert_panels_hug(buffer: &Buffer, top: u16) {
             let bottom = (y + 1..buffer.area.height)
                 .find(|&by| buffer[(x, by)].symbol() == "╰")
                 .unwrap_or_else(|| panic!("the panel at ({x}, {y}) has no bottom border"));
-            let first = (bottom.saturating_sub(2)).max(y + 1);
-            let content = (first..bottom).any(|cy| {
-                (x.saturating_add(2)..buffer.area.width)
-                    .take_while(|&cx| buffer[(cx, cy)].symbol() != "│")
-                    .any(|cx| buffer[(cx, cy)].symbol() != " ")
-            });
-            assert!(content, "the panel at ({x}, {y}) has no content within two rows of its bottom border at row {bottom}");
+            assert_eq!(
+                bottom,
+                buffer.area.height - 2,
+                "the panel at ({x}, {y}) closes at row {bottom}, not on the body's last row {}",
+                buffer.area.height - 2
+            );
         }
     }
 }
 
 #[test]
-fn the_panel_hugs_its_form_at_the_designed_sizes() {
-    // Decision 79: a panel sizes to the rows it renders. At both designed sizes the single
-    // settings panel closes right under the overlay row — the fixed budgets used to leave the
-    // five-row form hanging near the top of a body-height panel.
+fn the_panel_fills_the_body_at_the_designed_sizes() {
+    // The fill contract: the single settings panel spans its allotted body height rather than
+    // sizing to its five rows. At both designed sizes its bottom border must close on the body's
+    // last row — the density pass used to cap it right under the overlay row.
     let mut app = on_settings();
     for (width, height) in [(80, 24), (110, 32)] {
         let terminal = draw(&mut app, width, height);
-        assert_panels_hug(terminal.backend().buffer(), 1);
+        assert_panel_fills(terminal.backend().buffer(), 1);
     }
 }
 
@@ -293,16 +290,12 @@ fn the_form_stays_blank_below_the_interior_budget() {
     let dir = TempDir::new().unwrap();
     let settings = settings_in(&dir);
     // 52 wide: the interior is 48 cells, under the 53-cell widest-row budget, so the
-    // whole-or-not-at-all gate keeps every row blank rather than clipping a value. The panel
-    // hugs its five rows (decision 79), so the blank interior is exactly five rows and the
-    // bottom border closes right under them.
+    // whole-or-not-at-all gate keeps every row blank rather than clipping a value.
     let terminal = draw_screen(&settings, 52, 8);
     let buffer = terminal.backend().buffer();
-    for y in 1..6 {
+    for y in 1..7 {
         assert_eq!(row(buffer, y), format!("│{}│", padded("", 50)), "row {y}");
     }
-    assert_eq!(row(buffer, 6), format!("╰{}╯", "─".repeat(50)), "the bottom border closes under the rows, not under a blank tail");
-    assert_eq!(row(buffer, 7), " ".repeat(52), "nothing hangs below the hugged panel");
 }
 
 // ---- the write-back contract ----

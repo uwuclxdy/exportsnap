@@ -573,45 +573,22 @@ pub fn render(frame: &mut Frame, palette: &Palette, memories: &mut Memories, are
 
     // The overview's layout ladder: side by side, stacked, then form-only as the last resort for
     // a frame too small for either. The table scrolls, so the stacked arm only needs its floor
-    // rows rather than the whole table's height. Both panels hug their content (decision 79):
-    // the form is its rows and the progress panel is its table, spinner row or framed empty
-    // state, so neither carries a blank tail.
+    // rows rather than the whole table's height.
     let side_by_side = usize::from(area.width) >= usize::from(form_panel_width) + usize::from(table_panel_width);
     let stacked =
         !side_by_side && usize::from(area.width) >= usize::from(form_panel_width) && area.height >= form_height + TABLE_FLOOR_ROWS;
 
-    let progress_height = progress_height(memories);
-
     if side_by_side {
         let [left, right] = Layout::horizontal([Constraint::Length(form_panel_width), Constraint::Fill(1)]).areas(area);
-        render_form(frame, palette, memories, widgets::hug(left, form_height));
-        render_progress(frame, palette, memories, widgets::hug(right, progress_height));
+        render_form(frame, palette, memories, left);
+        render_progress(frame, palette, memories, right);
     } else if stacked {
         let [top, bottom] = Layout::vertical([Constraint::Length(form_height), Constraint::Fill(1)]).areas(area);
         render_form(frame, palette, memories, top);
-        render_progress(frame, palette, memories, widgets::hug(bottom, progress_height));
+        render_progress(frame, palette, memories, bottom);
     } else {
-        render_form(frame, palette, memories, widgets::hug(area, form_height));
+        render_form(frame, palette, memories, area);
     }
-}
-
-/// The progress panel's content height (decision 79: the panel hugs what it holds): the framed
-/// empty state, the single planning row, or the bar + header + one row per planned item, plus
-/// the focused row's tooltip row while it shows. Capped at the body by [`widgets::hug`], after
-/// which the list scrolls.
-fn progress_height(memories: &Memories) -> u16 {
-    let content = match &memories.run {
-        Run::Idle | Run::Active { view: None, worker: Worker::Finished } => widgets::EMPTY_STATE_ROWS,
-        Run::Active { view: None, worker: Worker::Working } => 1,
-        Run::Active { view: Some(view), .. } => {
-            let tooltip = usize::from(
-                memories.table.descended
-                    && memories.table.list.selected().is_some_and(|index| view.rows.get(index).is_some_and(|row| row.place_name.is_some())),
-            );
-            2 + u16::try_from(view.rows.len() + tooltip).unwrap_or(u16::MAX)
-        }
-    };
-    content.saturating_add(widgets::BORDER_ROWS)
 }
 
 fn render_form(frame: &mut Frame, palette: &Palette, memories: &Memories, area: Rect) {

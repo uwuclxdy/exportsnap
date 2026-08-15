@@ -432,11 +432,8 @@ fn the_footer_alert_replaces_the_hint_bar_in_place_while_armed() {
     let palette = Palette::new(Tier::Full);
 
     assert_eq!(row(buffer, 19), " ! press q again to quit                ");
-    // Still exactly one footer row. The overview panels hug their content now (decision 79), so
-    // the last panel's bottom border closes at row 12 and the body below it stays blank — the
-    // alert owns the footer row alone, never a stacked second one.
-    assert!(row(buffer, 12).starts_with('╰'));
-    assert_eq!(row(buffer, 18), " ".repeat(40), "nothing renders between the hugged panels and the footer");
+    // Still exactly one footer row: the panel's bottom border sits directly above it.
+    assert!(row(buffer, 18).starts_with('╰'));
 
     assert_eq!(buffer[(1, 19)].symbol(), "!");
     assert_eq!(buffer[(1, 19)].style().fg, Some(palette.warning));

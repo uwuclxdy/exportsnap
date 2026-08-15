@@ -388,27 +388,25 @@ fn a_source_dir_with_no_delivery_says_so_in_a_framed_empty_state() {
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    // The summary panel hugs the frame (decision 79), so the frame IS the panel's interior —
-    // no blank rows above or below it.
+    // 16 interior rows, a 4-row frame: 6 above and 6 below.
     assert_eq!(
-        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + offset).trim().to_owned()).collect::<Vec<_>>(),
+        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect::<Vec<_>>(),
         ["╭─────────────────────────╮", "│   no export found       │", "│   pass --source=<dir>   │", "╰─────────────────────────╯",]
     );
     // The frame carries no action line with a hotkey in it, because no key is bound yet.
-    assert_eq!(cell_run(buffer, LEFT, FIRST_ROW).trim_start().chars().next(), Some('╭'));
+    assert_eq!(cell_run(buffer, LEFT, FIRST_ROW), "");
 }
 
 #[test]
 fn the_empty_state_frame_sits_centred_in_its_panel() {
     // Its 27 cells inside a 46-cell interior leave 19 to split, so the two pads differ by one —
     // which side takes the extra is ratatui's remainder rule, not a choice this screen makes.
-    // The vertical centering is trivial now: the panel hugs the frame (decision 79), so the
-    // frame fills the interior top to bottom — the horizontal split is the centering that
-    // survives.
+    // Vertically it centers in the full-height panel: 16 interior rows, a 4-row frame, 6 above
+    // and 6 below.
     let terminal = draw(Overview::unloaded(), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    let framed = cell_run(buffer, LEFT, FIRST_ROW);
+    let framed = cell_run(buffer, LEFT, FIRST_ROW + 6);
     let left_pad = framed.chars().take_while(|c| *c == ' ').count();
     let right_pad = LEFT.len() - framed.chars().count();
 
@@ -426,7 +424,7 @@ fn a_source_dir_that_is_not_there_says_not_found_rather_than_unreadable() {
     let buffer = terminal.backend().buffer();
 
     assert_eq!(
-        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + offset).trim().to_owned()).collect::<Vec<_>>(),
+        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect::<Vec<_>>(),
         ["╭──────────────────────────╮", "│   source dir not found   │", "│   check --source=<dir>   │", "╰──────────────────────────╯",]
     );
 }
@@ -450,7 +448,7 @@ fn a_source_dir_that_exists_and_cannot_be_listed_still_says_unreadable() {
 
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let rendered: Vec<String> =
-        (0..4).map(|offset| cell_run(terminal.backend().buffer(), LEFT, FIRST_ROW + offset).trim().to_owned()).collect();
+        (0..4).map(|offset| cell_run(terminal.backend().buffer(), LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect();
 
     // Restore before asserting, so a failure does not leave an unlistable dir behind for the rerun.
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
@@ -477,7 +475,7 @@ fn several_deliveries_are_counted_rather_than_guessed_between() {
     let buffer = terminal.backend().buffer();
 
     assert_eq!(
-        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + offset).trim().to_owned()).collect::<Vec<_>>(),
+        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect::<Vec<_>>(),
         [
             "╭───────────────────────────╮",
             "│   3 exports found here    │",
@@ -493,7 +491,7 @@ fn an_app_that_never_loaded_anything_draws_the_no_export_state() {
     let terminal = draw(Overview::unloaded(), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(cell_run(buffer, LEFT, FIRST_ROW + 1).trim(), "│   no export found       │");
+    assert_eq!(cell_run(buffer, LEFT, FIRST_ROW + 7).trim(), "│   no export found       │");
     assert_eq!(panel_rows(buffer, RIGHT, 4), ["ffmpeg     [ missing ]", "vlc        [ missing ]", "disk free  unknown", "source     —",]);
 }
 
@@ -604,15 +602,11 @@ fn the_two_panel_borders_touch() {
     assert_eq!(buffer[(50, TOP_BORDER)].symbol(), "╭");
 }
 
-/// The decision 79 density pin: every panel's content must reach within two rows of its bottom
-/// border. Walks the frame for panel top-left corners (`╭`), finds each panel's bottom border
-/// (`╰` in the same column), and requires a non-blank interior cell within the two rows above
-/// it — a panel whose last content row sits higher than that is dead space.
-///
-/// The interior scan stops at the panel's right border (`│`), so a neighbouring panel's cells on
-/// the same row cannot satisfy this panel's check; a nested frame (the run screens' empty state)
-/// is content and passes off its own corners.
-fn assert_panels_hug(buffer: &Buffer, top: u16) {
+/// The fill pin: every panel spans its full allotted body height — its bottom border closes on
+/// the body's last row, not capped under its content. Walks the frame for panel top-left corners
+/// (`╭`), finds each panel's bottom border (`╰` in the same column), and requires it to close at
+/// the body's bottom row (`height - 2`, one above the footer).
+fn assert_panels_fill(buffer: &Buffer, top: u16) {
     for y in top..buffer.area.height {
         for x in 0..buffer.area.width {
             if buffer[(x, y)].symbol() != "╭" {
@@ -621,27 +615,25 @@ fn assert_panels_hug(buffer: &Buffer, top: u16) {
             let bottom = (y + 1..buffer.area.height)
                 .find(|&by| buffer[(x, by)].symbol() == "╰")
                 .unwrap_or_else(|| panic!("the panel at ({x}, {y}) has no bottom border"));
-            let first = (bottom.saturating_sub(2)).max(y + 1);
-            let content = (first..bottom).any(|cy| {
-                (x.saturating_add(2)..buffer.area.width)
-                    .take_while(|&cx| buffer[(cx, cy)].symbol() != "│")
-                    .any(|cx| buffer[(cx, cy)].symbol() != " ")
-            });
-            assert!(content, "the panel at ({x}, {y}) has no content within two rows of its bottom border at row {bottom}");
+            assert_eq!(
+                bottom,
+                buffer.area.height - 2,
+                "the panel at ({x}, {y}) closes at row {bottom}, not on the body's last row {}",
+                buffer.area.height - 2
+            );
         }
     }
 }
 
 #[test]
-fn the_panels_hug_their_content_at_the_designed_sizes() {
-    // Decision 79: a panel sizes to the rows it renders, not to a fixed budget. At both sizes
-    // the screen was designed for, each panel's content must reach its bottom border — the fixed
-    // budgets used to leave a blank tail under the summary's six rows and the environment's
-    // four.
-    let dir = export_tree("overview-hug");
+fn the_panels_fill_the_body_at_the_designed_sizes() {
+    // The fill contract: a panel spans its allotted body height rather than sizing to its rows.
+    // At both designed sizes the panels sit side by side, so each one's bottom border must close
+    // on the body's last row — the density pass used to cap both under their content.
+    let dir = export_tree("overview-fill");
     for (width, height) in [(80, 24), (110, 32)] {
         let terminal = draw(Overview::load_with(&dir, environment()), width, height);
-        assert_panels_hug(terminal.backend().buffer(), 1);
+        assert_panels_fill(terminal.backend().buffer(), 1);
     }
 }
 
@@ -828,10 +820,9 @@ fn row_clipping_begins_one_row_below_the_last_height_that_fits() {
 
     // The panel's bottom border holds its own row at every one of those heights — the banner
     // shrinks the panel area to end at `h - 2`, so the border must close there and the footer
-    // row below it must survive. This is the overdraw pin: an uncapped content height (the
-    // mutation class `widgets::hug`'s own `.min` exists to stop) renders a sixth interior row
-    // at `h - 2` and moves the border onto the footer row, and the interior read above cannot
-    // see that — it stops one row short of where the border used to be.
+    // row below it must survive. This pins the fill contract's lower edge: the panel spans the
+    // whole body rather than stopping under its rows, so its border closes at the body's last
+    // row and never overdraws the footer.
     // The corner cell at the panel's left column — the summary panel is anchored at the body's
     // left edge in every arm (side-by-side, stacked, and summary-only alike), so column 0 is
     // its border whichever layout the frame takes.

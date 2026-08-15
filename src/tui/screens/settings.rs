@@ -78,12 +78,6 @@ const fn cycle_cells() -> usize {
 /// `   · file` from reading as a fourth option.
 const TAG_GAP: usize = 3;
 
-/// The form panel's height: the five rows plus the panel's two borders — what the panel hugs to
-/// (decision 79) wherever the body offers it.
-fn form_height() -> u16 {
-    u16::try_from(FormRow::ALL.len() + usize::from(widgets::BORDER_ROWS)).unwrap_or(u16::MAX)
-}
-
 /// The form panel's interior cells at its widest row, derived per row rather than summed from
 /// the widest label, value and clause: no row carries all three at once, and the sum
 /// overestimates by two — which would blank the form at 57 columns. The ffmpeg path row
@@ -696,10 +690,6 @@ const DANGER_TOAST_TICKS: u32 = 75;
 
 /// Draws the settings form into `area` — the panel the shell hands this tab.
 pub fn render(frame: &mut Frame, palette: &Palette, settings: &Settings, area: Rect) {
-    // The panel hugs its five rows (decision 79): the form's own height, no fixed budget, so the
-    // blank tail that used to hang under the last row is gone. Below it the form scrolls with
-    // the focus exactly as it did when the compact banner squeezed the body.
-    let area = widgets::hug(area, form_height());
     let block = panel(palette, "settings", PanelStyle { first: true, focused: true });
     let inner = block.inner(area);
     frame.render_widget(block, area);
