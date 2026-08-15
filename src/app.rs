@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, ModifierKeyCode, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::execute;
 
 use crate::config::Config;
 use crate::export::chat_fix::OverlayMode;
@@ -26,6 +30,15 @@ use crate::tui::theme::{Palette, Tier};
 /// which is also the rate the run's manifest statuses are polled at. `pub(crate)` so the
 /// settings screen's toast-lifetime coupling test can hold the 80 ms side of its ratio.
 pub(crate) const TICK: Duration = Duration::from_millis(80);
+
+/// The kitty keyboard protocol flags the jump-key overlay probe pushes before the event loop.
+/// `DISAMBIGUATE_ESCAPE_CODES` is what makes a bare `⌥` arrive as a `KeyCode::Modifier` event at
+/// all, and `REPORT_EVENT_TYPES` is what reports its release — without the release the overlay
+/// would latch on and never clear (cloudy-tui: Tab bar → Jump-key overlay, "overlay support is
+/// best-effort"). Deliberately NOT `REPORT_ALTERNATE_KEYS`, which would retarget the `ctrl+shift+c`
+/// copy-chord guard in [`App::handle_key`].
+const KITTY_KEYBOARD_FLAGS: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES.union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES);
 
 /// The six top-level screens (design.md: TUI screen map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +101,22 @@ impl Tab {
             9 => Self::ALL.last().copied(),
             1..=8 => Self::ALL.get(digit as usize - 1).copied(),
             _ => None,
+        }
+    }
+
+    /// The `⌥<digit>` that jumps here, for the overlay index (cloudy-tui: Tab bar → Jump-key
+    /// overlay). The first eight tabs are positional `1`–`8`; past nine tabs the last carries
+    /// `9` and the ones between render bare. With six tabs every tab carries its positional
+    /// digit, `settings` included, so none returns `None`.
+    #[must_use]
+    pub const fn jump_index(self) -> Option<u8> {
+        let index = self.index();
+        if index < 8 {
+            Some(index as u8 + 1)
+        } else if index + 1 == Self::ALL.len() {
+            Some(9)
+        } else {
+            None
         }
     }
 }
@@ -153,6 +182,10 @@ impl RunDefaults {
 pub struct App {
     palette: Palette,
     active: Tab,
+    /// Whether a bare `⌥` is held right now, for the jump-key overlay. Driven by the
+    /// `KeyCode::Modifier` press/release events the kitty keyboard protocol reports; absent
+    /// those (an unsupported terminal) it never leaves `false` and the overlay never renders.
+    alt_held: bool,
     quit_armed: bool,
     running: bool,
     overview: Overview,
@@ -179,6 +212,7 @@ impl App {
         Self {
             palette: Palette::new(tier),
             active: Tab::Overview,
+            alt_held: false,
             quit_armed: false,
             running: true,
             overview: Overview::unloaded(),
@@ -453,6 +487,14 @@ impl App {
         self.running
     }
 
+    /// Whether the jump-key overlay renders this frame: a bare `⌥` is held and the stack reported
+    /// the hold. Pure state — the overlay is the shell's to draw, this is the one answer both the
+    /// header and its tests read.
+    #[must_use]
+    pub const fn alt_held(&self) -> bool {
+        self.alt_held
+    }
+
     /// Draws, waits for an event, applies it, ticks, repeats.
     ///
     /// While ANY screen's run is live — or while the settings toast is — the wait is capped at
@@ -467,6 +509,21 @@ impl App {
     ///
     /// Returns the backend's error if drawing to the terminal or reading an event fails.
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        // Probe the kitty keyboard protocol before the loop (best-effort): a bare `⌥` hold only
+        // reaches us when the terminal reports modifier-key events AND this driver asks for
+        // release events, so push both flags and pop them after. A terminal that ignores the push
+        // never reports the hold, `alt_held` stays `false`, and the overlay simply never renders;
+        // `⌥<digit>` still jumps either way, since that chord also arrives via the legacy escape
+        // prefix. The push and pop are ignored-on-error: an unsupported terminal (Windows, a
+        // legacy emulator) is not a reason to refuse to run.
+        let _ = execute!(std::io::stdout(), PushKeyboardEnhancementFlags(KITTY_KEYBOARD_FLAGS));
+        let outcome = self.run_loop(terminal);
+        // Popped on every exit path, so the flags never outlive the terminal takeover.
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        outcome
+    }
+
+    fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while self.running {
             {
                 let app = &mut *self;
@@ -502,12 +559,27 @@ impl App {
     /// Applies one terminal event. Resizes need no state change — the next draw reads the new
     /// size straight off the frame.
     pub fn handle_event(&mut self, event: &Event) {
-        // crossterm reports Press *and* Release on Windows, so a handler that ignores `kind`
-        // fires every binding twice there.
-        if let Event::Key(key) = event
-            && key.kind == KeyEventKind::Press
-        {
-            self.handle_key(*key);
+        if let Event::Key(key) = event {
+            // A bare `⌥` hold/release is modifier state, not an app key: it feeds the
+            // jump-key overlay. Handled here and only here, so it neither disarms the quit nor
+            // reaches a screen's key handler. Repeat counts as held. A release missed by a
+            // focus steal leaves the overlay up until the next press/release pair self-heals
+            // it; there is deliberately no `FocusLost` clearing, because crossterm emits that
+            // event only when focus reporting (CSI ? 1004 h) is enabled and this loop arms no
+            // such capability, so a `FocusLost` arm would be dead code reading as a working
+            // safety net.
+            if matches!(key.code, KeyCode::Modifier(ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt)) {
+                self.alt_held = key.kind != KeyEventKind::Release;
+                return;
+            }
+            // crossterm reports Press *and* Release on Windows, so the Release half must be
+            // ignored or every binding fires twice there. Repeat is forwarded: with the kitty
+            // protocol's REPORT_EVENT_TYPES pushed, an auto-repeated key arrives as Repeat
+            // rather than a fresh Press, so dropping it would leave holding ←/→/↑/↓ advancing
+            // a single step instead of repeating.
+            if key.kind != KeyEventKind::Release {
+                self.handle_key(*key);
+            }
         }
     }
 

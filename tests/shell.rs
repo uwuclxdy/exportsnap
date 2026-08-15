@@ -15,10 +15,14 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Span;
 
-/// ` exportsnap` (11 cells) + `  •  ` (5 cells) — where the first tab label starts.
+/// ` exportsnap` (11 cells) + `  •  ` (5 cells) — where the first tab starts: its `●` cue when
+/// active, its bare word when not.
 const FIRST_TAB_COLUMN: u16 = 16;
-/// `overview` (8 cells) + the 3-cell tab gap past [`FIRST_TAB_COLUMN`].
-const SECOND_TAB_COLUMN: u16 = FIRST_TAB_COLUMN + 8 + 3;
+/// The active first tab's word, two cells past [`FIRST_TAB_COLUMN`] (`●` plus its space).
+const ACTIVE_LABEL_COLUMN: u16 = FIRST_TAB_COLUMN + 2;
+/// The inactive second tab's word when the first tab is active: the active first tab is
+/// `● overview` (10 cells) and the gap is 3.
+const INACTIVE_SECOND_COLUMN: u16 = FIRST_TAB_COLUMN + 10 + 3;
 /// `╭` + the border-token dash the panel title carries — where ` OVERVIEW ` starts.
 const PANEL_TITLE_COLUMN: u16 = 2;
 
@@ -49,10 +53,19 @@ fn header_row(app: &mut App, width: u16) -> String {
 /// suppression-ladder widths below stay pinned to literals when the crate version moves.
 /// `v9.9.9 ` is the same 7 cells the crate's own version currently occupies.
 fn header_only(active: Tab, width: u16) -> String {
+    header_only_held(active, width, false)
+}
+
+/// [`header_only`] with the jump-key overlay on (`⌥` held).
+fn header_only_alt(active: Tab, width: u16) -> String {
+    header_only_held(active, width, true)
+}
+
+fn header_only_held(active: Tab, width: u16, alt_held: bool) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
     terminal
         .draw(|frame| {
-            frame.render_widget(header::render(&Palette::new(Tier::Full), active, "9.9.9", width), frame.area());
+            frame.render_widget(header::render(&Palette::new(Tier::Full), active, "9.9.9", width, alt_held), frame.area());
         })
         .unwrap();
     row(terminal.backend().buffer(), 0)
@@ -147,7 +160,7 @@ fn renders_header_body_panel_and_hint_bar() {
     assert_eq!(
         grid(terminal.backend().buffer()),
         [
-            " exportsnap  •  ‹   settings                        ",
+            " exportsnap  •  ‹   ● settings                      ",
             " ! terminal too small · enlarge for full layout     ",
             "╭─ SETTINGS ───────────────────────────────────────╮",
             "│                                                  │",
@@ -164,8 +177,8 @@ fn header_renders_the_brand_all_six_tab_labels_and_the_version() {
     assert_eq!(
         header_row(&mut App::new(Tier::Full), 100),
         format!(
-            " exportsnap  •  overview   memories   chat media   history   account   settings\
-              {:>21}",
+            " exportsnap  •  ● overview   memories   chat media   history   account   settings\
+              {:>19}",
             format!("v{} ", env!("CARGO_PKG_VERSION"))
         )
     );
@@ -177,12 +190,18 @@ fn active_tab_label_is_accent_bold_underlined_and_inactive_is_dim() {
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
-    let active = buffer[(FIRST_TAB_COLUMN, 0)].style();
+    // The active tab is `● overview`: the marker is accent + bold and the word adds the underline.
+    let marker = buffer[(FIRST_TAB_COLUMN, 0)].style();
+    assert_eq!(marker.fg, Some(palette.accent));
+    assert!(marker.add_modifier.contains(Modifier::BOLD));
+    assert!(!marker.add_modifier.contains(Modifier::UNDERLINED));
+
+    let active = buffer[(ACTIVE_LABEL_COLUMN, 0)].style();
     assert_eq!(active.fg, Some(palette.accent));
     assert!(active.add_modifier.contains(Modifier::BOLD));
     assert!(active.add_modifier.contains(Modifier::UNDERLINED));
 
-    let inactive = buffer[(SECOND_TAB_COLUMN, 0)].style();
+    let inactive = buffer[(INACTIVE_SECOND_COLUMN, 0)].style();
     assert_eq!(inactive.fg, Some(palette.text_dim));
     assert!(!inactive.add_modifier.contains(Modifier::BOLD));
     assert!(!inactive.add_modifier.contains(Modifier::UNDERLINED));
@@ -190,11 +209,14 @@ fn active_tab_label_is_accent_bold_underlined_and_inactive_is_dim() {
 
 #[test]
 fn the_underline_moves_with_the_active_tab() {
+    // Overview is now inactive (bare word, 8 cells), so the active memories tab's `●` starts
+    // 3 past it and its underlined word two cells after that.
     let terminal = draw(&mut on_tab(Tab::Memories), 100, 20);
     let buffer = terminal.backend().buffer();
 
     assert!(!buffer[(FIRST_TAB_COLUMN, 0)].style().add_modifier.contains(Modifier::UNDERLINED));
-    assert!(buffer[(SECOND_TAB_COLUMN, 0)].style().add_modifier.contains(Modifier::UNDERLINED));
+    assert!(!buffer[(FIRST_TAB_COLUMN + 8 + 3, 0)].style().add_modifier.contains(Modifier::UNDERLINED));
+    assert!(buffer[(FIRST_TAB_COLUMN + 8 + 3 + 2, 0)].style().add_modifier.contains(Modifier::UNDERLINED));
 }
 
 #[test]
@@ -208,32 +230,38 @@ fn no_underline_row_sits_beneath_the_tab_bar() {
 
 #[test]
 fn version_keeps_a_three_cell_gap_at_its_narrowest_fitting_width() {
-    assert_eq!(header_only(Tab::Overview, 89), " exportsnap  •  overview   memories   chat media   history   account   settings   v9.9.9 ");
+    assert_eq!(
+        header_only(Tab::Overview, 91),
+        " exportsnap  •  ● overview   memories   chat media   history   account   settings   v9.9.9 "
+    );
 }
 
 #[test]
 fn version_drops_one_cell_before_it_would_crowd_the_last_tab() {
-    assert_eq!(header_only(Tab::Overview, 88), " exportsnap  •  overview   memories   chat media   history   account   settings         ");
+    assert_eq!(
+        header_only(Tab::Overview, 90),
+        " exportsnap  •  ● overview   memories   chat media   history   account   settings         "
+    );
 }
 
 #[test]
 fn tabs_survive_at_the_exact_width_the_full_strip_needs() {
     // Version long gone, every label still present: tabs never drop for the version's sake.
-    assert_eq!(header_only(Tab::Overview, 79), " exportsnap  •  overview   memories   chat media   history   account   settings");
+    assert_eq!(header_only(Tab::Overview, 81), " exportsnap  •  ● overview   memories   chat media   history   account   settings");
 }
 
 #[test]
 fn tabs_collapse_to_the_overflow_form_one_cell_narrower() {
-    assert_eq!(header_only(Tab::Overview, 78), " exportsnap  •      overview   ›                                              ");
+    assert_eq!(header_only(Tab::Overview, 80), format!("{}{}", " exportsnap  •      ● overview   ›", " ".repeat(46)));
 }
 
 #[test]
 fn overflow_markers_track_which_neighbours_exist() {
     // A middle tab has both neighbours; the first and last each lose one marker, and the
     // marker's cell stays blank so the active label holds its column.
-    assert_eq!(header_row(&mut on_tab(Tab::ChatMedia), 50), " exportsnap  •  ‹   chat media   ›                ");
-    assert_eq!(header_row(&mut on_tab(Tab::Overview), 50), " exportsnap  •      overview   ›                  ");
-    assert_eq!(header_row(&mut on_tab(Tab::Settings), 50), " exportsnap  •  ‹   settings                      ");
+    assert_eq!(header_row(&mut on_tab(Tab::ChatMedia), 50), " exportsnap  •  ‹   ● chat media   ›              ");
+    assert_eq!(header_row(&mut on_tab(Tab::Overview), 50), " exportsnap  •      ● overview   ›                ");
+    assert_eq!(header_row(&mut on_tab(Tab::Settings), 50), " exportsnap  •  ‹   ● settings                    ");
 }
 
 // ---- header: width floor (skill: Tab bar → Overflow; Patterns → Density) ----
@@ -241,9 +269,9 @@ fn overflow_markers_track_which_neighbours_exist() {
 #[test]
 fn the_header_floor_is_the_widest_tab_label_plus_its_overflow_chrome() {
     // The derivation, spelled out so a longer tab label reds here first: 16 lead + the `‹`
-    // marker + the 3-cell gap = 20 cells of chrome left of the active label, and `chat media`
-    // is the widest label at 10. A new label past 10 cells moves the floor, and with it every
-    // literal row below.
+    // marker + the 3-cell gap = 20 cells of chrome left of the active label, and the widest
+    // active label is `● chat media` at 12 (the `●` cue plus the 10-cell word). A new label past
+    // 10 cells moves the floor, and with it every literal row below.
     //
     // Measured in cells, the unit the floor is built from — a char count would name the wrong
     // label the first time one carries a wide character.
@@ -251,7 +279,7 @@ fn the_header_floor_is_the_widest_tab_label_plus_its_overflow_chrome() {
 
     assert_eq!(widest.label(), "chat media");
     assert_eq!(Span::raw(widest.label()).width(), 10);
-    assert_eq!(header::min_width(), 30);
+    assert_eq!(header::min_width(), 32);
 }
 
 #[test]
@@ -260,17 +288,17 @@ fn every_active_label_renders_whole_at_the_floor() {
     // active label, brand and leading marker all survive whole, for the widest label and the
     // narrowest alike.
     // Compared as one batch so a mutation shows every tab it broke, not just the first.
-    let rendered: Vec<String> = Tab::ALL.into_iter().map(|tab| header_row(&mut on_tab(tab), 30)).collect();
+    let rendered: Vec<String> = Tab::ALL.into_iter().map(|tab| header_row(&mut on_tab(tab), 32)).collect();
 
     assert_eq!(
         rendered,
         [
-            " exportsnap  •      overview  ",
-            " exportsnap  •  ‹   memories  ",
-            " exportsnap  •  ‹   chat media",
-            " exportsnap  •  ‹   history   ",
-            " exportsnap  •  ‹   account   ",
-            " exportsnap  •  ‹   settings  ",
+            " exportsnap  •      ● overview  ",
+            " exportsnap  •  ‹   ● memories  ",
+            " exportsnap  •  ‹   ● chat media",
+            " exportsnap  •  ‹   ● history   ",
+            " exportsnap  •  ‹   ● account   ",
+            " exportsnap  •  ‹   ● settings  ",
         ]
     );
 }
@@ -279,10 +307,10 @@ fn every_active_label_renders_whole_at_the_floor() {
 fn the_banner_takes_the_header_row_one_cell_below_the_floor() {
     // A clipped active label would name the wrong tab, so the row says the terminal is too
     // small instead. The body is untouched — the panel still owns row 1.
-    let terminal = draw(&mut on_tab(Tab::Settings), 29, 20);
+    let terminal = draw(&mut on_tab(Tab::Settings), 31, 20);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(row(buffer, 0), " ! terminal too small · enla…");
+    assert_eq!(row(buffer, 0), " ! terminal too small · enlarg…");
     assert!(row(buffer, 1).starts_with("╭─ SETTINGS "), "{:?}", row(buffer, 1));
 }
 
@@ -319,13 +347,13 @@ fn a_frame_under_both_floors_carries_exactly_one_banner() {
 
 #[test]
 fn the_height_banner_still_takes_the_body_at_the_width_floor() {
-    // One cell wider and the two floors stop overlapping: the header renders for real and the
+    // At the width floor the two floors stop overlapping: the header renders for real and the
     // compact banner goes back to the top of the body where the contract puts it.
-    let terminal = draw(&mut App::new(Tier::Full), 30, 13);
+    let terminal = draw(&mut App::new(Tier::Full), 32, 13);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(row(buffer, 0), " exportsnap  •      overview  ");
-    assert_eq!(row(buffer, 1), " ! terminal too small · enlar…");
+    assert_eq!(row(buffer, 0), " exportsnap  •      ● overview  ");
+    assert_eq!(row(buffer, 1), " ! terminal too small · enlarge…");
 }
 
 #[test]
@@ -336,6 +364,64 @@ fn overflow_markers_are_text_faint() {
 
     assert_eq!(buffer[(FIRST_TAB_COLUMN, 0)].symbol(), "‹");
     assert_eq!(buffer[(FIRST_TAB_COLUMN, 0)].style().fg, Some(palette.text_faint));
+}
+
+// ---- header: jump-key overlay (skill: Tab bar → Jump-key overlay) ----
+
+#[test]
+fn the_jump_index_overlay_renders_while_alt_is_held() {
+    // Every tab gains a bracketed index flush against its label, the active tab's `●` cue and
+    // underline intact.
+    assert_eq!(
+        header_only_alt(Tab::Overview, 109),
+        " exportsnap  •  ● [1]overview   [2]memories   [3]chat media   [4]history   [5]account   [6]settings   v9.9.9 "
+    );
+}
+
+#[test]
+fn the_overlay_index_is_brackets_dim_and_digit_accent_bold() {
+    let mut terminal = Terminal::new(TestBackend::new(109, 1)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(header::render(&Palette::new(Tier::Full), Tab::Overview, "9.9.9", 109, true), frame.area());
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let palette = Palette::new(Tier::Full);
+
+    // The active tab is `● [1]overview`: the `●` cue (2 cells) sits past the lead, then `[1]`.
+    assert_eq!(buffer[(FIRST_TAB_COLUMN + 2, 0)].symbol(), "[");
+    assert_eq!(buffer[(FIRST_TAB_COLUMN + 2, 0)].style().fg, Some(palette.text_dim));
+
+    assert_eq!(buffer[(FIRST_TAB_COLUMN + 3, 0)].symbol(), "1");
+    assert_eq!(buffer[(FIRST_TAB_COLUMN + 3, 0)].style().fg, Some(palette.accent));
+    assert!(buffer[(FIRST_TAB_COLUMN + 3, 0)].style().add_modifier.contains(Modifier::BOLD));
+
+    assert_eq!(buffer[(FIRST_TAB_COLUMN + 4, 0)].symbol(), "]");
+    assert_eq!(buffer[(FIRST_TAB_COLUMN + 4, 0)].style().fg, Some(palette.text_dim));
+}
+
+#[test]
+fn the_overlay_drops_before_the_version_when_the_row_runs_short() {
+    // The overlay strip alone needs 99 cells; at 91 the plain strip plus the version still fits,
+    // so holding `⌥` changes nothing here — the overlay is the first thing dropped, before the
+    // version and long before the overflow form.
+    assert_eq!(
+        header_only_alt(Tab::Overview, 91),
+        " exportsnap  •  ● overview   memories   chat media   history   account   settings   v9.9.9 "
+    );
+}
+
+#[test]
+fn the_overlay_drops_before_the_version_even_where_it_alone_would_fit() {
+    // At 99 cells the indexed strip alone fits exactly (lead 16 + the six `[N]`-prefixed labels
+    // 83), so a ladder that dropped the version to keep the overlay would return the indexed strip
+    // here. The overlay is the first thing dropped, so holding `⌥` renders the plain strip plus the
+    // version, byte-identical to no `⌥` held: a transient hint never triggers a layout collapse.
+    assert_eq!(
+        header_only_alt(Tab::Overview, 99),
+        format!("{}{:>18}", " exportsnap  •  ● overview   memories   chat media   history   account   settings", "v9.9.9 ")
+    );
 }
 
 // ---- body panel (skill: Panel) ----
@@ -544,7 +630,7 @@ fn the_same_header_renders_each_tier_in_that_tier_s_own_colors() {
         let buffer = terminal.backend().buffer();
 
         assert_eq!(buffer[(FIRST_TAB_COLUMN, 0)].style().fg, Some(accent), "{tier:?} active tab");
-        assert_eq!(buffer[(SECOND_TAB_COLUMN, 0)].style().fg, Some(text_dim), "{tier:?} inactive tab");
+        assert_eq!(buffer[(INACTIVE_SECOND_COLUMN, 0)].style().fg, Some(text_dim), "{tier:?} inactive tab");
     }
 }
 
@@ -635,7 +721,7 @@ fn the_header_never_leaves_a_hole_in_its_row() {
     // wrote there.
     for tab in Tab::ALL {
         for width in 0..=120u16 {
-            let line = header::render(&Palette::new(Tier::Full), tab, "9.9.9", width);
+            let line = header::render(&Palette::new(Tier::Full), tab, "9.9.9", width, false);
             assert!(line.width() >= width as usize, "{tab:?} at width {width}: line is {} cells", line.width());
         }
     }

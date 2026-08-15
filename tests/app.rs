@@ -7,7 +7,7 @@
 
 use exportsnap::app::{App, Tab};
 use exportsnap::tui::theme::Tier;
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
 
 fn app() -> App {
     App::new(Tier::Full)
@@ -129,6 +129,14 @@ fn bare_digits_never_switch_tabs() {
     let mut app = app();
     press(&mut app, KeyCode::Char('4'));
     assert_eq!(app.active(), Tab::Overview);
+}
+
+#[test]
+fn every_tab_carries_its_jump_index() {
+    // Six tabs: positional `1`–`6`, none past the eighth, so no tab renders bare and `settings`
+    // is indexed by its positional digit even though `⌥9` also lands on it. The overlay reads this
+    // same mapping rather than a second spelling of it.
+    assert_eq!(Tab::ALL.map(Tab::jump_index), [Some(1), Some(2), Some(3), Some(4), Some(5), Some(6)]);
 }
 
 // ---- 2-step quit (skill: Keyboard grammar — `q` arms, never quits in one press) ----
@@ -307,6 +315,18 @@ fn key_release_events_are_ignored() {
 }
 
 #[test]
+fn a_repeat_key_switches_tabs_like_a_press() {
+    // With the kitty protocol's REPORT_EVENT_TYPES pushed, an auto-repeated key arrives as
+    // `KeyEventKind::Repeat` rather than as a fresh `Press`. Holding ←/→ must still cycle tabs
+    // (and ↑/↓ still scroll), so a repeat is forwarded like a press; only Release is dropped.
+    let mut app = app();
+    let mut repeat = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+    repeat.kind = KeyEventKind::Repeat;
+    app.handle_event(&Event::Key(repeat));
+    assert_eq!(app.active(), Tab::Memories);
+}
+
+#[test]
 fn a_resize_changes_no_state() {
     let mut app = app();
     press(&mut app, KeyCode::Char('q'));
@@ -314,4 +334,74 @@ fn a_resize_changes_no_state() {
     assert!(app.is_quit_armed(), "a resize is not a key press");
     assert_eq!(app.active(), Tab::Overview);
     assert!(app.is_running());
+}
+
+// ---- `⌥` hold tracking (skill: Tab bar → Jump-key overlay) ----
+
+fn alt_press(app: &mut App) {
+    app.handle_event(&Event::Key(KeyEvent::new(KeyCode::Modifier(ModifierKeyCode::LeftAlt), KeyModifiers::ALT)));
+}
+
+fn alt_release(app: &mut App) {
+    let mut release = KeyEvent::new(KeyCode::Modifier(ModifierKeyCode::LeftAlt), KeyModifiers::ALT);
+    release.kind = KeyEventKind::Release;
+    app.handle_event(&Event::Key(release));
+}
+
+#[test]
+fn alt_hold_is_tracked_until_release() {
+    let mut app = app();
+    assert!(!app.alt_held());
+    alt_press(&mut app);
+    assert!(app.alt_held());
+    alt_release(&mut app);
+    assert!(!app.alt_held());
+}
+
+#[test]
+fn both_alt_keys_track_the_hold() {
+    // Left and right alt are two distinct modifier keycodes; either must hold the overlay and its
+    // release must clear it.
+    for modifier in [ModifierKeyCode::LeftAlt, ModifierKeyCode::RightAlt] {
+        let mut app = app();
+        app.handle_event(&Event::Key(KeyEvent::new(KeyCode::Modifier(modifier), KeyModifiers::ALT)));
+        assert!(app.alt_held(), "{modifier:?} press holds");
+
+        let mut release = KeyEvent::new(KeyCode::Modifier(modifier), KeyModifiers::ALT);
+        release.kind = KeyEventKind::Release;
+        app.handle_event(&Event::Key(release));
+        assert!(!app.alt_held(), "{modifier:?} release clears");
+    }
+}
+
+#[test]
+fn a_bare_alt_press_is_not_an_app_key() {
+    // A modifier hold is state, not a key: it must neither disarm an armed quit nor reach the tab
+    // switcher.
+    let mut app = app();
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.is_quit_armed());
+
+    alt_press(&mut app);
+    assert!(app.is_quit_armed(), "a bare alt press must not disarm the quit");
+    assert_eq!(app.active(), Tab::Overview, "a bare alt press must not switch tabs");
+
+    alt_release(&mut app);
+    assert!(app.is_quit_armed(), "a bare alt release must not disarm the quit");
+}
+
+#[test]
+fn a_latched_hold_self_heals_on_the_next_press_release_pair() {
+    // A release can be missed if focus is stolen while `⌥` is held, leaving the overlay up. There
+    // is deliberately no `FocusLost` clearing (crossterm emits that event only when focus
+    // reporting is enabled, which this app never arms), so the latch persists until the next
+    // press/release pair — the press re-asserts the hold, the release clears it.
+    let mut app = app();
+    alt_press(&mut app);
+    assert!(app.alt_held());
+    // Simulate the missed release: the hold is still latched.
+    alt_press(&mut app);
+    assert!(app.alt_held());
+    alt_release(&mut app);
+    assert!(!app.alt_held());
 }

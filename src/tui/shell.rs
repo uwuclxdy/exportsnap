@@ -50,7 +50,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let header_fits = header_area.width >= header::min_width();
 
     if header_fits {
-        frame.render_widget(header::render(&palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width), header_area);
+        frame.render_widget(
+            header::render(&palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width, app.alt_held()),
+            header_area,
+        );
     } else {
         frame.render_widget(compact_banner(&palette, header_area.width), header_area);
     }
