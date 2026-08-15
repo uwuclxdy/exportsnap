@@ -1,0 +1,289 @@
+/* ============================================================
+   exportsnap — page layout
+   Built from the tokens only; no raw colors, sizes or durations.
+   ============================================================ */
+
+.wrap {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+  width: 100%;
+}
+
+main > section {
+  padding: var(--space-20) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+main > section:last-child { border-bottom: none; }
+
+.section-head { margin-bottom: var(--space-8); max-width: 640px; }
+.accent-eyebrow { color: var(--accent); margin-bottom: var(--space-2); }
+
+h1 {
+  font: 600 var(--text-3xl)/1.1 var(--font-sans);
+  letter-spacing: -0.03em;
+  color: var(--text);
+  margin-bottom: var(--space-4);
+}
+h2 {
+  font: 550 var(--text-2xl)/1.2 var(--font-sans);
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin-bottom: var(--space-3);
+}
+h3 {
+  font: 500 var(--text-lg)/1.4 var(--font-sans);
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin-bottom: var(--space-2);
+}
+
+.lede {
+  font-size: var(--text-md);
+  color: var(--text-muted);
+  max-width: 560px;
+  margin-bottom: var(--space-6);
+}
+.section-lede { font-size: var(--text-base); color: var(--text-dim); }
+
+p { color: var(--text-dim); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  overflow-x: auto;
+  margin: var(--space-3) 0;
+}
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre;
+}
+
+/* ---- hero ---- */
+.hero {
+  padding-top: var(--space-20);
+  padding-bottom: var(--space-16);
+  border-bottom: 1px solid var(--line-soft);
+}
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+.trust-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.trust-note {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  max-width: 560px;
+  margin-bottom: var(--space-12);
+}
+
+.cast { margin: 0; }
+.cast img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+figcaption {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  margin-top: var(--space-3);
+}
+
+/* ---- the fix table ---- */
+.table-wrap tbody td.fix { color: var(--text); }
+.table-wrap tbody td { vertical-align: top; }
+
+/* ---- feature grid ---- */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-8);
+}
+.feature-grid .card { padding: var(--space-5); }
+.feature-grid p { font-size: var(--text-sm); }
+.feature-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  margin-bottom: var(--space-3);
+}
+.feature-icon svg { width: 16px; height: 16px; }
+
+/* ---- steps ---- */
+.steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  max-width: 720px;
+}
+.steps li { display: flex; gap: var(--space-4); }
+/* A flex item defaults to `min-width: auto`, so it refuses to shrink below the widest
+   unbreakable thing inside it. That keeps the step's code block from ever engaging its
+   own scrollbar, and the whole page scrolls sideways on a phone instead. */
+.steps li > div { min-width: 0; }
+.steps p { font-size: var(--text-sm); }
+.step-n {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 450 var(--text-xs)/1 var(--font-mono);
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* ---- screenshots ---- */
+.shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: var(--space-6);
+}
+.shots figure { margin: 0; }
+.shots img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+/* ---- comparison ---- */
+.compare table { font-size: var(--text-sm); }
+.compare tbody td { color: var(--text-dim); }
+.compare tbody td.row-h {
+  color: var(--text-faint);
+  font: 450 11px/1.5 var(--font-sans);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.compare tbody td.yes { color: var(--text); }
+.compare tbody td.no { color: var(--text-faint); }
+.compare thead th:nth-child(2) { color: var(--accent); }
+.fineprint {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  margin-top: var(--space-4);
+  max-width: 720px;
+}
+
+/* ---- install ---- */
+.install-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+.install-grid .card { padding: var(--space-5); }
+/* An install command that scrolls out of sight reads as a shorter command than it is,
+   so these wrap instead. Every other code block keeps its single-line shape. */
+.install-grid pre { margin-bottom: 0; overflow-x: visible; }
+.install-grid pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.card-note { font-size: var(--text-sm); margin: var(--space-3) 0; }
+.asset-links { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+/* ---- faq ---- */
+.faq-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 760px;
+}
+.faq-list details {
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+}
+.faq-list summary {
+  font: 450 var(--text-base)/1.4 var(--font-sans);
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.faq-list summary::-webkit-details-marker { display: none; }
+.faq-list summary::before {
+  content: '+';
+  font: 400 var(--text-md)/1 var(--font-mono);
+  color: var(--accent);
+  width: 12px;
+  flex-shrink: 0;
+}
+.faq-list details[open] summary::before { content: '−'; }
+.faq-list details p {
+  font-size: var(--text-sm);
+  margin-top: var(--space-3);
+  padding-left: calc(12px + var(--space-3));
+}
+
+/* ---- footer ---- */
+footer {
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+  padding: var(--space-8) 0;
+}
+.footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.footer-note {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  margin-top: var(--space-2);
+  max-width: 420px;
+}
+.footer-links { display: flex; gap: var(--space-4); font-size: var(--text-sm); }
+
+/* ---- narrow ---- */
+@media (max-width: 720px) {
+  main > section { padding: var(--space-12) 0; }
+  .hero { padding-top: var(--space-12); }
+  h1 { font-size: var(--text-2xl); }
+  .shots { grid-template-columns: 1fr; }
+  /* `.table-wrap` clips by default so the border radius holds. On a phone that turns a
+     too-wide table into a silently cut one, so every table scrolls inside its own box
+     and the page body never does. */
+  .table-wrap { overflow-x: auto; }
+  /* A nowrap header is what makes the fix table wider than a phone in the first place. */
+  .table-wrap thead th { white-space: normal; }
+  .compare table { min-width: 640px; }
+}

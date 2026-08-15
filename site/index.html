@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>exportsnap — repair a snapchat data export offline</title>
+<meta name="description" content="a terminal app that gives a snapchat &quot;my data&quot; export its metadata back: real capture dates, merged captions, chat media filed by conversation, and readable chat history. free, open source, runs on your machine.">
+<link rel="canonical" href="https://exportsnap.uwuclxdy.dev/">
+<meta property="og:title" content="exportsnap">
+<meta property="og:description" content="repair a snapchat data export offline: real capture dates, merged captions, media filed by date and conversation.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://exportsnap.uwuclxdy.dev/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%231E1E2E'/%3E%3Cpath d='M4 5h8M4 8h8M4 11h5' stroke='%2343ABE5' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="components.css">
+<link rel="stylesheet" href="page.css">
+</head>
+<body>
+
+<canvas id="bg-dots" aria-hidden="true"></canvas>
+
+<nav class="navbar">
+  <div class="navbar-brand">
+    <div class="logo-name">exportsnap</div>
+    <div class="logo-version">v0.1.0</div>
+  </div>
+  <div class="navbar-nav" id="navbar-nav">
+    <a class="navbar-link active" href="#what">what it fixes</a>
+    <a class="navbar-link" href="#screens">screens</a>
+    <a class="navbar-link" href="#compare">compare</a>
+    <a class="navbar-link" href="#install">install</a>
+    <a class="navbar-link" href="#faq">faq</a>
+    <div class="navbar-ink" id="navbar-ink"></div>
+  </div>
+  <div class="navbar-actions">
+    <button class="btn btn-icon" id="theme-toggle" title="switch theme" aria-label="switch theme">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="8" cy="8" r="3.5"/>
+        <path d="M8 1v1.5M8 13.5V15M15 8h-1.5M2.5 8H1M12.9 3.1l-1 1M4.1 11.9l-1 1M12.9 12.9l-1-1M4.1 4.1l-1-1"/>
+      </svg>
+    </button>
+    <a class="btn btn-secondary btn-sm" href="https://github.com/uwuclxdy/exportsnap">github</a>
+  </div>
+</nav>
+
+<main>
+
+<!-- ============ hero ============ -->
+<section class="hero">
+  <div class="wrap">
+    <div class="label accent-eyebrow">snapchat &quot;my data&quot; export</div>
+    <h1>your export, with its metadata put back.</h1>
+    <p class="lede">snapchat hands you five zips of files stripped of their dates, their captions and any trace of where they belong.</p>
+
+    <div class="hero-actions">
+      <a class="btn btn-primary btn-lg" href="https://github.com/uwuclxdy/exportsnap/releases/latest">download 0.1.0</a>
+      <a class="btn btn-secondary btn-lg" href="#install">install with cargo</a>
+    </div>
+
+    <div class="trust-strip">
+      <span class="tag tag-success"><span class="tag-dot" style="background:var(--success)"></span>nothing leaves your machine</span>
+      <span class="tag tag-accent">open source</span>
+      <span class="tag tag-default">free, no account</span>
+      <span class="tag tag-data">linux · macos · windows</span>
+    </div>
+    <p class="trust-note">cloud upload is a planned opt-in feature and is not in this release. nothing leaves your machine until you turn it on and authorize a provider.</p>
+
+    <figure class="cast" data-reveal>
+      <img src="img/cast.gif" alt="exportsnap running in a terminal: the overview screen, then a memories run filling its progress table" width="1075" height="739" loading="lazy">
+      <figcaption>a real run against a demo export. no mockups anywhere on this page.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ what it fixes ============ -->
+<section id="what">
+  <div class="wrap">
+    <header class="section-head">
+      <div class="label accent-eyebrow">the problem</div>
+      <h2>what the export gets wrong</h2>
+      <p class="section-lede">every row below is something snapchat's own delivery leaves broken.</p>
+    </header>
+
+    <div class="table-wrap" data-reveal>
+      <table>
+        <thead>
+          <tr><th>what you get</th><th>what exportsnap writes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>every file stamped with the day you downloaded it</td><td class="fix">the day you took it, in exif and in the file's own timestamp</td></tr>
+          <tr><td>captions and stickers as separate transparent pngs</td><td class="fix">burned into the photo or video underneath</td></tr>
+          <tr><td>memories named by uuid in one flat folder</td><td class="fix"><code>2021/03/20210304_143005.jpg</code></td></tr>
+          <tr><td>chat media with no sender, no conversation, no date</td><td class="fix">filed per conversation, dated from the message</td></tr>
+          <tr><td>chat and snap history sitting in two json files</td><td class="fix">one transcript per conversation, in four formats</td></tr>
+          <tr><td>media spread over five zip parts</td><td class="fix">reconciled against the manifest, with the gaps counted</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="feature-grid">
+      <div class="card card-interactive" data-reveal="wipe">
+        <div class="feature-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="1.5" y="3.5" width="9" height="9"/><rect x="5.5" y="1.5" width="9" height="9"/>
+          </svg>
+        </div>
+        <h3>overlay merge</h3>
+        <p>captions and stickers composite back onto the photo or video, scaled to fit where the pair disagrees on size.</p>
+      </div>
+      <div class="card card-interactive" data-reveal="wipe">
+        <div class="feature-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="8" cy="8" r="6.5"/><path d="M8 4.5V8l2.5 1.5"/>
+          </svg>
+        </div>
+        <h3>real capture dates</h3>
+        <p>exif for photos, container times for video, plus the file's modification time. the manifest first, the file's own embedded stamp next, the filename day last.</p>
+      </div>
+      <div class="card card-interactive" data-reveal="wipe">
+        <div class="feature-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M8 14.5s5-4.2 5-8a5 5 0 00-10 0c0 3.8 5 8 5 8z"/><circle cx="8" cy="6.5" r="1.8"/>
+          </svg>
+        </div>
+        <h3>gps, where it exists</h3>
+        <p>the manifest's location field is a place name in every export seen so far. exportsnap shows it as text and refuses to invent a coordinate from it. real coordinates get written, with the timezone offset.</p>
+      </div>
+      <div class="card card-interactive" data-reveal="wipe">
+        <div class="feature-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M2 3.5h12v8H8l-3 2.5v-2.5H2z"/>
+          </svg>
+        </div>
+        <h3>chat media fixer</h3>
+        <p>joins the loose <code>chat_media</code> files to the messages that named them, then files each one under its conversation with the sender in its metadata.</p>
+      </div>
+      <div class="card card-interactive" data-reveal="wipe">
+        <div class="feature-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M5.5 7h5M5.5 10h5"/>
+          </svg>
+        </div>
+        <h3>history export</h3>
+        <p>chat and snaps merge into one timeline per conversation, written as html, json, text and csv. the html links each media file only where a run wrote it.</p>
+      </div>
+      <div class="card card-interactive" data-reveal="wipe">
+        <div class="feature-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M2 4.5h12v9H2z"/><path d="M2 4.5l1.5-2.5h9l1.5 2.5M8 7v4M6 9l2 2 2-2"/>
+          </svg>
+        </div>
+        <h3>multi-part zips</h3>
+        <p>five parts with the manifest in one and the media in three others is the normal shape. reconciling them is the point. entries with no media anywhere are counted rather than hidden.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ how it works ============ -->
+<section id="how">
+  <div class="wrap">
+    <header class="section-head">
+      <div class="label accent-eyebrow">the flow</div>
+      <h2>how it works</h2>
+    </header>
+
+    <ol class="steps" data-reveal>
+      <li>
+        <span class="step-n">1</span>
+        <div>
+          <h3>request your data</h3>
+          <p>accounts.snapchat.com, my data, tick memories and chat history. the email link is short-lived, so download the zips as soon as it lands.</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-n">2</span>
+        <div>
+          <h3>unzip the parts</h3>
+          <p>each part goes into a folder named after it. one loop does the whole set.</p>
+          <pre><code>for z in mydata~*.zip; do unzip -q "$z" -d "${z%.zip}"; done</code></pre>
+        </div>
+      </li>
+      <li>
+        <span class="step-n">3</span>
+        <div>
+          <h3>point exportsnap at the folder</h3>
+          <pre><code>exportsnap --source=~/Downloads/snapchat</code></pre>
+          <p>the overview screen reports what it found. move to the memories tab and press enter.</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-n">4</span>
+        <div>
+          <h3>done, resumable at any point</h3>
+          <p>every item's status lands in a sqlite manifest as the run goes. quit halfway and the next run re-verifies what landed, then picks up the rest.</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ screens ============ -->
+<section id="screens">
+  <div class="wrap">
+    <header class="section-head">
+      <div class="label accent-eyebrow">the interface</div>
+      <h2>six screens, keyboard only</h2>
+      <p class="section-lede">real captures from a real run, not renders.</p>
+    </header>
+
+    <div class="shots">
+      <figure data-reveal>
+        <img src="img/screen-overview.png" alt="the overview screen, showing export summary and environment panels" loading="lazy">
+        <figcaption>overview: what the export holds, what tools are on your path, how much disk is free.</figcaption>
+      </figure>
+      <figure data-reveal>
+        <img src="img/screen-memories-running.png" alt="the memories screen mid-run, with a per-item progress table and an overall bar" loading="lazy">
+        <figcaption>memories: a per-item table with live status, an overall bar, and the place name each entry carries.</figcaption>
+      </figure>
+      <figure data-reveal>
+        <img src="img/screen-memories-done.png" alt="the memories screen after a finished run, showing a full progress bar and a completion alert" loading="lazy">
+        <figcaption>the same run finished: every row done, the bar at 100%, and the outcome in the footer.</figcaption>
+      </figure>
+      <figure data-reveal>
+        <img src="img/screen-history.png" alt="the history screen, a conversation picker beside four format checkboxes" loading="lazy">
+        <figcaption>history: pick conversations, pick formats, export. no message text ever renders on screen.</figcaption>
+      </figure>
+      <figure data-reveal>
+        <img src="img/screen-account.png" alt="the account screen, a section list beside a detail pane of account statistics" loading="lazy">
+        <figcaption>account: five sections of what the export says about you, read-only.</figcaption>
+      </figure>
+      <figure data-reveal>
+        <img src="img/screen-settings.png" alt="the settings screen with five configuration rows" loading="lazy">
+        <figcaption>settings: each row states where its value came from, flag over file over detection over default.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============ compare ============ -->
+<section id="compare">
+  <div class="wrap">
+    <header class="section-head">
+      <div class="label accent-eyebrow">alternatives</div>
+      <h2>compared to the other two</h2>
+      <p class="section-lede">every claim below was read off the tool's own site or readme in august 2026. where a tool does something exportsnap does not, the row says so.</p>
+    </header>
+
+    <div class="table-wrap compare" data-reveal>
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>exportsnap</th>
+            <th>exportsnaps.com</th>
+            <th>aio downloader</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="row-h">price</td>
+            <td class="yes">free</td>
+            <td>free to 200 files, $14.99 one-time beyond</td>
+            <td class="yes">free</td>
+          </tr>
+          <tr>
+            <td class="row-h">license</td>
+            <td class="yes">mit or apache-2.0</td>
+            <td>closed</td>
+            <td>&quot;as-is for personal use&quot;</td>
+          </tr>
+          <tr>
+            <td class="row-h">runs as</td>
+            <td class="yes">one native binary, all three platforms</td>
+            <td>desktop app</td>
+            <td>desktop app; macos and linux builds are labelled alpha</td>
+          </tr>
+          <tr>
+            <td class="row-h">overlay merge</td>
+            <td class="yes">yes</td>
+            <td class="yes">yes</td>
+            <td class="yes">yes</td>
+          </tr>
+          <tr>
+            <td class="row-h">exif dates</td>
+            <td class="yes">yes</td>
+            <td class="yes">yes</td>
+            <td class="yes">yes</td>
+          </tr>
+          <tr>
+            <td class="row-h">gps</td>
+            <td class="yes">where the export carries coordinates</td>
+            <td class="yes">yes</td>
+            <td class="yes">yes</td>
+          </tr>
+          <tr>
+            <td class="row-h">chat media</td>
+            <td class="yes">yes, filed per conversation</td>
+            <td class="no">memories only</td>
+            <td class="yes">yes</td>
+          </tr>
+          <tr>
+            <td class="row-h">chat + snap history export</td>
+            <td class="yes">html, json, text, csv</td>
+            <td class="no">no</td>
+            <td class="no">no</td>
+          </tr>
+          <tr>
+            <td class="row-h">hevc to h.264</td>
+            <td class="yes">yes, with ffmpeg</td>
+            <td>not documented</td>
+            <td class="yes">yes, with vlc</td>
+          </tr>
+          <tr>
+            <td class="row-h">multi-part zips</td>
+            <td>yes, unzip them yourself first</td>
+            <td>not documented</td>
+            <td class="yes">yes, unzips them for you</td>
+          </tr>
+          <tr>
+            <td class="row-h">resume after a crash</td>
+            <td class="yes">per-item sqlite manifest</td>
+            <td class="yes">yes</td>
+            <td class="yes">yes</td>
+          </tr>
+          <tr>
+            <td class="row-h">upload to your cloud</td>
+            <td>planned, opt-in</td>
+            <td>paid add-on</td>
+            <td class="no">no</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fineprint">the aio downloader unzips the parts for you, which exportsnap does not. exportsnaps.com sells a cloud add-on that streams output to your own drive or dropbox. both are worth knowing before you pick.</p>
+  </div>
+</section>
+
+<!-- ============ install ============ -->
+<section id="install">
+  <div class="wrap">
+    <header class="section-head">
+      <div class="label accent-eyebrow">get it</div>
+      <h2>install</h2>
+    </header>
+
+    <div class="install-grid">
+      <div class="card" data-reveal>
+        <div class="label">cargo</div>
+        <pre><code>cargo install exportsnap</code></pre>
+      </div>
+      <div class="card" data-reveal>
+        <div class="label">prebuilt, checksum-verified</div>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/uwuclxdy/exportsnap/mommy/install.sh | bash -s -- --nocargo</code></pre>
+      </div>
+      <div class="card" data-reveal>
+        <div class="label">by hand</div>
+        <p class="card-note">grab the asset for your platform from the <a href="https://github.com/uwuclxdy/exportsnap/releases/latest">latest release</a> and check it against the release's <code>sha256sums.txt</code>.</p>
+        <div class="asset-links">
+          <a class="btn btn-secondary btn-sm" href="https://github.com/uwuclxdy/exportsnap/releases/latest/download/exportsnap-linux-x86_64">linux x86_64</a>
+          <a class="btn btn-secondary btn-sm" href="https://github.com/uwuclxdy/exportsnap/releases/latest/download/exportsnap-macos-aarch64">macos aarch64</a>
+          <a class="btn btn-secondary btn-sm" href="https://github.com/uwuclxdy/exportsnap/releases/latest/download/exportsnap-windows-x86_64.exe">windows x86_64</a>
+          <a class="btn btn-ghost btn-sm" href="https://github.com/uwuclxdy/exportsnap/releases/latest/download/sha256sums.txt">sha256sums.txt</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-info" data-reveal>
+      <div class="callout-icon" style="color:var(--info)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="8" cy="8" r="6.5"/><path d="M8 7v4M8 5v.5"/>
+        </svg>
+      </div>
+      <div>
+        <div class="callout-title">ffmpeg is optional</div>
+        <div class="callout-body">photos are fully repaired without it. transcoding video and burning a caption into a video are the two things that need it. exportsnap finds it on your path and says so on the overview screen.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ faq ============ -->
+<section id="faq">
+  <div class="wrap">
+    <header class="section-head">
+      <div class="label accent-eyebrow">questions</div>
+      <h2>faq</h2>
+    </header>
+
+    <div class="faq-list">
+      <details data-reveal>
+        <summary>does the snapchat data export link expire?</summary>
+        <p>yes. the link snapchat emails you is signed and short-lived, so download the zips promptly. after that the export is files on your disk and exportsnap works on them indefinitely.</p>
+      </details>
+      <details data-reveal>
+        <summary>can exportsnap download my memories from snapchat's servers?</summary>
+        <p>no. it does not need to: the per-media download links inside <code>memories_history.json</code> are empty strings in every export we have looked at. the media ships inside the zips instead.</p>
+      </details>
+      <details data-reveal>
+        <summary>does exportsnap upload my data anywhere?</summary>
+        <p>this release makes no network requests at all. cloud upload is planned as an opt-in feature: when it lands it stays off until you turn it on and authorize a provider.</p>
+      </details>
+      <details data-reveal>
+        <summary>what data does it touch?</summary>
+        <p>the folder you point it at, the output folder, and a small state database in your per-user data directory at mode <code>0600</code>. screens show counts, statuses and date ranges. the one screen that shows a conversation's name is the history picker, because picking a thread you cannot tell apart is not possible.</p>
+      </details>
+      <details data-reveal>
+        <summary>do i need ffmpeg?</summary>
+        <p>only for video. photos are fully repaired without it. transcoding hevc to h.264 and burning a caption into a video are the two legs that need it.</p>
+      </details>
+      <details data-reveal>
+        <summary>why are some memories missing from the output?</summary>
+        <p>because the export is missing them. the manifest lists entries whose media is in no part of the delivery. exportsnap counts those as <code>source_missing</code> rather than reporting a success it did not earn.</p>
+      </details>
+      <details data-reveal>
+        <summary>how do i export my snapchat chat history to a readable file?</summary>
+        <p>the history tab lists your conversations. tick the ones you want, tick the formats, and export. each conversation gets <code>history.html</code>, <code>history.json</code>, <code>history.txt</code> and <code>history.csv</code> in its own folder.</p>
+      </details>
+      <details data-reveal>
+        <summary>does it work on windows and macos?</summary>
+        <p>yes. all three platforms build and test on every commit. each release ships a linux x86_64, a macos aarch64 and a windows x86_64 binary.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <div>
+      <div class="logo-name">exportsnap</div>
+      <p class="footer-note">mit or apache-2.0. timezone polygons © openstreetmap contributors, <a href="https://opendatacommons.org/licenses/odbl/1-0/">odbl</a>.</p>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/uwuclxdy/exportsnap">github</a>
+      <a href="https://crates.io/crates/exportsnap">crates.io</a>
+      <a href="https://github.com/uwuclxdy/exportsnap/releases">releases</a>
+    </div>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>
