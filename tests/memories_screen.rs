@@ -1390,7 +1390,7 @@ fn the_completion_summary_hides_zero_counts() {
 }
 
 #[test]
-fn the_output_column_keeps_the_extension_under_head_ellipsis() {
+fn the_output_column_middle_ellipsises_keeping_both_ends() {
     let dir = export_tree("ext-keep", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
@@ -1411,8 +1411,8 @@ fn the_output_column_keeps_the_extension_under_head_ellipsis() {
     let row_text =
         (0..30).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1)[..8])).unwrap_or_else(|| panic!("no table row rendered"));
     let content = row_text.trim_end_matches('│').trim_end();
-    assert!(content.ends_with(".jpg"), "the extension must survive the cut: {row_text}");
-    assert!(content.contains('…'), "the name must actually be truncated at this width: {row_text}");
+    // Middle-ellipsis cuts the middle, so both ends survive: the date prefix and the extension.
+    assert!(content.ends_with("2021…2.jpg"), "both ends of the output name must survive: {row_text}");
 }
 
 #[test]
@@ -1463,22 +1463,30 @@ fn the_narrow_progress_table_keeps_the_identity_floor_ellipsised() {
 fn the_stacked_progress_table_shows_the_full_output_name_at_110_wide() {
     // The user's 110x32 capture: the panels stack, the table interior is 106 cells, and the output
     // filename must render whole — its date prefix is the metadata this app restores, so it takes
-    // its full width before identity or location grow.
+    // its full width before identity or location grow. A long place name makes the old
+    // identity-then-location order eat the surplus and squeeze output, so the pin is not vacuous.
     let mut app = app_on_fixed_source();
     let state = TempDir::new().unwrap();
     let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
     feed_plan(
         &mut app,
         state.path(),
-        vec![PlanRow { source_id: uuid(1), output_name: "20240114_103000.mp4".to_owned(), place_name: None, leg: Leg::Image }],
+        vec![PlanRow {
+            source_id: uuid(1),
+            output_name: "20240114_103000.mp4".to_owned(),
+            place_name: Some(LONG_PLACE.to_owned()),
+            leg: Leg::Image,
+        }],
     );
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     let row_text =
         (0..32).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1))).unwrap_or_else(|| panic!("no table row rendered"));
-    assert!(row_text.contains("20240114_103000.mp4"), "the full output name renders at 110 wide: {row_text}");
-    assert!(!row_text.contains('…'), "no ellipsis in the identity or output column: {row_text}");
+    // The output span — from the filename to the row's end — carries no ellipsis; the location
+    // column above it legitimately ellipsizes the long place name, so assert the span, not the row.
+    let start = row_text.find("20240114_103000.mp4").unwrap_or_else(|| panic!("the full output name did not render: {row_text}"));
+    assert!(!row_text[start..].contains('…'), "the output name ellipsised: {row_text}");
 }
 
 /// **Reach pin: the place name renders in the LOCATION column, middle-ellipsised.** A 50-char

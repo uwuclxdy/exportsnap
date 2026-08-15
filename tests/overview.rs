@@ -713,8 +713,9 @@ fn stacking_gives_way_to_the_summary_alone_when_the_rows_do_not_fit_either() {
 
 #[test]
 fn the_two_panel_breakpoint_does_not_move_with_the_source_path_length() {
-    // The source value is padded to a fixed width, so the environment panel's own minimum — and
-    // from there the layout decision — cannot depend on how deep the user's source dir sits. Both
+    // The source value is head-ellipsised to the panel's width with an 18-cell floor, so the
+    // environment panel's own minimum — and from there the layout decision — cannot depend on how
+    // deep the user's source dir sits. Both
     // dirs below are absent, so the summary panel's content is identical and the source row is the
     // only difference between the two frames.
     let short = PathBuf::from("/x");
@@ -734,7 +735,7 @@ fn the_two_panel_breakpoint_does_not_move_with_the_source_path_length() {
 
 #[test]
 fn a_short_source_path_renders_whole() {
-    // The padding must not be visible as anything but trailing filler.
+    // A path that fits the budget renders whole, with no filler after it.
     let terminal = draw(Overview::load_with("/x", environment()), WIDE, TALL);
     assert_eq!(cell_run(terminal.backend().buffer(), RIGHT, FIRST_ROW + 3), "source     /x");
 }

@@ -14,7 +14,7 @@ use ratatui::symbols::{block, line, shade};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
-use super::format::{binary_bytes, cells, head_ellipsis, middle_ellipsis, right_pad};
+use super::format::{binary_bytes, cells, middle_ellipsis, right_pad};
 use super::theme::{Palette, glyph};
 use crate::export::env::Environment;
 use crate::export::manifest::ItemStatus;
@@ -370,9 +370,10 @@ pub(crate) fn progress_list(
             spans.push(Span::raw("  "));
             spans.extend(status_pill(palette, row.status));
             spans.push(Span::raw("  "));
-            // Head-ellipsis, not trailing: the output name's leaf — its extension — is the point,
-            // so the cut takes from the front and `.jpg` always survives.
-            spans.push(Span::styled(head_ellipsis(row.output, columns.output), Style::new().fg(palette.text_dim)));
+            // Middle-ellipsis: both ends of an output name carry meaning — the date prefix is the
+            // metadata this app restores and the extension says what the file is — so the cut takes
+            // the middle and both survive.
+            spans.push(Span::styled(middle_ellipsis(row.output, columns.output), Style::new().fg(palette.text_dim)));
             ListItem::new(Line::from(spans))
         })
         .collect();

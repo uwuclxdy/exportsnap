@@ -726,6 +726,7 @@ const _: () = assert!(FormRow::ALL.len() <= GUARANTEED_INTERIOR_ROWS as usize);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::format::middle_ellipsis;
 
     /// The disabled-chip tooltip is bound to the START chip, not to whichever row happens to be
     /// last.
@@ -757,11 +758,13 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_output_name_keeps_its_extension() {
-        // The output column's cut is head-ellipsis: the leaf — the extension — is the point, so
-        // it must survive whatever budget the column has.
-        assert_eq!(head_ellipsis("20210115_143005.jpg", 20), "20210115_143005.jpg");
-        assert_eq!(head_ellipsis("20210115_143005_2.jpg", 12), "…43005_2.jpg");
-        assert!(head_ellipsis("20210115_143005_2.jpg", 12).ends_with(".jpg"));
+    fn a_truncated_output_name_keeps_both_ends() {
+        // The output column's cut is middle-ellipsis: both ends carry meaning — the date prefix is
+        // the metadata this app restores and the extension names the file — so both survive whatever
+        // budget the column has.
+        assert_eq!(middle_ellipsis("20210115_143005.jpg", 19), "20210115_143005.jpg");
+        let cut = middle_ellipsis("20210115_143005_2.jpg", 12);
+        assert!(cut.starts_with("2021"), "the date prefix survives: {cut}");
+        assert!(cut.ends_with(".jpg"), "the extension survives: {cut}");
     }
 }
