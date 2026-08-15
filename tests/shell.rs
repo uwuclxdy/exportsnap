@@ -448,6 +448,43 @@ fn the_footer_alert_replaces_the_hint_bar_in_place_while_armed() {
     assert_eq!(buffer[(3, 19)].style().fg, Some(palette.text_dim));
 }
 
+/// A run failure's message joins its statement to its fix with "; ", and the fix half is the
+/// part the user acts on — so when the row cannot hold both, the fix half renders whole and the
+/// statement half takes the visible prose cut, never a hard slice at the terminal edge. The fix
+/// half stays path-free by construction (`src/tui/alert.rs`'s privacy rule), so the cut never
+/// echoes the export's own bytes.
+#[test]
+fn a_long_run_alert_keeps_its_fix_clause_and_cuts_visibly() {
+    use exportsnap::export::memories_run::{RunError, RunEvent, RunOutcome};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    // A source path long enough to push the fix clause past every width this test draws: the
+    // failure message is "no mydata~ export part under {path}; point the source at the dir
+    // holding the export's parts".
+    let source = PathBuf::from("/mnt/data/snapshots/very-long-directory-name-keeps-going-past-the-row");
+    let mut app = App::new(Tier::Full);
+    on_tab_in(&mut app, Tab::Memories);
+    let (sender, receiver) = mpsc::channel();
+    app.with_memories_channel(receiver);
+    sender.send(RunEvent::Finished(RunOutcome::Failed(RunError::NoExportId(source)))).unwrap();
+    app.tick();
+    assert!(app.memories().alert().is_some(), "the alert must be live before the frame draws");
+
+    // Wide: the fix clause renders whole and the path half is the part that cuts, with the
+    // ellipsis naming the cut.
+    let terminal = draw(&mut app, 120, 24);
+    let footer = row(terminal.backend().buffer(), 23);
+    assert!(footer.contains("…; point the source at the dir holding the export's parts"), "{footer}");
+    assert!(!footer.contains("keeps-going-past-the-row"), "the path half is the part that cuts: {footer}");
+
+    // Narrow: the row is the fix clause with the statement half cut to its marker — the
+    // semicolon idiom survives, so the ellipsis names the dropped error half.
+    let terminal = draw(&mut app, 60, 24);
+    let footer = row(terminal.backend().buffer(), 23);
+    assert_eq!(footer.trim_end(), " ! …; point the source at the dir holding the export's parts", "{footer}");
+}
+
 // ---- compact banner (skill: Patterns → Density) ----
 
 #[test]

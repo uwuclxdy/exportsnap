@@ -1290,6 +1290,87 @@ fn the_counts_lines_lower_bound_qualifier_survives_the_compatible_tier() {
     }
 }
 
+/// The counts line is the one table row that can outgrow its panel, and its cut must be the
+/// visible prose cut — a trailing ellipsis on the clause that no longer fits — never a hard
+/// clip at the panel edge slicing a word in half. Whole clauses render up to the cut and the
+/// lower-bound qualifier leads untouched, since it is the one clause a narrow frame must not
+/// lose.
+#[test]
+fn the_counts_line_cuts_visibly_when_it_outgrows_the_row() {
+    const QUALIFIER: &str = "some dirs unreadable, counts are lower bounds";
+    let mut app = app_on_fixed_source(Tier::Full);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        Vec::new(),
+        PlanCounts {
+            partial: true,
+            unmatched_overlays: 2,
+            excluded: 1,
+            deferred: 1,
+            missing_tokens: 1,
+            history: HistoryOutcome::JoinedNothing,
+        },
+    );
+
+    // At 80 columns the stacked arm's table interior is 76 cells; the full line is 195 cells.
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let line = cell_run(buffer, 10);
+    // The row's leading cells are the panel border and padding; the qualifier's leading position
+    // inside the line is pinned by `an_unreadable_dir_puts_the_lower_bound_qualifier_before_every_count`.
+    assert!(line.contains(QUALIFIER), "{line}");
+    assert!(line.contains("2 overlays unmatched"), "{line}");
+    assert!(line.trim_end().ends_with("… │"), "the cut carries the ellipsis against the panel border: {line}");
+    assert!(!line.contains("thumbnails dropped"), "no clause renders as half a word: {line}");
+}
+
+/// The cut must stay visible even when the surviving prefix ends flush against the row edge: a
+/// full row with dropped clauses and no ellipsis reads complete, and a dropped nonzero count
+/// then reads as a zero count — the quietly-wrong-number class the lower-bound qualifier exists
+/// to prevent. Two shapes: the prefix fills the row exactly (the marker steals the last cell of
+/// the final clause), and the prefix leaves one cell (a bare ellipsis fills it).
+#[test]
+fn the_counts_line_marks_the_cut_even_when_the_row_is_full() {
+    const QUALIFIER: &str = "some dirs unreadable, counts are lower bounds";
+    let mut app = app_on_fixed_source(Tier::Full);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        Vec::new(),
+        PlanCounts {
+            partial: true,
+            unmatched_overlays: 2,
+            excluded: 1,
+            deferred: 1,
+            missing_tokens: 1,
+            history: HistoryOutcome::JoinedNothing,
+        },
+    );
+
+    // At 94 columns the interior is 90, exactly the prefix through `1 thumbnail dropped` (the
+    // marker must steal the final clause's last cell); at 96 columns the interior is 92, one
+    // cell more (a bare ellipsis fills the spare cell). Both must end on the ellipsis.
+    for width in [94_u16, 96] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = cell_run(buffer, 10);
+        assert!(line.contains(QUALIFIER), "{width}: {line}");
+        assert!(line.contains("2 overlays unmatched"), "{width}: {line}");
+        // The border and any spare cell between the marker and the border strip away; the
+        // content must end on the ellipsis itself.
+        let content = line.trim_end().trim_end_matches(['│', ' ']);
+        assert!(content.ends_with('…'), "{width}: the dropped clauses stay marked: {line}");
+        assert!(!line.contains("item deferred"), "{width}: no dropped clause renders: {line}");
+    }
+}
+
 /// The stacked and form-only layout arms, on both tiers.
 ///
 /// **Both arms render in this file alone, and every frame either had ever been taken at was

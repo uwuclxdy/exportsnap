@@ -46,7 +46,7 @@ use crate::export::env::Environment;
 use crate::export::local_fix::VideoOptions;
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::tui::alert::RunAlert;
-use crate::tui::format::{cells, head_ellipsis, plural, right_pad};
+use crate::tui::format::{cells, head_ellipsis, plural, right_pad, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
@@ -749,7 +749,7 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
     let [counts_area, bar_area, header_area, list_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
 
-    frame.render_widget(Paragraph::new(counts_line(palette, &view.counts)), counts_area);
+    frame.render_widget(Paragraph::new(counts_line(palette, &view.counts, usize::from(inner.width))), counts_area);
 
     let done = view.statuses.iter().filter(|&&status| status == ItemStatus::Done).count();
     frame.render_widget(Paragraph::new(overall_bar(palette, done, view.rows.len(), usize::from(inner.width))), bar_area);
@@ -778,7 +778,12 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
 /// the source unlisted every count is a floor, which `Reconciliation::enroll`'s own doc states, and
 /// a number that is quietly wrong is worse than a number the reader never sees. So the correction
 /// goes first and the counts take whatever width is left.
-fn counts_line(palette: &Palette, counts: &PlanCounts) -> Line<'static> {
+///
+/// **A line that outgrows the row takes the visible prose cut, never a hard clip.** Whole clauses
+/// render up to the cut, the first clause that no longer fits keeps a trailing ellipsis, and the
+/// clauses after it drop — a `Line` past the panel edge clips mid-word with no marker, which reads
+/// as a rendering fault. `width` is the panel's interior cells.
+fn counts_line(palette: &Palette, counts: &PlanCounts, width: usize) -> Line<'static> {
     let mut clauses: Vec<(String, Style)> = Vec::new();
     if counts.partial {
         clauses.push(("some dirs unreadable, counts are lower bounds".to_owned(), Style::new().fg(palette.warning)));
@@ -811,12 +816,47 @@ fn counts_line(palette: &Palette, counts: &PlanCounts) -> Line<'static> {
     if clauses.is_empty() {
         return Line::from(Span::styled("nothing set aside", dim));
     }
-    let mut spans = Vec::with_capacity(clauses.len() * 2);
+    fit_clauses(palette, clauses, width)
+}
+
+/// The clauses joined by ` · `, whole while they fit, the prose cut on the first clause that no
+/// longer does. The qualifier is clause zero, so it is never the clause that cuts — its style
+/// (WARNING vs dim) and its position survive every width where the line renders at all.
+fn fit_clauses(palette: &Palette, clauses: Vec<(String, Style)>, width: usize) -> Line<'static> {
+    let dim = Style::new().fg(palette.text_dim);
+    let separator = format!(" {} ", glyph::CLAUSE_SEPARATOR);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(clauses.len() * 2);
+    let mut used = 0;
     for (index, (text, style)) in clauses.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(format!(" {} ", glyph::CLAUSE_SEPARATOR), dim));
+        let text_cells = cells(&text);
+        let lead = if index == 0 { 0 } else { cells(&separator) };
+        if used + lead + text_cells > width {
+            let budget = width.saturating_sub(used + lead);
+            if budget > 0 {
+                if lead > 0 {
+                    spans.push(Span::styled(separator, dim));
+                }
+                spans.push(Span::styled(truncate_prose(&text, budget), style));
+            } else if used < width {
+                // The surviving prefix ends within two cells of the row edge, so the remaining
+                // clauses drop with a bare ellipsis in the spare cells naming the cut. Without
+                // it the row reads complete, and a dropped nonzero count reads as a zero count
+                // — the quietly-wrong-number class the qualifier clause exists to prevent.
+                spans.push(Span::styled(glyph::ELLIPSIS.to_string(), dim));
+            } else if let Some(last) = spans.last_mut() {
+                // The prefix fills the row exactly, so there is no spare cell: the marker
+                // steals the final rendered clause's last cell, keeping the cut visible even
+                // on a full row.
+                let stolen = truncate_prose(last.content.as_ref(), last.width().saturating_sub(1));
+                last.content = if stolen.is_empty() { glyph::ELLIPSIS.to_string().into() } else { stolen.into() };
+            }
+            return Line::from(spans);
+        }
+        if lead > 0 {
+            spans.push(Span::styled(separator.clone(), dim));
         }
         spans.push(Span::styled(text, style));
+        used += lead + text_cells;
     }
     Line::from(spans)
 }
@@ -898,7 +938,9 @@ mod tests {
     }
 
     fn rendered(counts: &PlanCounts) -> String {
-        counts_line(&palette(), counts).spans.iter().map(|span| span.content.as_ref()).collect()
+        // A width past any real panel: these tests pin the clauses' copy, and the fit is pinned
+        // at the screen level (`tests/chat_media_screen.rs`).
+        counts_line(&palette(), counts, usize::MAX).spans.iter().map(|span| span.content.as_ref()).collect()
     }
 
     #[test]
@@ -940,7 +982,7 @@ mod tests {
         // is a number that is quietly wrong, which is the failure this line exists to prevent.
         let counts =
             PlanCounts { unmatched_overlays: 224, excluded: 44, partial: true, history: HistoryOutcome::Joined, ..PlanCounts::default() };
-        let text: String = counts_line(&palette(), &counts).spans.iter().map(|span| span.content.as_ref()).collect();
+        let text: String = counts_line(&palette(), &counts, usize::MAX).spans.iter().map(|span| span.content.as_ref()).collect();
         const QUALIFIER: &str = "some dirs unreadable, counts are lower bounds";
         assert!(text.starts_with(QUALIFIER), "{text}");
         // Exactly once: `starts_with` alone cannot see a second copy appended after the counts, and
@@ -952,14 +994,14 @@ mod tests {
     #[test]
     fn a_zero_count_is_hidden_and_a_count_of_one_is_singular() {
         let counts = PlanCounts { unmatched_overlays: 1, deferred: 0, history: HistoryOutcome::Joined, ..PlanCounts::default() };
-        let text: String = counts_line(&palette(), &counts).spans.iter().map(|span| span.content.as_ref()).collect();
+        let text: String = counts_line(&palette(), &counts, usize::MAX).spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(text, "1 overlay unmatched");
     }
 
     #[test]
     fn an_export_with_no_chat_history_says_nothing_was_attributed() {
         let counts = PlanCounts::default();
-        let text: String = counts_line(&palette(), &counts).spans.iter().map(|span| span.content.as_ref()).collect();
+        let text: String = counts_line(&palette(), &counts, usize::MAX).spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(text, "no chat history, nothing attributed");
     }
 }

@@ -137,6 +137,42 @@ fn the_panels_hug_their_content_at_the_designed_sizes() {
     }
 }
 
+/// 77 one-message conversations: enough rows to overflow every viewport this file draws, so
+/// the scrollbar has a range to walk.
+fn seventy_seven_threads() -> Vec<(String, Vec<String>)> {
+    (0..77)
+        .map(|index| (format!("key-{index:03}"), vec![chat_entry("2021-03-04 09:00:00 UTC", Some(&format!("thread {index:03}")))]))
+        .collect()
+}
+
+/// The thumb must sit on the track's last cell when the caret is on the last row — the list's
+/// maximum scroll, pinned end-to-end on the rendered buffer rather than on the helper's
+/// internals. ratatui's `Scrollbar` bottoms out at `position == content_length - 1` (its
+/// `part_lengths` clamps the position to that ceiling and scales by `content_length - 1 +
+/// viewport`), while a `ListState` offset tops out at `content_length - viewport` — so a helper
+/// that passes the raw offset stops the thumb short of the bottom by nearly a viewport's worth
+/// of range, which is the defect this pins.
+#[test]
+fn the_picker_scrollbar_thumb_reaches_the_track_end_at_max_scroll() {
+    let threads = seventy_seven_threads();
+    let borrowed: Vec<(&str, Vec<String>)> = threads.iter().map(|(key, entries)| (key.as_str(), entries.clone())).collect();
+    let dir = export_tree(&borrowed);
+    let mut app = app_on_history(&dir);
+    for _ in 0..76 {
+        press(&mut app, KeyCode::Down);
+    }
+    for (width, height) in [(80, 24), (120, 40)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The scrollbar paints the picker panel's right padding column; its last row is the
+        // row above the picker's bottom border.
+        let column = PICKER_PANEL_WIDTH - 2;
+        let bottom = (1..buffer.area.height).find(|&y| buffer[(0, y)].symbol() == "╰").unwrap() - 1;
+        assert_eq!(buffer[(column, bottom)].symbol(), "┃", "the thumb must reach the track's last cell at max scroll");
+    }
+}
+
 /// Walks to the history tab with `→`, bounded for the reason `tests/shell.rs`'s `on_tab_in`
 /// spells out in full: `→` is inert while a pane is descended, so an unbounded walk from a
 /// descended screen never terminates.

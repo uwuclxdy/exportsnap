@@ -72,7 +72,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             _ => footer::plain_hints(&palette, footer_area.width),
         }
     };
-    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), hints), footer_area);
+    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), hints, footer_area.width), footer_area);
 
     // Recomputed from the live frame size every draw, so it self-clears on resize rather than
     // living on as a stored notification. At most one banner per frame (skill: Banner), so a

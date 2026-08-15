@@ -430,9 +430,9 @@ fn a_missing_file_renders_absent_rows() {
     let terminal = draw(&mut app, WIDE, TALL);
     let buffer = terminal.backend().buffer();
     for offset in 0..7 {
-        assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("—"), "row {offset} is the absent token");
+        assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("unknown"), "row {offset} is the absent word");
     }
-    assert_eq!(detail_row(buffer, WIDE, FIRST_ROW + 2), "  created  —");
+    assert_eq!(detail_row(buffer, WIDE, FIRST_ROW + 2), "  created  unknown");
 }
 
 #[test]
@@ -445,9 +445,9 @@ fn a_broken_location_file_renders_absent_rows_without_an_error_surface() {
     press(&mut app, KeyCode::Down);
     let terminal = draw(&mut app, WIDE, TALL);
     let buffer = terminal.backend().buffer();
-    // Every location row is the absent token — the read's error is discarded whole.
+    // Every location row is the absent word — the read's error is discarded whole.
     for offset in 0..9 {
-        assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("—"), "row {offset} is the absent token");
+        assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("unknown"), "row {offset} is the absent word");
     }
     // And no error surface: neither the file's name nor the parse error's text reaches a frame.
     let text = frame_text(buffer);
@@ -470,7 +470,7 @@ fn a_broken_file_of_each_other_section_renders_absent_rows_without_an_error_surf
         let terminal = draw(&mut app, WIDE, TALL);
         let buffer = terminal.backend().buffer();
         for offset in 0..rows {
-            assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("—"), "{file}: row {offset} is the absent token");
+            assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("unknown"), "{file}: row {offset} is the absent word");
         }
         let text = frame_text(buffer);
         for forbidden in [file, "not json", "unreadable", "expected", "line 1"] {
@@ -494,7 +494,7 @@ fn an_unparseable_creation_date_folds_the_account_section_whole() {
     let terminal = draw(&mut app, WIDE, TALL);
     let buffer = terminal.backend().buffer();
     for offset in 0..7 {
-        assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("—"), "row {offset} is the absent token");
+        assert!(detail_row(buffer, WIDE, FIRST_ROW + offset).ends_with("unknown"), "row {offset} is the absent word");
     }
     let text = frame_text(buffer);
     for forbidden in ["not a date", "Creation Date", "expected", "line 1"] {

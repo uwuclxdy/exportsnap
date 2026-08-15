@@ -355,20 +355,38 @@ pub(crate) fn progress_list(
 }
 
 /// The scrollbar a scrollable list grows in its panel's right padding column, so the content never
-/// reflows when it appears (contract: Scrollbar). Shared by the progress table and the history
-/// picker's list — one spelling of the thumb/track pattern.
+/// reflows when it appears (contract: Scrollbar). Shared by the progress table, the history
+/// picker's list and the account screen's two lists — one spelling of the thumb/track pattern.
 pub(crate) fn list_scrollbar(frame: &mut Frame, palette: &Palette, rows: usize, offset: usize, viewport: usize, column: u16, area: Rect) {
-    if rows > viewport && viewport > 0 {
+    // A one-row bar holds no signal: the thumb fills it at every offset, so it never moves.
+    // The floor is ratatui's own degenerate guard kept in effect — with the begin/end caps set
+    // the widget bails when the track minus the caps is empty, which a one-row area made true
+    // incidentally; without the caps the guard has to be stated.
+    if rows > viewport && viewport > 0 && area.height > 1 {
         let thumb = glyph::SCROLLBAR_THUMB.to_string();
         let track = glyph::SCROLLBAR_TRACK.to_string();
+        // No begin/end symbols: ratatui's defaults are `▲`/`▼` arrow caps the contract has no
+        // place for, and pointing the caps at the track glyph would spend two cells of the
+        // track on chrome the thumb can then never reach — so the caps are removed outright
+        // and the thumb owns the whole track.
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some(&track))
-            .end_symbol(Some(&track))
+            .begin_symbol(None)
+            .end_symbol(None)
             .track_symbol(Some(&track))
             .thumb_symbol(&thumb)
             .style(palette.bar_track())
             .thumb_style(Style::new().fg(palette.text_dim));
-        let mut state = ScrollbarState::new(rows).position(offset).viewport_content_length(viewport);
+        // ratatui's `Scrollbar` models `position` as the first visible item and bottoms the
+        // thumb out at `position == content_length - 1` (its `part_lengths` clamps the position
+        // to that ceiling and scales both the thumb start and the thumb length by
+        // `content_length - 1 + viewport`), while a list's offset tops out at
+        // `content_length - viewport`. Stretch the offset onto the widget's position range so
+        // the thumb reaches the track's end exactly at maximum scroll; an offset past the
+        // range — a smaller viewport's offset persisting after a resize — clamps to the
+        // bottom rather than overshooting it.
+        let max_offset = rows - viewport;
+        let position = offset.min(max_offset) * (rows - 1) / max_offset;
+        let mut state = ScrollbarState::new(rows).position(position).viewport_content_length(viewport);
         frame.render_stateful_widget(scrollbar, Rect::new(column, area.y, 1, area.height), &mut state);
     }
 }

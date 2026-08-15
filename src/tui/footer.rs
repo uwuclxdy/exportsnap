@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 
 use super::theme::{Palette, glyph};
 use crate::tui::alert::{AlertKind, RunAlert};
-use crate::tui::format::cells;
+use crate::tui::format::{cells, truncate_prose};
 
 /// 3 spaces between hint groups, no glyph.
 const HINT_GAP: &str = "   ";
@@ -20,13 +20,14 @@ const HINT_GAP: &str = "   ";
 /// The footer row for this frame: the caller's hint set, unless an alert or the armed-quit prompt
 /// claims the row. The hint set is computed per tab by the shell (cloudy-tui: a hint advertises
 /// only keys that do something), so `render` takes it ready-made rather than choosing between
-/// hardcoded sets here.
+/// hardcoded sets here. `width` is the footer row's cells: the run alert fits its message into
+/// them, since a `Line` past the row clips at the terminal edge with no marker.
 #[must_use]
-pub fn render(palette: &Palette, quit_armed: bool, alert: Option<&RunAlert>, hints: Line<'static>) -> Line<'static> {
+pub fn render(palette: &Palette, quit_armed: bool, alert: Option<&RunAlert>, hints: Line<'static>, width: u16) -> Line<'static> {
     if quit_armed {
         quit_alert(palette)
     } else if let Some(alert) = alert {
-        completion_alert(palette, alert)
+        completion_alert(palette, alert, width)
     } else {
         hints
     }
@@ -125,7 +126,7 @@ pub(crate) fn settings_edit_hints(palette: &Palette, width: u16) -> Line<'static
 }
 
 /// The armed 2-step quit prompt: glyph-only line on the base `BG`; the absent background tint is
-/// what tells it apart from a banner.
+/// what tells it apart from a banner. Short by construction, so it needs no cut.
 fn quit_alert(palette: &Palette) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {} ", glyph::ALERT_MARKER), Style::new().fg(palette.warning)),
@@ -135,13 +136,110 @@ fn quit_alert(palette: &Palette) -> Line<'static> {
 
 /// The run-completion alert: ` i ` for a clean run, ` ! ` for one with failures, message in
 /// `TEXT_DIM`, exactly like the quit prompt a glyph-only line on the base surface.
-fn completion_alert(palette: &Palette, alert: &RunAlert) -> Line<'static> {
+///
+/// The message is fit into the row: a `Line` past the row clips at the terminal edge with no
+/// marker, which is a cut the reader cannot tell from the message ending there.
+fn completion_alert(palette: &Palette, alert: &RunAlert, width: u16) -> Line<'static> {
     let (marker, color) = match alert.kind {
         AlertKind::Info => (glyph::ALERT_MARKER_INFO, palette.info),
         AlertKind::Warning => (glyph::ALERT_MARKER, palette.warning),
     };
+    // The marker's own three cells — space, glyph, space; the message gets every remaining
+    // cell, no right inset.
+    let budget = usize::from(width).saturating_sub(3);
     Line::from(vec![
         Span::styled(format!(" {marker} "), Style::new().fg(color)),
-        Span::styled(alert.message.clone(), Style::new().fg(palette.text_dim)),
+        Span::styled(fit_alert_message(&alert.message, budget), Style::new().fg(palette.text_dim)),
     ])
+}
+
+/// The alert message fit to `budget` cells, visible cut included (contract: prose cut, trailing
+/// ellipsis).
+///
+/// The failure messages join a statement to its fix with `"; "`, and the fix half is the part
+/// the user acts on — so when the row cannot hold both, the fix half renders whole and the
+/// statement half takes the cut. That split respects the alert module's privacy rule by
+/// construction: the fix half never carries the export's own bytes, so the cut cannot surface
+/// one. Messages without the statement;fix idiom (completions, load errors) take the plain
+/// prose cut.
+fn fit_alert_message(message: &str, budget: usize) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    if cells(message) <= budget {
+        return message.to_owned();
+    }
+    if let Some((head, tail)) = message.rsplit_once("; ") {
+        let tail_cells = cells(tail);
+        // The fix half plus its `"; "` lead, rendered whole; the statement half keeps what the
+        // row leaves, its ellipsis included.
+        if tail_cells + 2 < budget {
+            return format!("{}; {tail}", truncate_prose(head, budget - tail_cells - 2));
+        }
+        // The fix half alone nearly fills the row: it renders with a leading ellipsis naming
+        // the dropped error half.
+        return format!("…{}", truncate_prose(tail, budget.saturating_sub(1)));
+    }
+    truncate_prose(message, budget)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one message shape every `RunError` failure spells: a statement joined to its fix.
+    const STATEMENT_FIX: &str =
+        "no mydata~ export part under /mnt/data/snapshots/very-long-directory-name; point the source at the dir holding the export's parts";
+
+    #[test]
+    fn a_message_that_fits_its_budget_renders_whole() {
+        assert_eq!(fit_alert_message("run finished · 1 fixed", 22), "run finished · 1 fixed");
+        assert_eq!(fit_alert_message(STATEMENT_FIX, cells(STATEMENT_FIX)), STATEMENT_FIX);
+    }
+
+    #[test]
+    fn an_overflowing_statement_fix_message_keeps_the_fix_half_whole_and_cuts_the_statement() {
+        // 116 cells, a wide footer's budget: the fix half (54 cells plus its "; " lead)
+        // renders whole, the statement takes the prose cut into what remains, and the cut is
+        // named by the ellipsis.
+        let fit = fit_alert_message(STATEMENT_FIX, 116);
+        assert!(fit.ends_with("; point the source at the dir holding the export's parts"), "{fit}");
+        assert!(fit.starts_with("no mydata~ export part under "), "{fit}");
+        assert!(fit.contains("…; point the source"), "the cut sits between the halves: {fit}");
+        assert_eq!(cells(&fit), 116, "the fit never overruns the row: {fit}");
+        assert!(!fit.contains("very-long-directory-name"), "the statement half is the part that cuts: {fit}");
+    }
+
+    #[test]
+    fn a_fix_half_that_nearly_fills_the_row_renders_with_a_leading_ellipsis() {
+        // A 56-cell budget holds the fix half alone: the ellipsis names the dropped error
+        // half, so the cut stays visible even when nothing of the statement survives.
+        let fit = fit_alert_message(STATEMENT_FIX, 56);
+        assert_eq!(fit, "…point the source at the dir holding the export's parts");
+    }
+
+    #[test]
+    fn a_message_without_the_statement_fix_idiom_takes_the_plain_prose_cut() {
+        let fit = fit_alert_message("run finished · 12 fixed · 3 failed", 20);
+        assert_eq!(fit, "run finished · 12 f…");
+        assert_eq!(fit_alert_message("run finished · 12 fixed · 3 failed", 0), "");
+    }
+
+    #[test]
+    fn a_zero_budget_fits_nothing_on_either_branch() {
+        // The plain branch pins `""` at budget 0; the statement;fix split must answer the same
+        // rather than overrunning with the leading ellipsis it would render at any real budget.
+        assert_eq!(fit_alert_message(STATEMENT_FIX, 0), "");
+    }
+
+    #[test]
+    fn a_fix_clause_longer_than_the_row_is_itself_prose_cut_with_the_marker() {
+        // 35 cells: even the fix half cannot render whole, so it takes the prose cut behind
+        // the leading ellipsis — the cut stays visible in both halves.
+        let message = "no memory media under /somewhere; extract the export's memories dirs first";
+        let fit = fit_alert_message(message, 35);
+        assert!(fit.starts_with("…extract the export's memories dir"), "{fit}");
+        assert!(fit.ends_with('…'), "{fit}");
+        assert_eq!(cells(&fit), 35);
+    }
 }

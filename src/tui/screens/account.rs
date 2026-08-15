@@ -14,7 +14,8 @@
 //! coordinate pair — and the account section renders no IP (`registration_ip` is deliberately
 //! not a row). The load path discards every error that could carry such a byte: each of the
 //! five files is read independently and `.ok().flatten()`ed, so a file that is missing or
-//! broken lands as an absent section whose rows all render `—`. The screen never reads the
+//! broken lands as an absent section whose rows all render `unknown` in the placeholder tier.
+//! The screen never reads the
 //! files that hold message bodies, so that half of the rule holds by construction; the planted
 //! byte classes are pinned absent by `tests/account_screen.rs`.
 //!
@@ -216,7 +217,7 @@ fn section_rows(section: Section) -> &'static [RowSpec] {
 pub struct Account {
     source: PathBuf,
     /// Each section's file, read independently: a missing or broken file is `None` and the
-    /// section's rows all render `—`. The read's error text never reaches the screen.
+    /// section's rows all render `unknown`. The read's error text never reaches the screen.
     account: Option<model::Account>,
     friends: Option<model::Friends>,
     location: Option<schema::LocationHistory>,
@@ -520,9 +521,14 @@ fn detail_rows(palette: &Palette, account: &Account, width: usize) -> Vec<Line<'
         .collect()
 }
 
-/// The absent value's token: the same `—` the overview's value slots use.
+/// The absent value's word: `unknown`, in the placeholder tier (contract: Forms — an absent
+/// value renders a `TEXT_FAINT` placeholder). A whole section of `—` dashes reads as a
+/// rendering fault, and the dash is the contract's token for a NUMERIC "no value" cell — the
+/// overview's count slots keep it there, where `unreadable` carries the third, different
+/// meaning. This screen has no three-way: a missing file and a broken one both land as absent
+/// by design (the privacy rule), so one word names the value no row can show.
 fn absent(palette: &Palette) -> Span<'static> {
-    Span::styled("—", Style::new().fg(palette.text_faint))
+    Span::styled("unknown", Style::new().fg(palette.text_faint))
 }
 
 /// One value's spans: counts stay whole and grouped (a count that outgrows the panel clips at
