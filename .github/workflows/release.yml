@@ -99,6 +99,9 @@ jobs:
       - name: Prepare asset
         run: cp "target/${{ matrix.target }}/release/exportsnap${{ matrix.ext }}" "${{ matrix.asset_name }}${{ matrix.ext }}"
       - name: Attest build provenance   # optional supply-chain: keyless SLSA provenance for the asset
+        # Private user-owned repos cannot persist attestations (the API rejects
+        # them), which reds the build leg; attest where it works, skip elsewhere.
+        if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ matrix.asset_name }}${{ matrix.ext }}
@@ -134,6 +137,9 @@ jobs:
         # install exits 0 having installed NOTHING (warning only), and the
         # generate line below then dies on a missing subcommand.
         run: |
+          # download-artifact creates no directory when every build leg failed;
+          # this step must not be the first one to die on that path.
+          mkdir -p artifacts
           cargo install cargo-about --version 0.9.1 --locked --features cli
           cargo about --version   # assert the install actually landed a binary
           cargo about generate about.hbs -o artifacts/THIRD-PARTY-LICENSES
