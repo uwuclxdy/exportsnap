@@ -137,6 +137,21 @@ pub(crate) fn path_budget(width: usize, label: &str, floor: usize) -> usize {
     width.saturating_sub(CARET_GUTTER + cells(label) + LABEL_GAP).max(floor)
 }
 
+/// The setup-form panel width a run screen's side-by-side arm should use, in cells: the screen's
+/// narrow interior floor grown to fit its longest raw path value (source or output dir), then
+/// capped so the progress table keeps its own interior floor. Callers still gate side-by-side on
+/// the floor width (`floor_interior + CHROME_COLUMNS` plus the table floor), so a body too narrow
+/// for that floor stacks full-width instead of blanking the form; when the cap binds the paths
+/// head-ellipsize within it, when it does not they render whole.
+#[must_use]
+pub(crate) fn side_by_side_form_panel_width(
+    body_width: usize, floor_interior: usize, widest_label: usize, longest_path: usize, table_interior_min: usize,
+) -> usize {
+    let form_interior = floor_interior.max(CARET_GUTTER + widest_label + LABEL_GAP + longest_path);
+    let table_panel = table_interior_min + usize::from(CHROME_COLUMNS);
+    (form_interior + usize::from(CHROME_COLUMNS)).min(body_width.saturating_sub(table_panel))
+}
+
 /// An INTERACTIVE row's label: `TEXT_DIM` blurred, promoted to `TEXT + bold` when the row is
 /// focused (contract: Forms — the focused row's label promotes).
 ///

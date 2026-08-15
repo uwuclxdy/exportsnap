@@ -1260,6 +1260,32 @@ fn the_form_path_rows_grow_in_the_full_width_arm_and_keep_the_narrow_floor() {
 }
 
 #[test]
+fn the_side_by_side_form_grows_to_fit_the_paths_and_keeps_the_table_floor() {
+    // A 33-cell source and a 46-cell output dir: at 130 wide the side-by-side form grows from its
+    // 40-cell floor to the 54-cell cap, so the source shows whole, the output head-ellipsises within
+    // the capped interior, and the progress table keeps its 76-cell floor.
+    let source = PathBuf::from(format!("/{}", "s".repeat(32)));
+    let out_root = PathBuf::from(format!("/{}", "o".repeat(45)));
+    let mut app = App::new(Tier::Full).with_source_environment(
+        source.clone(),
+        RunDefaults { out_root, ..RunDefaults::resolve(None, &Config::default(), &source) },
+        Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
+    );
+    on_memories(&mut app);
+    let whole = source.to_string_lossy().into_owned();
+
+    let mut terminal = Terminal::new(TestBackend::new(130, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let source_row = cell_run(buffer, 2);
+    assert!(source_row.contains(&whole), "the source shows whole: {source_row}");
+    assert!(!source_row.contains('…'), "the source must not ellipsise: {source_row}");
+    let output_row = cell_run(buffer, 3);
+    assert!(output_row.contains('…'), "the output head-ellipsises within the cap: {output_row}");
+    assert!(screen_text(buffer).contains("no run yet"), "the progress panel keeps its 76-cell floor");
+}
+
+#[test]
 fn the_empty_state_action_line_names_a_key_that_actually_starts_the_run() {
     let dir = export_tree("empty-action", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);

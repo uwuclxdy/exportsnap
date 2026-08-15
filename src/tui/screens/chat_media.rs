@@ -609,14 +609,27 @@ pub fn render(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, area: 
     let tooltip_row = !chat.start_enabled() && row_focused(chat, FormRow::Start.index());
     let form_height = u16::try_from(FormRow::ALL.len() + usize::from(tooltip_row)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
 
-    let form_panel_width = FORM_INTERIOR as u16 + widgets::CHROME_COLUMNS;
+    // The side-by-side form panel grows from its narrow floor to fit the longest raw path, capped
+    // so the progress table keeps its interior floor. The gate itself stays on the floor width, so
+    // a body below the floor plus the table still stacks full-width instead of blanking the form.
+    let form_panel_floor = FORM_INTERIOR as u16 + widgets::CHROME_COLUMNS;
     let table_panel_width = TABLE_INTERIOR_MIN as u16 + widgets::CHROME_COLUMNS;
+    let output = chat.out_root.join(CHAT_DIR);
+    let longest_path = cells(&chat.source.to_string_lossy()).max(cells(&output.to_string_lossy()));
+    let form_panel_width = u16::try_from(widgets::side_by_side_form_panel_width(
+        usize::from(area.width),
+        FORM_INTERIOR,
+        WIDEST_FORM_LABEL,
+        longest_path,
+        TABLE_INTERIOR_MIN,
+    ))
+    .unwrap_or(u16::MAX);
 
     // The overview's layout ladder: side by side, stacked, then form-only as the last resort for a
     // frame too small for either. The table scrolls, so the stacked arm only needs its floor rows.
-    let side_by_side = usize::from(area.width) >= usize::from(form_panel_width) + usize::from(table_panel_width);
+    let side_by_side = usize::from(area.width) >= usize::from(form_panel_floor) + usize::from(table_panel_width);
     let stacked =
-        !side_by_side && usize::from(area.width) >= usize::from(form_panel_width) && area.height >= form_height + TABLE_FLOOR_ROWS;
+        !side_by_side && usize::from(area.width) >= usize::from(form_panel_floor) && area.height >= form_height + TABLE_FLOOR_ROWS;
 
     if side_by_side {
         let [left, right] = Layout::horizontal([Constraint::Length(form_panel_width), Constraint::Fill(1)]).areas(area);
