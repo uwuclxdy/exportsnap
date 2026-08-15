@@ -82,15 +82,20 @@ fn hint_width(groups: &[(&str, &str)]) -> usize {
         .sum::<usize>()
 }
 
-/// The fallback hint set for tabs with no tab-specific keys. The universal `a actions` /
-/// `? help` hints are deliberately absent: `a` is reserved for the action menu, which no screen
-/// implements — the history tab's toggle-all binds `t`, the contract's hotkey-algorithm letter,
-/// rather than colliding with the reserved `a` — so rendering `a actions` would advertise a
-/// binding that does nothing, and `? help` is not bound at all.
-pub(crate) fn plain_hints(palette: &Palette, width: u16) -> Line<'static> {
+/// The fallback hint set for tabs with no tab-specific keys: the shell's switch hint, then the
+/// universal `a actions` / `? help` pair, then `q quit`. The `a actions` group is DERIVED from
+/// `has_actions` — a screen with no actions drops it, so the hint never advertises a key that
+/// opens nothing (cloudy-tui: a hint advertises only keys that do something).
+pub(crate) fn plain_hints(palette: &Palette, has_actions: bool, width: u16) -> Line<'static> {
     // The hint bar's compact space-free arrow run — modals keep the spaced form.
     let arrows = format!("{}{}", glyph::KEY_LEFT, glyph::KEY_RIGHT);
-    hint_line(palette, &trim_hints(&[(&arrows, "switch"), ("q", "quit")], width))
+    let mut groups: Vec<(&str, &str)> = vec![(arrows.as_str(), "switch")];
+    if has_actions {
+        groups.push(("a", "actions"));
+    }
+    groups.push(("?", "help"));
+    groups.push(("q", "quit"));
+    hint_line(palette, &trim_hints(&groups, width))
 }
 
 /// The hint set while the active screen's table pane is descended: arrows move the caret, `←`,
@@ -99,7 +104,24 @@ pub(crate) fn plain_hints(palette: &Palette, width: u16) -> Line<'static> {
 pub(crate) fn descended_hints(palette: &Palette, width: u16) -> Line<'static> {
     let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
     let left = glyph::KEY_LEFT.to_string();
-    hint_line(palette, &trim_hints(&[(&up_down, "move"), (&left, "back"), ("esc", "back"), ("q", "back")], width))
+    hint_line(palette, &trim_hints(&[(&up_down, "move"), (&left, "back"), ("esc", "back"), ("?", "help"), ("q", "back")], width))
+}
+
+/// The hint set while the action menu owns input: arrows move the caret (wrapping), `↵` picks, and
+/// `esc`/`q` both cancel. Deliberately no `←→ switch`, `? help` or `q quit` group — while a modal is
+/// open those keys are the modal's to ignore, so advertising them would mislabel what the key does
+/// this frame (cloudy-tui: Modals — the footer hint bar is context-aware while a modal is open).
+pub(crate) fn action_menu_hints(palette: &Palette, width: u16) -> Line<'static> {
+    let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
+    let enter = glyph::KEY_ENTER.to_string();
+    hint_line(palette, &trim_hints(&[(&up_down, "move"), (&enter, "pick"), ("esc", "cancel"), ("q", "back")], width))
+}
+
+/// The hint set while the help modal owns input: `?`, `esc` and `q` all close it. No universal
+/// `a actions` / `? help` pair and no switch/quit group — the modal owns every key this frame, so
+/// the labels name what those keys actually do now.
+pub(crate) fn help_hints(palette: &Palette, width: u16) -> Line<'static> {
+    hint_line(palette, &trim_hints(&[("?", "close"), ("esc", "cancel"), ("q", "back")], width))
 }
 
 /// The history tab's top-level hint set: the shell's switch and quit groups, plus the picker's
@@ -108,11 +130,15 @@ pub(crate) fn descended_hints(palette: &Palette, width: u16) -> Line<'static> {
 /// nothing (finding 7).
 pub(crate) fn history_hints(palette: &Palette, picker_has_rows: bool, width: u16) -> Line<'static> {
     let arrows = format!("{}{}", glyph::KEY_LEFT, glyph::KEY_RIGHT);
+    let mut groups: Vec<(&str, &str)> = vec![(arrows.as_str(), "switch")];
     if picker_has_rows {
-        hint_line(palette, &trim_hints(&[(&arrows, "switch"), ("t", "toggle all"), ("space", "toggle"), ("q", "quit")], width))
-    } else {
-        hint_line(palette, &trim_hints(&[(&arrows, "switch"), ("q", "quit")], width))
+        groups.push(("t", "toggle all"));
+        groups.push(("space", "toggle"));
+        groups.push(("a", "actions"));
     }
+    groups.push(("?", "help"));
+    groups.push(("q", "quit"));
+    hint_line(palette, &trim_hints(&groups, width))
 }
 
 /// The settings tab's hint set while a text input is being edited: arrows move the caret

@@ -269,6 +269,15 @@ impl Settings {
         self.toast.take().is_some()
     }
 
+    /// The keys this screen binds, for the help modal's screen section (cloudy-tui: Help modal).
+    /// The `GLOBAL` section holds the universal keys; this is the per-screen remainder, in the
+    /// modal's spaced arrow forms. The form is never a pane and has no actions, so its `a` key is
+    /// inert.
+    #[must_use]
+    pub fn help_keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("↑ ↓", "move"), ("↵", "edit / select"), ("space", "cycle / toggle")]
+    }
+
     /// The screen's own keys, entered while the tab is active. Edit-mode keys go to the
     /// session; otherwise the caret walks the rows (wrapping), `enter` opens a path row for
     /// editing and acts on the three state rows, and `space` mirrors it on the state rows —

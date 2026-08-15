@@ -165,7 +165,7 @@ fn renders_header_body_panel_and_hint_bar() {
             "╭─ SETTINGS ───────────────────────────────────────╮",
             "│                                                  │",
             "╰──────────────────────────────────────────────────╯",
-            " ←→ switch   q quit                                 ",
+            " ←→ switch   ? help   q quit                        ",
         ]
     );
 }
@@ -481,7 +481,7 @@ fn the_title_style_never_bleeds_into_the_border_break_dashes() {
 #[test]
 fn the_hint_bar_owns_the_footer_row_while_the_quit_is_disarmed() {
     let terminal = draw(&mut App::new(Tier::Full), 40, 20);
-    assert_eq!(row(terminal.backend().buffer(), 19), " ←→ switch   q quit                     ");
+    assert_eq!(row(terminal.backend().buffer(), 19), " ←→ switch   ? help   q quit            ");
 }
 
 #[test]
@@ -501,10 +501,35 @@ fn hint_keys_are_accent_and_labels_are_dim() {
     assert_eq!(buffer[(4, 19)].style().fg, Some(palette.text_dim));
     assert!(!buffer[(4, 19)].style().add_modifier.contains(Modifier::BOLD));
 
-    // The single-letter key too, not just the arrow run.
-    assert_eq!(buffer[(13, 19)].symbol(), "q");
+    // The single-letter universal keys too, not just the arrow run: `? help` then `q quit`.
+    assert_eq!(buffer[(13, 19)].symbol(), "?");
     assert_eq!(buffer[(13, 19)].style().fg, Some(palette.accent));
     assert!(buffer[(13, 19)].style().add_modifier.contains(Modifier::BOLD));
+
+    assert_eq!(buffer[(22, 19)].symbol(), "q");
+    assert_eq!(buffer[(22, 19)].style().fg, Some(palette.accent));
+    assert!(buffer[(22, 19)].style().add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn the_footer_names_the_modal_s_keys_while_a_modal_owns_input() {
+    // The action menu: arrows move, enter picks, esc/q cancel — not the switch/quit pair the
+    // top-level hint set advertises. `q` closes the menu, it never arms the quit, so the label
+    // must read `back` (cloudy-tui: the back/quit label is context-aware while a modal is open).
+    let mut app = App::new(Tier::Full);
+    on_tab_in(&mut app, Tab::Memories);
+    press(&mut app, KeyCode::Char('a'));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::ActionMenu(_))));
+    let terminal = draw(&mut app, 40, 20);
+    assert_eq!(row(terminal.backend().buffer(), 19).trim_end(), " ↑↓ move   ↵ pick   esc cancel   q back");
+
+    // The help modal: `?` now closes it, so the hint reads `close`, and the switch/quit pair is
+    // gone — arrows are inert and `q` closes the modal without arming the quit.
+    let mut app = App::new(Tier::Full);
+    press(&mut app, KeyCode::Char('?'));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::Help)));
+    let terminal = draw(&mut app, 40, 20);
+    assert_eq!(row(terminal.backend().buffer(), 19).trim_end(), " ? close   esc cancel   q back");
 }
 
 #[test]

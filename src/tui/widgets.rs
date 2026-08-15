@@ -12,7 +12,9 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::symbols::{block, line, shade};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use super::format::{binary_bytes, cells, middle_ellipsis, right_pad};
 use super::theme::{Palette, glyph};
@@ -519,10 +521,151 @@ pub(crate) fn tooltip(palette: &Palette, reason: &str) -> Line<'static> {
     ])
 }
 
+// ---- action menu + help modal ----
+
+/// The contract's reserved universal letters, never assignable to a row action (`a` actions, `x`
+/// dismiss, `?` help, `q` back/quit).
+const RESERVED_KEYS: [char; 4] = ['a', 'x', '?', 'q'];
+
+/// Assigns single-letter hotkeys per the contract's algorithm (cloudy-tui: Action menu → Hotkey
+/// assignment algorithm). For each action in source order, scan the first three alphabetic
+/// characters of its display name, lowercased; the first that is neither claimed by an earlier
+/// action nor one of [`RESERVED_KEYS`] becomes its hotkey. All three claimed → no hotkey
+/// (arrow-select only). Pinned by `the_action_menu_hotkeys_follow_the_reserved_letter_algorithm`.
+#[must_use]
+pub(crate) fn assign_hotkeys(labels: &[&str]) -> Vec<Option<char>> {
+    let mut claimed = std::collections::HashSet::new();
+    labels
+        .iter()
+        .map(|label| {
+            for ch in label.chars().filter(|c| c.is_ascii_alphabetic()).take(3).map(|c| c.to_ascii_lowercase()) {
+                if !RESERVED_KEYS.contains(&ch) && !claimed.contains(&ch) {
+                    claimed.insert(ch);
+                    return Some(ch);
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// One help-modal section: a UPPERCASE TRACKED header and its `(key, action)` rows (cloudy-tui:
+/// Help modal). The caller assembles the `GLOBAL` section and the per-screen section; the render
+/// owns the styling.
+#[derive(Debug, Clone)]
+pub struct HelpSection<'a> {
+    pub title: &'a str,
+    pub rows: Vec<(&'a str, &'a str)>,
+}
+
+/// The action menu (cloudy-tui: Action menu): a pickable list of the context's actions, their
+/// algorithm-assigned hotkeys right-aligned on a `TEXT_DIM` rail. The selected row takes the
+/// standard caret + `BG_HOVER` + `TEXT + bold` treatment; selection wraps in the caller's key
+/// handler. `labels` and `hotkeys` are the caller's captured state, `selected` the caret index.
+pub(crate) fn render_action_menu(
+    frame: &mut Frame, palette: &Palette, labels: &[&str], hotkeys: &[Option<char>], selected: usize, area: Rect,
+) {
+    if labels.is_empty() {
+        return;
+    }
+    let max_label = labels.iter().map(|label| cells(label)).max().unwrap_or(0);
+    let content_width = u16::try_from(CARET_GUTTER + max_label + 3 + 1).unwrap_or(u16::MAX);
+    let content_height = u16::try_from(labels.len()).unwrap_or(u16::MAX);
+    let inner = modal_shell(frame, palette, "actions", content_width, content_height, area);
+
+    let hotkey_style = Style::new().fg(palette.text_dim);
+    let rows: Vec<Line<'static>> = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let is_selected = index == selected;
+            let mut spans = vec![caret(palette, is_selected)];
+            spans.push(Span::styled(
+                (*label).to_owned(),
+                if is_selected { Style::new().fg(palette.text).bold() } else { Style::new().fg(palette.text) },
+            ));
+            spans.push(Span::raw(" ".repeat(max_label - cells(label) + 3)));
+            spans.push(Span::styled(hotkeys.get(index).copied().flatten().map_or_else(|| " ".to_owned(), |c| c.to_string()), hotkey_style));
+            let line = Line::from(spans);
+            if is_selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), usize::from(inner.width), palette) } else { line }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// The help modal (cloudy-tui: Help modal): a sectioned keymap reference. Section headers are
+/// `TEXT_DIM` UPPERCASE TRACKED, each row's hotkey leads in `ACCENT + bold` with its action in
+/// `TEXT` — the "read, not pick" shape that keeps this distinct from the action menu.
+pub(crate) fn render_help_modal(frame: &mut Frame, palette: &Palette, sections: &[HelpSection<'_>], area: Rect) {
+    let header_style = Style::new().fg(palette.text_dim);
+    let key_style = Style::new().fg(palette.accent).bold();
+    let action_style = Style::new().fg(palette.text);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut max_width = 0;
+    for (index, section) in sections.iter().enumerate() {
+        let title = section.title.to_uppercase();
+        lines.push(Line::from(Span::styled(title.clone(), header_style)));
+        max_width = max_width.max(cells(&title));
+        for (key, action) in &section.rows {
+            let line = Line::from(vec![
+                Span::raw("  "),
+                Span::styled((*key).to_owned(), key_style),
+                Span::raw("  "),
+                Span::styled((*action).to_owned(), action_style),
+            ]);
+            max_width = max_width.max(line.width());
+            lines.push(line);
+        }
+        if index + 1 < sections.len() {
+            lines.push(Line::default());
+        }
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let content_width = u16::try_from(max_width).unwrap_or(u16::MAX);
+    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let inner = modal_shell(frame, palette, "keys", content_width, content_height, area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The shared modal shell (cloudy-tui: Modals): a rounded `ACCENT_2` border, an italic-only
+/// UPPERCASE title in `TEXT_DIM`, and the base `BG` interior — no backdrop, the screen behind is
+/// left untouched except the modal's own rect, which is cleared before the box draws. Sized to
+/// `content_width`/`content_height` plus the `Padding::new(2, 2, 1, 1)` and the border, capped at
+/// 60% of the terminal width, both dimensions clamped to `area` so a short terminal never gets a
+/// write past its edge.
+///
+/// Content taller than the clamped area clips at the bottom. Both menus here are a handful of rows
+/// at most, so scroll is a stated ceiling rather than built — the upgrade path is a `List` +
+/// `ListState` once a menu outgrows a screen.
+fn modal_shell(frame: &mut Frame, palette: &Palette, title: &str, content_width: u16, content_height: u16, area: Rect) -> Rect {
+    let cap = u16::try_from(u32::from(area.width) * 3 / 5).unwrap_or(u16::MAX);
+    let width = content_width.saturating_add(6).min(cap).min(area.width);
+    let height = content_height.saturating_add(4).min(area.height);
+    let rect = area.centered(Constraint::Length(width), Constraint::Length(height));
+    frame.render_widget(Clear, rect);
+    let border = Style::new().fg(palette.accent_2);
+    let title = Line::from(vec![
+        Span::styled(line::HORIZONTAL, border),
+        Span::styled(format!(" {} ", title.to_uppercase()), Style::new().fg(palette.text_dim).italic()),
+    ]);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(border).padding(Padding::new(2, 2, 1, 1)).title(title);
+    // The base `BG` interior (cloudy-tui: Modals — interior fill, same as the screen). `Clear`
+    // above resets the rect to the terminal default, so without this the full tier leaves a
+    // darker hole behind the ACCENT_2 border; the fill is conditional because `surface()` answers
+    // `None` on the compatible tier, where the terminal's own background is the interior.
+    let block = if let Some(surface) = palette.surface() { block.style(Style::new().bg(surface)) } else { block };
+    frame.render_widget(block.clone(), rect);
+    block.inner(rect)
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
 
@@ -752,5 +895,116 @@ mod tests {
 
         assert_eq!(framed.trim().chars().count(), 24, "frame width");
         assert!(left_pad.abs_diff(right_pad) <= 1, "pads {left_pad} and {right_pad} are not a centred split");
+    }
+
+    /// The first cell whose symbol equals `needle`, scanning row-major. Modal tests locate the
+    /// caret and hotkeys by content rather than re-deriving the shell's centering math, which
+    /// would only agree with itself.
+    fn find_cell(buffer: &Buffer, needle: char) -> Option<(u16, u16)> {
+        (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == needle.to_string())
+    }
+
+    /// Whether any row carries `needle` as a contiguous run of cells.
+    fn contains(buffer: &Buffer, needle: &str) -> bool {
+        (0..buffer.area.height).any(|y| {
+            let row: String = (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            row.contains(needle)
+        })
+    }
+
+    #[test]
+    fn the_action_menu_hotkeys_follow_the_reserved_letter_algorithm() {
+        // The contract's worked example, verbatim: the collision pushes each later action to its
+        // next free letter, never overriding an earlier assignment.
+        assert_eq!(
+            assign_hotkeys(&["delete", "duplicate", "detach", "diff", "diff (renamed)"]),
+            [Some('d'), Some('u'), Some('e'), Some('i'), Some('f')]
+        );
+    }
+
+    #[test]
+    fn a_reserved_letter_is_skipped_even_when_it_is_the_first_char() {
+        // `a` and `q` are reserved, so an action whose name leads with one takes its second char.
+        assert_eq!(assign_hotkeys(&["apply", "quiet"]), [Some('p'), Some('u')]);
+    }
+
+    #[test]
+    fn an_action_whose_first_three_letters_are_all_claimed_gets_no_hotkey() {
+        // `delete` claims d, `diff` claims i, `diff (renamed)` claims f — a fourth `diff`-worded
+        // action has all three of d, i and f claimed and is arrow-select only.
+        assert_eq!(assign_hotkeys(&["delete", "diff", "diff (renamed)", "diff again"]), [Some('d'), Some('i'), Some('f'), None]);
+    }
+
+    #[test]
+    fn the_action_menu_renders_the_selected_caret_and_right_aligned_hotkeys() {
+        let palette = Palette::new(Tier::Full);
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| render_action_menu(frame, &palette, &["delete", "duplicate"], &[Some('d'), Some('u')], 0, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // The title, both labels and both hotkeys render; the modal border is the warm anchor.
+        assert!(contains(buffer, "ACTIONS"), "the title rides the border break, uppercased");
+        assert!(contains(buffer, "delete") && contains(buffer, "duplicate"), "both labels render");
+        let (corner_x, corner_y) = find_cell(buffer, '╭').expect("the rounded modal border draws");
+        assert_eq!(buffer[(corner_x, corner_y)].style().fg, Some(palette.accent_2), "the border is ACCENT_2");
+
+        // The selected first row carries the caret, its label promotes to bold TEXT, and the row
+        // below stays plain.
+        let (caret_x, caret_y) = find_cell(buffer, '❯').expect("the selected row carries a caret");
+        assert_eq!(buffer[(caret_x + 2, caret_y)].symbol(), "d", "the label starts past the caret gutter");
+        assert_eq!(buffer[(caret_x + 2, caret_y)].style().fg, Some(palette.text));
+        assert!(buffer[(caret_x + 2, caret_y)].style().add_modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(caret_x, caret_y + 1)].symbol(), " ", "the unselected row's gutter is blank");
+        assert!(!buffer[(caret_x + 2, caret_y + 1)].style().add_modifier.contains(Modifier::BOLD));
+
+        // The hotkey rail is the rightmost content cell, TEXT_DIM and never bold.
+        let hotkey_x =
+            (caret_x..buffer.area.width).rev().find(|&x| buffer[(x, caret_y)].symbol() == "d").expect("the row ends in its `d` hotkey");
+        assert_eq!(buffer[(hotkey_x, caret_y)].style().fg, Some(palette.text_dim));
+        assert!(!buffer[(hotkey_x, caret_y)].style().add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_modal_interior_fills_the_base_surface_on_full_and_not_on_compatible() {
+        // The interior is the screen's own `BG`, not the terminal default `Clear` leaves — that
+        // hole is the tell on the full tier, and the compatible tier paints no surface fill at
+        // all. Pinned at the shell's own interior cell, not by re-deriving the centering math.
+        for (tier, expected) in [(Tier::Full, Color::Rgb(30, 30, 46)), (Tier::Compatible, Color::Reset)] {
+            let palette = Palette::new(tier);
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            let inner = std::cell::Cell::new(Rect::new(0, 0, 0, 0));
+            terminal.draw(|frame| inner.set(modal_shell(frame, &palette, "actions", 10, 2, frame.area()))).unwrap();
+            let buffer = terminal.backend().buffer();
+            let inner = inner.get();
+            assert_eq!(buffer[(inner.x, inner.y)].style().bg, Some(expected), "{tier:?}: the modal interior must carry the base surface");
+        }
+    }
+
+    #[test]
+    fn the_help_modal_renders_uppercased_sections_with_accent_hotkeys() {
+        let palette = Palette::new(Tier::Full);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let sections = [
+            HelpSection { title: "global", rows: vec![("q", "back / quit"), ("?", "help")] },
+            HelpSection { title: "memories", rows: vec![("↑ ↓", "move")] },
+        ];
+        terminal.draw(|frame| render_help_modal(frame, &palette, &sections, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert!(contains(buffer, "KEYS"), "the modal title");
+        assert!(contains(buffer, "GLOBAL"), "the section header is uppercased");
+        assert!(contains(buffer, "MEMORIES"), "the screen section is uppercased");
+
+        // The q hotkey leads its row in ACCENT + bold, its action trails in plain TEXT.
+        let (q_x, q_y) = find_cell(buffer, 'q').expect("the q hotkey renders");
+        assert_eq!(buffer[(q_x, q_y)].style().fg, Some(palette.accent));
+        assert!(buffer[(q_x, q_y)].style().add_modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(q_x + 3, q_y)].symbol(), "b", "the action trails the hotkey by two cells");
+        assert_eq!(buffer[(q_x + 3, q_y)].style().fg, Some(palette.text));
+        assert!(!buffer[(q_x + 3, q_y)].style().add_modifier.contains(Modifier::BOLD));
     }
 }

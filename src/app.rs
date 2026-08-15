@@ -25,6 +25,7 @@ use crate::tui::screens::overview::Overview;
 use crate::tui::screens::settings::{Settings, SettingsLayers};
 use crate::tui::shell;
 use crate::tui::theme::{Palette, Tier};
+use crate::tui::widgets::{self, HelpSection};
 
 /// How long the event loop waits for input before ticking. One spinner frame per tick (80 ms),
 /// which is also the rate the run's manifest statuses are polled at. `pub(crate)` so the
@@ -157,6 +158,25 @@ impl RunDefaults {
     }
 }
 
+/// A modal that owns input while open (cloudy-tui: Modals). Exactly one at a time: `a` opens the
+/// action menu, `?` the help modal, and `q`/`esc`/`?` close whichever is open. While one is up,
+/// every key but `ctrl+c` is the modal's — no tab switch, no quit arming, no `⌥<digit>` jump.
+#[derive(Debug)]
+pub enum Modal {
+    ActionMenu(ActionMenuState),
+    Help,
+}
+
+/// The action menu's captured state: the actions available when `a` was pressed, their
+/// algorithm-assigned hotkeys, and the caret. Captured rather than re-derived each frame so a live
+/// state change cannot move a row under the caret while the menu is open.
+#[derive(Debug)]
+pub struct ActionMenuState {
+    pub labels: Vec<&'static str>,
+    pub hotkeys: Vec<Option<char>>,
+    pub selected: usize,
+}
+
 /// Top-level app state: which screen is active, whether the 2-step quit is armed, and whether
 /// the event loop should keep running.
 ///
@@ -188,6 +208,8 @@ pub struct App {
     alt_held: bool,
     quit_armed: bool,
     running: bool,
+    /// The open modal, if any. `None` while input goes to the active screen.
+    modal: Option<Modal>,
     overview: Overview,
     memories: Memories,
     chat_media: ChatMedia,
@@ -215,6 +237,7 @@ impl App {
             alt_held: false,
             quit_armed: false,
             running: true,
+            modal: None,
             overview: Overview::unloaded(),
             memories: Memories::with_environment(PathBuf::new(), defaults.out_root.clone(), Environment::default(), defaults.transcode),
             chat_media: ChatMedia::with_environment(
@@ -495,6 +518,52 @@ impl App {
         self.alt_held
     }
 
+    /// The modal open this frame, if any — the shell renders it over the finished screen and the
+    /// key router gives it every key but `ctrl+c`.
+    #[must_use]
+    pub const fn modal(&self) -> Option<&Modal> {
+        self.modal.as_ref()
+    }
+
+    /// Whether the ACTIVE screen's action menu would list anything (cloudy-tui: Action menu). The
+    /// hint bar and the help modal's `a` row both derive from this single answer, so the two can
+    /// never advertise a key that opens nothing.
+    #[must_use]
+    pub fn has_actions(&self) -> bool {
+        match self.active {
+            Tab::Memories => !self.memories.actions().is_empty(),
+            Tab::ChatMedia => !self.chat_media.actions().is_empty(),
+            Tab::History => !self.history.actions().is_empty(),
+            Tab::Overview | Tab::Account | Tab::Settings => false,
+        }
+    }
+
+    /// The help modal's sections for this frame (cloudy-tui: Help modal): the `GLOBAL` universal
+    /// keys, then the active screen's own bound keys named after that screen. Rebuilt each frame,
+    /// so it tracks pane focus exactly like the hint bar.
+    #[must_use]
+    pub fn help_sections(&self) -> Vec<HelpSection<'static>> {
+        let mut global: Vec<(&'static str, &'static str)> = vec![("q", "back / quit"), ("?", "help")];
+        if self.has_actions() {
+            global.push(("a", "actions"));
+        }
+        global.extend([("← →", "switch tab"), ("⌃c", "quit")]);
+
+        let mut sections = vec![HelpSection { title: "global", rows: global }];
+        let screen = match self.active {
+            Tab::Memories => self.memories.help_keys(),
+            Tab::ChatMedia => self.chat_media.help_keys(),
+            Tab::History => self.history.help_keys(),
+            Tab::Account => self.account.help_keys(),
+            Tab::Settings => self.settings.help_keys(),
+            Tab::Overview => Vec::new(),
+        };
+        if !screen.is_empty() {
+            sections.push(HelpSection { title: self.active.label(), rows: screen });
+        }
+        sections
+    }
+
     /// Draws, waits for an event, applies it, ticks, repeats.
     ///
     /// While ANY screen's run is live — or while the settings toast is — the wait is capped at
@@ -606,6 +675,13 @@ impl App {
             return;
         }
 
+        // A modal owns input first: while one is open, every other key is the modal's — no `q`
+        // arming, no screen routing, no tab switch, no `⌥` jump (cloudy-tui: Modals → Focus).
+        if self.modal.is_some() {
+            self.handle_modal_key(key);
+            return;
+        }
+
         // `q` while the ACTIVE screen's table pane is descended is the back key, not the quit key —
         // it ascends, exactly like esc (cloudy-tui: q back whenever q would ascend a level). The
         // hint bar advertises the same, off the same answer.
@@ -645,6 +721,24 @@ impl App {
 
         self.quit_armed = false;
 
+        // `?` opens the help modal and `a` the action menu (cloudy-tui: Action menu; Help modal).
+        // Both are suspended while a settings text input is being edited, where they are letters
+        // the field types — the same suspension `q` and `x` get. `a` with no actions on the active
+        // screen is inert, so it opens nothing and the hint bar derives its hint from that.
+        let editing_input = self.active == Tab::Settings && self.settings.is_editing();
+        if !editing_input {
+            if matches!(key.code, KeyCode::Char('?')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+                self.modal = Some(Modal::Help);
+                return;
+            }
+            if matches!(key.code, KeyCode::Char('a' | 'A')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+                if let Some(menu) = self.open_action_menu() {
+                    self.modal = Some(Modal::ActionMenu(menu));
+                }
+                return;
+            }
+        }
+
         // Screen-owned keys on whichever screen is active (form rows, table scroll,
         // descend/ascend). A screen answers `false` for keys that belong to the shell, so the tab
         // switching below still works when a form owns the caret.
@@ -677,6 +771,90 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Captures the ACTIVE screen's actions into a menu, or `None` when it has none (`a` is inert
+    /// there). The hotkeys are assigned once at open so they cannot shift while the menu is up.
+    fn open_action_menu(&self) -> Option<ActionMenuState> {
+        let labels: Vec<&'static str> = match self.active {
+            Tab::Memories => self.memories.actions(),
+            Tab::ChatMedia => self.chat_media.actions(),
+            Tab::History => self.history.actions(),
+            Tab::Overview | Tab::Account | Tab::Settings => return None,
+        };
+        if labels.is_empty() {
+            return None;
+        }
+        let hotkeys = widgets::assign_hotkeys(&labels);
+        Some(ActionMenuState { labels, hotkeys, selected: 0 })
+    }
+
+    /// Runs a picked action on the ACTIVE screen. The label is one the menu's own [`Self::open_action_menu`]
+    /// captured, so it matches a screen's `actions()` entry by construction.
+    fn dispatch_action(&mut self, label: &'static str) {
+        match self.active {
+            Tab::Memories => self.memories.run_action(label),
+            Tab::ChatMedia => self.chat_media.run_action(label),
+            Tab::History => self.history.run_action(label),
+            Tab::Overview | Tab::Account | Tab::Settings => {}
+        }
+    }
+
+    /// One key while a modal is open. The action menu wraps its caret and picks on `↵` or an
+    /// assigned hotkey; both modals close on `esc`/`q`, and help also closes on `?`. Everything
+    /// else is inert.
+    fn handle_modal_key(&mut self, key: KeyEvent) {
+        enum Outcome {
+            Keep,
+            Close,
+            Pick(&'static str),
+        }
+
+        let outcome = match &mut self.modal {
+            Some(Modal::ActionMenu(menu)) => match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+                    let len = menu.labels.len();
+                    if len > 0 {
+                        let delta: isize = if key.code == KeyCode::Up { -1 } else { 1 };
+                        let current = menu.selected as isize;
+                        menu.selected = (current + delta).rem_euclid(len as isize) as usize;
+                    }
+                    Outcome::Keep
+                }
+                KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                    menu.labels.get(menu.selected).copied().map_or(Outcome::Keep, Outcome::Pick)
+                }
+                KeyCode::Esc => Outcome::Close,
+                KeyCode::Char('q' | 'Q') if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => Outcome::Close,
+                KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+                    let lower = c.to_ascii_lowercase();
+                    menu.hotkeys
+                        .iter()
+                        .position(|hotkey| *hotkey == Some(lower))
+                        .and_then(|index| menu.labels.get(index).copied())
+                        .map_or(Outcome::Keep, Outcome::Pick)
+                }
+                _ => Outcome::Keep,
+            },
+            Some(Modal::Help) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Char('?')
+                    if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
+                {
+                    Outcome::Close
+                }
+                _ => Outcome::Keep,
+            },
+            None => Outcome::Keep,
+        };
+
+        match outcome {
+            Outcome::Close => self.modal = None,
+            Outcome::Pick(label) => {
+                self.modal = None;
+                self.dispatch_action(label);
+            }
+            Outcome::Keep => {}
         }
     }
 }

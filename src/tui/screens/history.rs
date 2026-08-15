@@ -305,6 +305,35 @@ impl History {
         matches!(&self.picker, Picker::Loaded { rows } if !rows.is_empty())
     }
 
+    /// The actions the action menu lists, in menu order (cloudy-tui: Action menu). The batch
+    /// toggle is the picker's one action; empty when the picker holds no rows to toggle or while
+    /// the formats pane owns the caret. The menu's emptiness is what the hint bar and the help
+    /// modal's `a` row derive from.
+    #[must_use]
+    pub fn actions(&self) -> Vec<&'static str> {
+        if self.picker_has_rows() && !self.descended { vec!["toggle all"] } else { Vec::new() }
+    }
+
+    /// Runs one of [`Self::actions`]' entries, matched by label. The label is the menu's own
+    /// output, so an unknown one is a caller bug.
+    pub fn run_action(&mut self, label: &'static str) {
+        if label == "toggle all" {
+            self.toggle_all();
+        }
+    }
+
+    /// The keys this screen binds in its current pane, for the help modal's screen section
+    /// (cloudy-tui: Help modal). The `GLOBAL` section holds the universal keys; this is the
+    /// per-screen remainder, in the modal's spaced arrow forms.
+    #[must_use]
+    pub fn help_keys(&self) -> Vec<(&'static str, &'static str)> {
+        if self.descended {
+            vec![("↑ ↓", "move"), ("space", "toggle format"), ("↵", "toggle / export"), ("esc", "back")]
+        } else {
+            vec![("↑ ↓", "move"), ("space", "toggle"), ("t", "toggle all"), ("↵", "descend")]
+        }
+    }
+
     /// Returns the caret to the picker. Called by esc and `←` from inside the screen, and by the
     /// app for `q` and the `⌥<digit>` jumps, which ascend implicitly.
     pub fn ascend(&mut self) {

@@ -9,8 +9,8 @@ use ratatui::widgets::Block;
 
 use super::screens::{account, chat_media, history, memories, overview, settings};
 use super::theme::{Palette, glyph};
-use super::{footer, header};
-use crate::app::{App, Tab};
+use super::{footer, header, widgets};
+use crate::app::{App, Modal, Tab};
 use crate::tui::format::truncate_prose;
 
 /// Below this height the layout stops fitting (cloudy-tui skill: Patterns → Density).
@@ -63,7 +63,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // (`t toggle all`, `space toggle`) and derive them off the picker's state; the descended set
     // is universal, so it is chosen off `descended` rather than per tab. See `App`'s own docs
     // for why the active screen wins.
-    let hints = if app.descended() {
+    let hints = if let Some(modal) = app.modal() {
+        // A modal owns every key but `ctrl+c`, so the hint set is the modal's own: `q back` and
+        // `esc cancel` instead of the switch/quit pair, and the menu's arrow/enter keys. Chosen
+        // before the descended/editing checks — a modal opened over a descended pane still owns
+        // input, and its keys are what the footer must describe this frame.
+        match modal {
+            Modal::ActionMenu(_) => footer::action_menu_hints(&palette, footer_area.width),
+            Modal::Help => footer::help_hints(&palette, footer_area.width),
+        }
+    } else if app.descended() {
         footer::descended_hints(&palette, footer_area.width)
     } else {
         match app.active() {
@@ -72,7 +81,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             // tab) and `q` types a letter, so the plain set would advertise keys that do
             // something else this frame — the edit set replaces it.
             Tab::Settings if app.settings().is_editing() => footer::settings_edit_hints(&palette, footer_area.width),
-            _ => footer::plain_hints(&palette, footer_area.width),
+            _ => footer::plain_hints(&palette, app.has_actions(), footer_area.width),
         }
     };
     frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), hints, footer_area.width), footer_area);
@@ -103,6 +112,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // no tab-activity color channel, so the toast is the one notification surface.
     if let Some(toast) = app.settings().toast() {
         settings::render_toast(frame, &palette, toast, area);
+    }
+
+    // A modal renders over the finished frame and the toast alike — it owns input and is the top
+    // surface while open (cloudy-tui: Modals float on the unchanged screen).
+    if let Some(modal) = app.modal() {
+        match modal {
+            Modal::ActionMenu(menu) => widgets::render_action_menu(frame, &palette, &menu.labels, &menu.hotkeys, menu.selected, area),
+            Modal::Help => widgets::render_help_modal(frame, &palette, &app.help_sections(), area),
+        }
     }
 }
 

@@ -299,6 +299,15 @@ impl Account {
         self.descended = false;
     }
 
+    /// The keys this screen binds in its current pane, for the help modal's screen section
+    /// (cloudy-tui: Help modal). The `GLOBAL` section holds the universal keys; this is the
+    /// per-screen remainder, in the modal's spaced arrow forms. The screen is read-only, so it has
+    /// no actions and its `a` key is inert.
+    #[must_use]
+    pub fn help_keys(&self) -> Vec<(&'static str, &'static str)> {
+        if self.descended { vec![("↑ ↓", "scroll"), ("esc", "back")] } else { vec![("↑ ↓", "move"), ("↵", "descend")] }
+    }
+
     /// Handles one key while the account tab is active. `true` when the screen consumed it.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         // The detail pane's existence is render-derived: a resize below the floor is delivered

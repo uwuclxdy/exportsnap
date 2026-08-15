@@ -255,6 +255,35 @@ impl Memories {
         self.transcode
     }
 
+    /// The actions the action menu lists, in menu order (cloudy-tui: Action menu). The run trigger
+    /// is this screen's one action; empty while a run is in flight (it is disabled then) or while
+    /// the table pane owns the caret (the table is read-only). The menu's emptiness is what the
+    /// hint bar and the help modal's `a` row derive from.
+    #[must_use]
+    pub fn actions(&self) -> Vec<&'static str> {
+        if self.start_enabled() && !self.table.descended { vec!["start run"] } else { Vec::new() }
+    }
+
+    /// Runs one of [`Self::actions`]' entries, matched by label. The label is the menu's own
+    /// output, so an unknown one is a caller bug; the `start_enabled` guard mirrors the chip's.
+    pub fn run_action(&mut self, label: &'static str) {
+        if label == "start run" && self.start_enabled() {
+            self.start_run();
+        }
+    }
+
+    /// The keys this screen binds in its current pane, for the help modal's screen section
+    /// (cloudy-tui: Help modal). The `GLOBAL` section holds the universal keys; this is the
+    /// per-screen remainder, in the modal's spaced arrow forms.
+    #[must_use]
+    pub fn help_keys(&self) -> Vec<(&'static str, &'static str)> {
+        if self.table.descended {
+            vec![("↑ ↓", "scroll"), ("esc", "back")]
+        } else {
+            vec![("↑ ↓", "move"), ("↵", "start / descend"), ("space", "toggle transcode")]
+        }
+    }
+
     /// Returns the caret to the form. Called by esc and `←` from inside the screen, and by the
     /// app for `q` and the `⌥<digit>` jumps, which ascend implicitly.
     pub fn ascend(&mut self) {

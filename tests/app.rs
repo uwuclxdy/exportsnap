@@ -405,3 +405,125 @@ fn a_latched_hold_self_heals_on_the_next_press_release_pair() {
     alt_release(&mut app);
     assert!(!app.alt_held());
 }
+
+// ---- action menu + help modal (skill: Action menu; Help modal; Keyboard grammar `a`/`?`) ----
+
+#[test]
+fn question_mark_opens_the_help_modal_and_q_closes_it() {
+    let mut app = app();
+    press(&mut app, KeyCode::Char('?'));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::Help)));
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.modal().is_none());
+    assert!(!app.is_quit_armed(), "q closes the modal, never arms the quit");
+    assert!(app.is_running());
+}
+
+#[test]
+fn esc_and_question_mark_also_close_the_help_modal() {
+    for closer in [KeyCode::Esc, KeyCode::Char('?')] {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.modal().is_some());
+        press(&mut app, closer);
+        assert!(app.modal().is_none(), "{closer:?} closes help");
+    }
+}
+
+#[test]
+fn a_opens_the_action_menu_on_a_screen_with_actions() {
+    let mut app = app();
+    jump(&mut app, '2'); // memories
+    press(&mut app, KeyCode::Char('a'));
+    match app.modal() {
+        Some(exportsnap::app::Modal::ActionMenu(menu)) => {
+            assert_eq!(menu.labels, ["start run"]);
+            assert_eq!(menu.hotkeys, [Some('s')], "the run trigger takes its first free letter");
+        }
+        other => panic!("expected the action menu, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_is_inert_on_a_screen_with_no_actions() {
+    let mut app = app(); // overview: read-only, no actions
+    press(&mut app, KeyCode::Char('a'));
+    assert!(app.modal().is_none(), "overview has no action to list");
+    assert_eq!(app.active(), Tab::Overview);
+}
+
+#[test]
+fn esc_and_q_close_the_action_menu_without_arming_the_quit() {
+    for closer in [KeyCode::Esc, KeyCode::Char('q')] {
+        let mut app = app();
+        jump(&mut app, '2');
+        press(&mut app, KeyCode::Char('a'));
+        assert!(app.modal().is_some());
+        press(&mut app, closer);
+        assert!(app.modal().is_none(), "{closer:?} closes the menu");
+        assert!(!app.is_quit_armed(), "closing the menu never arms the quit");
+    }
+}
+
+#[test]
+fn a_modal_owns_input_arrows_and_jumps_do_not_switch_tabs() {
+    let mut app = app();
+    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.active(), Tab::Overview, "← → must not switch tabs while a modal is open");
+    jump(&mut app, '3');
+    assert_eq!(app.active(), Tab::Overview, "⌥<digit> must not jump while a modal is open");
+}
+
+#[test]
+fn the_action_menu_hotkey_runs_its_action() {
+    let state = tempfile::TempDir::new().unwrap();
+    let mut app = app();
+    jump(&mut app, '2'); // memories
+    app.memories_mut().set_manifest_dir(state.path().to_path_buf());
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Char('s')); // "start run" → s
+    assert!(app.modal().is_none(), "the hotkey closes the menu");
+    assert!(app.memories().run_in_flight(), "the picked action ran");
+}
+
+#[test]
+fn enter_picks_the_selected_action_too() {
+    let state = tempfile::TempDir::new().unwrap();
+    let mut app = app();
+    jump(&mut app, '2'); // memories
+    app.memories_mut().set_manifest_dir(state.path().to_path_buf());
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Enter);
+    assert!(app.modal().is_none());
+    assert!(app.memories().run_in_flight());
+}
+
+#[test]
+fn the_help_modal_derives_its_sections_from_the_active_screen() {
+    let mut app = app();
+    // Overview has no actions and no screen keys: just GLOBAL, without the `a` row.
+    let sections = app.help_sections();
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].title, "global");
+    assert_eq!(sections[0].rows, [("q", "back / quit"), ("?", "help"), ("← →", "switch tab"), ("⌃c", "quit")]);
+
+    // Memories has the run action and its own keys: GLOBAL grows `a`, then the screen section.
+    jump(&mut app, '2');
+    let sections = app.help_sections();
+    assert_eq!(sections.len(), 2);
+    assert!(sections[0].rows.contains(&("a", "actions")), "the menu has an action to name");
+    assert_eq!(sections[1].title, "memories");
+    assert_eq!(sections[1].rows, [("↑ ↓", "move"), ("↵", "start / descend"), ("space", "toggle transcode")]);
+}
+
+#[test]
+fn a_and_question_mark_do_not_open_modals_while_a_settings_field_is_editing() {
+    let mut app = app();
+    jump(&mut app, '6'); // settings
+    press(&mut app, KeyCode::Enter); // begin editing the output-dir row
+    assert!(app.settings().is_editing(), "the edit session opened");
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.modal().is_none(), "a and ? type into the field, never open a modal");
+}

@@ -747,7 +747,7 @@ fn a_jump_away_and_back_preserves_the_edit_session() {
 #[test]
 fn the_settings_edit_hints_replace_the_switch_set_while_editing() {
     let mut app = on_settings();
-    assert_eq!(row(draw(&mut app, 80, 20).backend().buffer(), 19), padded(" ←→ switch   q quit", 61));
+    assert_eq!(row(draw(&mut app, 80, 20).backend().buffer(), 19), padded(" ←→ switch   ? help   q quit", 52));
 
     press(&mut app, KeyCode::Enter);
     assert_eq!(row(draw(&mut app, 80, 20).backend().buffer(), 19), padded(" ←→ move   ↵ commit   esc cancel", 48));

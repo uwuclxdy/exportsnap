@@ -855,8 +855,10 @@ fn the_history_tab_hints_name_its_own_keys_while_the_picker_holds_rows() {
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let footer = (0..120).map(|x| terminal.backend().buffer()[(x, 23)].symbol()).collect::<String>();
     // The history tab's own keys take the middle groups: `t toggle all` and `space toggle`,
-    // between the shell's universal `←→ switch` and `q quit` (finding 7).
-    assert_eq!(footer.trim_end(), " ←→ switch   t toggle all   space toggle   q quit");
+    // between the shell's universal `←→ switch` and the `a actions   ? help   q quit` tail
+    // (finding 7). `a actions` is derived from the picker holding rows to act on, exactly like
+    // the two toggle hints it joins.
+    assert_eq!(footer.trim_end(), " ←→ switch   t toggle all   space toggle   a actions   ? help   q quit");
 }
 
 #[test]
@@ -868,14 +870,14 @@ fn the_toggle_hints_leave_the_footer_when_the_picker_has_no_rows() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let footer = (0..120).map(|x| terminal.backend().buffer()[(x, 23)].symbol()).collect::<String>();
-    assert_eq!(footer.trim_end(), " ←→ switch   q quit");
+    assert_eq!(footer.trim_end(), " ←→ switch   ? help   q quit");
 }
 
 #[test]
 fn the_footer_trims_from_the_right_and_keeps_the_quit_hint_at_narrow_widths() {
-    // The full history set is 49 cells; at 42 the tail — `q quit` — used to clip entirely, its
-    // six cells sitting beyond the frame (reviewer #2). The set trims from the right, the
-    // escape hint last to go, so the escape stays reachable anywhere the frame renders.
+    // The full history set is 70 cells; at 42 the tail — `a actions   ? help   q quit` — used to
+    // clip entirely, its cells sitting beyond the frame (reviewer #2). The set trims from the
+    // right, the escape hint last to go, so the escape stays reachable anywhere the frame renders.
     let dir = export_tree(&two_threads());
     let mut app = app_on_history(&dir);
     let mut terminal = Terminal::new(TestBackend::new(42, 24)).unwrap();
