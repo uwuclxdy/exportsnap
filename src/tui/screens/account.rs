@@ -388,17 +388,27 @@ pub fn render(frame: &mut Frame, palette: &Palette, account: &mut Account, area:
 
     if side_by_side {
         let [left, right] = Layout::horizontal([Constraint::Length(sections_panel_width()), Constraint::Fill(1)]).areas(area);
-        render_sections(frame, palette, account, left);
-        render_detail(frame, palette, account, right);
+        // Both panes hug their content (decision 79): the section list is its five rows and the
+        // detail is the selected section's rows, so neither carries a blank tail.
+        render_sections(frame, palette, account, widgets::hug(left, sections_panel_height()));
+        render_detail(frame, palette, account, widgets::hug(right, detail_height(account.section())));
     } else if stacked {
-        // The section list takes exactly its rows and the detail takes the rest, so the
-        // borders touch with no gap between them (0-cell panel gaps in every mode).
-        let [top, bottom] = Layout::vertical([Constraint::Length(sections_panel_height()), Constraint::Fill(1)]).areas(area);
+        // Both panes take exactly their rows, so the borders touch with no gap between them
+        // (0-cell panel gaps in every mode).
+        let [top, bottom] =
+            Layout::vertical([Constraint::Length(sections_panel_height()), Constraint::Length(detail_height(account.section()))])
+                .areas(area);
         render_sections(frame, palette, account, top);
         render_detail(frame, palette, account, bottom);
     } else {
-        render_sections(frame, palette, account, area);
+        render_sections(frame, palette, account, widgets::hug(area, sections_panel_height()));
     }
+}
+
+/// The detail pane's height for the selected section: its rows plus the borders. The pane hugs
+/// this (decision 79) and scrolls its list once the body offers less.
+fn detail_height(section: Section) -> u16 {
+    u16::try_from(section_rows(section).len() + usize::from(widgets::BORDER_ROWS)).unwrap_or(u16::MAX)
 }
 
 /// Draws the section list into `area`.

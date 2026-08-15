@@ -25,7 +25,7 @@ use crate::export::model::{Conversation, Timestamp};
 use crate::export::zip::{PartGroup, discover_parts};
 use crate::tui::shell;
 use crate::tui::theme::{Palette, glyph};
-use crate::tui::widgets::{self, PanelStyle, min_width_for_title, panel};
+use crate::tui::widgets::{self, EMPTY_STATE_ROWS, PanelStyle, min_width_for_title, panel};
 
 /// Both border columns plus the panel's 1-cell horizontal padding on each side, taken from the
 /// widget that draws them rather than restated here — the width-axis twin of
@@ -35,8 +35,6 @@ const PANEL_CHROME: usize = widgets::CHROME_COLUMNS as usize;
 const LABEL_GAP: usize = 2;
 /// The empty state's inset inside its own frame, matching the contract's example.
 const EMPTY_STATE_INSET: usize = 3;
-/// Two copy lines plus the frame's own two border rows.
-const EMPTY_STATE_ROWS: u16 = 4;
 /// Cells the source row's value occupies — always exactly this many, head-ellipsised when the path
 /// is longer and right-padded when it is shorter.
 ///
@@ -111,9 +109,12 @@ impl SummaryRow {
 /// exists. Those four figures are pinned by `row_clipping_begins_one_row_below_the_last_height_that_fits`
 /// rather than left as arithmetic in a comment.
 ///
-/// Scope: this covers the two arms where one panel owns the whole body — the overview's panels
-/// and the memories screen's form-only arm both assert against it. The stacked arms split the
-/// body, so what keeps those safe is their own height gates, not this constant.
+/// Scope: since decision 79's density pass every arm hugs its panels to their content heights
+/// ([`widgets::hug`]), so at or above a panel's content height its interior is exactly its rows
+/// and clipping cannot start there — below it the panel takes what the body offers and clips one
+/// row at a time. The constant is what keeps every row count inside the floor, and the stacked
+/// arm's `area.height >= stack_height` gate is the arm that rests on a test rather than on the
+/// compiler.
 pub(crate) const GUARANTEED_INTERIOR_ROWS: u16 = shell::COMPACT_HEIGHT - shell::HEADER_ROWS - shell::FOOTER_ROWS - widgets::BORDER_ROWS;
 const _: () = assert!(SummaryRow::ALL.len() as u16 <= GUARANTEED_INTERIOR_ROWS);
 const _: () = assert!(ENVIRONMENT_ROWS <= GUARANTEED_INTERIOR_ROWS);
@@ -333,20 +334,26 @@ pub fn render(frame: &mut Frame, palette: &Palette, overview: &Overview, area: R
     let widest = summary.min_width().max(environment.min_width());
     let stacked = usize::from(area.width) >= widest && area.height >= stack_height;
 
+    // The panels' content heights, taken before either panel moves into its render call.
+    let summary_height = summary.height();
+    let environment_height = environment.height();
+
     if side_by_side {
-        render_panel(frame, palette, summary, left, first);
-        render_panel(frame, palette, environment, right, second);
+        // Each panel hugs its own content (decision 79): the summary renders its rows and the
+        // environment its own, so neither carries a blank tail under its last row.
+        render_panel(frame, palette, summary, widgets::hug(left, summary_height), first);
+        render_panel(frame, palette, environment, widgets::hug(right, environment_height), second);
     } else if stacked {
-        // The summary takes exactly its rows and the environment takes the rest, so the borders
-        // touch with no gap between them (0-cell panel gaps in every mode) and no blank band opens
-        // up in the middle of the body.
-        let [top, bottom] = Layout::vertical([Constraint::Length(summary.height()), Constraint::Fill(1)]).areas(area);
+        // Both panels take exactly their rows, so the borders touch with no gap between them
+        // (0-cell panel gaps in every mode) and no blank band opens up in the middle of the body.
+        let [top, bottom] = Layout::vertical([Constraint::Length(summary_height), Constraint::Length(environment_height)]).areas(area);
         render_panel(frame, palette, summary, top, first);
         render_panel(frame, palette, environment, bottom, second);
     } else {
-        // Neither layout fits. The summary is the screen's primary content, so it takes what there
-        // is; below its own minimum it renders its box and no rows, per `render_panel`.
-        render_panel(frame, palette, summary, area, first);
+        // Neither layout fits. The summary is the screen's primary content, so it takes its rows
+        // or what there is; below its own minimum it renders its box and no rows, per
+        // `render_panel`.
+        render_panel(frame, palette, summary, widgets::hug(area, summary_height), first);
     }
 }
 

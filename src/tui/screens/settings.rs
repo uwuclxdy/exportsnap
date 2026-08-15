@@ -38,7 +38,7 @@ use crate::export::local_fix::default_out_root;
 use crate::tui::format::{cells, head_ellipsis, right_pad, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, Tier, glyph};
-use crate::tui::widgets::{CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycle_options, form_label, panel, tint_to_edge};
+use crate::tui::widgets::{self, CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycle_options, form_label, panel, tint_to_edge};
 
 // ---- layout budgets ----
 
@@ -71,6 +71,12 @@ const fn cycle_cells() -> usize {
 const WIDEST_FORM_LABEL: usize = 12;
 /// Cells the provenance clause occupies at its widest — ` · detection`.
 const TAG_CELLS: usize = 12;
+
+/// The form panel's height: the five rows plus the panel's two borders — what the panel hugs to
+/// (decision 79) wherever the body offers it.
+fn form_height() -> u16 {
+    u16::try_from(FormRow::ALL.len() + usize::from(widgets::BORDER_ROWS)).unwrap_or(u16::MAX)
+}
 
 /// The form panel's interior cells at its widest row.
 const FORM_INTERIOR: usize = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + VALUE_CELLS + TAG_CELLS;
@@ -619,6 +625,10 @@ const DANGER_TOAST_TICKS: u32 = 75;
 
 /// Draws the settings form into `area` — the panel the shell hands this tab.
 pub fn render(frame: &mut Frame, palette: &Palette, settings: &Settings, area: Rect) {
+    // The panel hugs its five rows (decision 79): the form's own height, no fixed budget, so the
+    // blank tail that used to hang under the last row is gone. Below it the form scrolls with
+    // the focus exactly as it did when the compact banner squeezed the body.
+    let area = widgets::hug(area, form_height());
     let block = panel(palette, "settings", PanelStyle { first: true, focused: true });
     let inner = block.inner(area);
     frame.render_widget(block, area);

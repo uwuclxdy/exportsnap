@@ -187,6 +187,46 @@ fn frame_text(buffer: &Buffer) -> String {
     (0..buffer.area.height).map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect()
 }
 
+/// The decision 79 density pin: every panel's content must reach within two rows of its bottom
+/// border. Walks the frame for panel top-left corners (`╭`), finds each panel's bottom border
+/// (`╰` in the same column), and requires a non-blank interior cell within the two rows above
+/// it — a panel whose last content row sits higher than that is dead space.
+///
+/// The interior scan stops at the panel's right border (`│`), so a neighbouring panel's cells on
+/// the same row cannot satisfy this panel's check.
+fn assert_panels_hug(buffer: &Buffer, top: u16) {
+    for y in top..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if buffer[(x, y)].symbol() != "╭" {
+                continue;
+            }
+            let bottom = (y + 1..buffer.area.height)
+                .find(|&by| buffer[(x, by)].symbol() == "╰")
+                .unwrap_or_else(|| panic!("the panel at ({x}, {y}) has no bottom border"));
+            let first = (bottom.saturating_sub(2)).max(y + 1);
+            let content = (first..bottom).any(|cy| {
+                (x.saturating_add(2)..buffer.area.width)
+                    .take_while(|&cx| buffer[(cx, cy)].symbol() != "│")
+                    .any(|cx| buffer[(cx, cy)].symbol() != " ")
+            });
+            assert!(content, "the panel at ({x}, {y}) has no content within two rows of its bottom border at row {bottom}");
+        }
+    }
+}
+
+#[test]
+fn the_panels_hug_their_content_at_the_designed_sizes() {
+    // Decision 79: a panel sizes to the rows it renders. At both designed sizes the panes sit
+    // side by side: the section list hugs its five rows and the detail hugs the selected
+    // section's rows — the body-height panes used to leave both mostly empty.
+    let dir = export_tree();
+    let mut app = app_on_account(dir.path());
+    for (width, height) in [(80, 24), (110, 32)] {
+        let terminal = draw(&mut app, width, height);
+        assert_panels_hug(terminal.backend().buffer(), 1);
+    }
+}
+
 // ---- the sections pane ----
 
 #[test]
@@ -558,10 +598,12 @@ fn the_layout_ladder_keeps_two_panels_and_then_the_sections() {
     let terminal = draw(&mut app, 31, TALL);
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(0, 8)].symbol(), "╭", "31 is the stacked floor");
-    // Below the floor: the sections pane alone, still naming the screen's content.
+    // Below the floor: the sections pane alone, still naming the screen's content — and hugging
+    // its five rows (decision 79) rather than running its border down the whole body.
     let terminal = draw(&mut app, 30, TALL);
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(0, 8)].symbol(), "│", "the sections panel's border runs the body: no detail pane below the stacked floor");
+    assert_eq!(buffer[(0, 7)].symbol(), "╰", "the sections panel closes right under its rows");
+    assert_eq!(buffer[(0, 8)].symbol(), " ", "no detail pane below the stacked floor, and no blank panel tail either");
     assert_eq!(sections_row(buffer, FIRST_ROW), "❯ account", "the master-only arm still names the screen");
     // And enter cannot descend into a pane that does not render.
     press(&mut app, KeyCode::Enter);

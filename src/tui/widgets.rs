@@ -70,6 +70,20 @@ pub(crate) const BORDER_ROWS: u16 = 2;
 /// other. Same test, same reason.
 pub(crate) const CHROME_COLUMNS: u16 = 4;
 
+/// Shrinks `area` to `content_height` rows, capped by what the body actually offers — the
+/// content-hugging helper every screen hands its panels' heights through (decision 79: a panel
+/// sizes to the rows it renders, not to a fixed budget). A content height past the body's keeps
+/// the area whole, and each panel's row-clipping behaviour below its content height is
+/// unchanged.
+pub(crate) fn hug(area: Rect, content_height: u16) -> Rect {
+    Rect { height: area.height.min(content_height), ..area }
+}
+
+/// The framed empty state's rows: the hint, the action line, and the frame's own two borders.
+/// The run screens' progress panels hug to this when idle, so the frame fills the panel instead
+/// of floating in a body-height one.
+pub(crate) const EMPTY_STATE_ROWS: u16 = 4;
+
 // ---- the run-screen kit ----
 
 /// The caret gutter every focusable row leads with.
@@ -255,7 +269,6 @@ pub(crate) fn status_pill(palette: &Palette, status: ItemStatus) -> Vec<Span<'st
 /// that starts the run, its glyph in `ACCENT`.
 pub(crate) fn empty_state(frame: &mut Frame, palette: &Palette, inner: Rect, hint: &str) {
     const INSET: u16 = 3;
-    const ROWS: u16 = 4;
 
     let action = Line::from(vec![
         Span::styled("press ", Style::new().fg(palette.text_dim)),
@@ -263,7 +276,7 @@ pub(crate) fn empty_state(frame: &mut Frame, palette: &Palette, inner: Rect, hin
         Span::styled(" to start", Style::new().fg(palette.text_dim)),
     ]);
     let width = u16::try_from(cells(hint).max(16) + 2 * usize::from(INSET) + 2).unwrap_or(u16::MAX);
-    let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(ROWS));
+    let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(palette.line))

@@ -646,6 +646,34 @@ fn screen_text(buffer: &Buffer) -> String {
     (0..buffer.area.height).map(|y| row(buffer, y)).collect::<Vec<_>>().join("\n")
 }
 
+/// The decision 79 density pin: every panel's content must reach within two rows of its bottom
+/// border. Walks the frame for panel top-left corners (`╭`), finds each panel's bottom border
+/// (`╰` in the same column), and requires a non-blank interior cell within the two rows above
+/// it — a panel whose last content row sits higher than that is dead space.
+///
+/// The interior scan stops at the panel's right border (`│`), so a neighbouring panel's cells on
+/// the same row cannot satisfy this panel's check; the progress panel's nested empty-state frame
+/// is content and passes off its own corners.
+fn assert_panels_hug(buffer: &Buffer, top: u16) {
+    for y in top..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if buffer[(x, y)].symbol() != "╭" {
+                continue;
+            }
+            let bottom = (y + 1..buffer.area.height)
+                .find(|&by| buffer[(x, by)].symbol() == "╰")
+                .unwrap_or_else(|| panic!("the panel at ({x}, {y}) has no bottom border"));
+            let first = (bottom.saturating_sub(2)).max(y + 1);
+            let content = (first..bottom).any(|cy| {
+                (x.saturating_add(2)..buffer.area.width)
+                    .take_while(|&cx| buffer[(cx, cy)].symbol() != "│")
+                    .any(|cx| buffer[(cx, cy)].symbol() != " ")
+            });
+            assert!(content, "the panel at ({x}, {y}) has no content within two rows of its bottom border at row {bottom}");
+        }
+    }
+}
+
 /// The COLUMN a run of cells spells `needle` at, and the only one.
 ///
 /// Deliberately not `str::find` on the flattened row: that answers in BYTES, and the caret, the
@@ -749,10 +777,27 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     assert!(cell_run(buffer, 6).contains("transcode"));
     assert!(cell_run(buffer, 7).contains("start run"));
 
-    assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
-    assert!(cell_run(buffer, 12).contains("press ↵ to start"), "{:?}", cell_run(buffer, 12));
+    // The progress panel hugs the empty-state frame (decision 79), so the two copy rows sit
+    // right under the panel's top border instead of floating in a body-height panel.
+    assert!(cell_run(buffer, 3).contains("no run yet"), "{:?}", cell_run(buffer, 3));
+    assert!(cell_run(buffer, 4).contains("press ↵ to start"), "{:?}", cell_run(buffer, 4));
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));
     assert!(!app.chat_media().descended());
+}
+
+#[test]
+fn the_panels_hug_their_content_at_the_designed_sizes() {
+    // Decision 79: a panel sizes to the rows it renders. At both designed sizes the panels
+    // stack (the location column keeps the side-by-side floor at 125), and each must carry
+    // content to its bottom border: the form's last row is `start run`, the idle progress
+    // panel's is the empty state's action line. The fixed budgets used to leave a blank tail
+    // under the form and a body-height progress panel around the centered frame.
+    for (width, height) in [(80, 24), (110, 32)] {
+        let mut app = app_on_fixed_source(Tier::Full);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        assert_panels_hug(terminal.backend().buffer(), 1);
+    }
 }
 
 /// The cycle row's contract: every option renders as a bare word, the selected one is bracketed
@@ -1684,10 +1729,11 @@ fn a_worker_that_panics_still_yields_a_panic_alert_and_no_stuck_spinner() {
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 
     // The empty state is read at its side-by-side position, so the frame must clear the arm's
-    // floor: the location column (decision 76) raised it from 90 to 121 cells.
+    // floor: the location column (decision 76) raised it from 90 to 121 cells. The progress
+    // panel hugs the frame (decision 79), so the hint is the panel's first interior row.
     let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    let progress = cell_run(terminal.backend().buffer(), 11);
+    let progress = cell_run(terminal.backend().buffer(), 3);
     assert!(progress.contains("no run yet"), "{progress}");
     assert!(!progress.contains('\u{280b}'), "{progress}");
 }

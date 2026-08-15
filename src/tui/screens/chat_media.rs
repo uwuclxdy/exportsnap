@@ -616,21 +616,37 @@ pub fn render(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, area: 
 
     // The overview's layout ladder: side by side, stacked, then form-only as the last resort for a
     // frame too small for either. The table scrolls, so the stacked arm only needs its floor rows.
+    // Both panels hug their content (decision 79): the form is its rows and the progress panel is
+    // its table, spinner row or framed empty state, so neither carries a blank tail.
     let side_by_side = usize::from(area.width) >= usize::from(form_panel_width) + usize::from(table_panel_width);
     let stacked =
         !side_by_side && usize::from(area.width) >= usize::from(form_panel_width) && area.height >= form_height + TABLE_FLOOR_ROWS;
 
+    let progress_height = progress_height(chat);
+
     if side_by_side {
         let [left, right] = Layout::horizontal([Constraint::Length(form_panel_width), Constraint::Fill(1)]).areas(area);
-        render_form(frame, palette, chat, left);
-        render_progress(frame, palette, chat, right);
+        render_form(frame, palette, chat, widgets::hug(left, form_height));
+        render_progress(frame, palette, chat, widgets::hug(right, progress_height));
     } else if stacked {
         let [top, bottom] = Layout::vertical([Constraint::Length(form_height), Constraint::Fill(1)]).areas(area);
         render_form(frame, palette, chat, top);
-        render_progress(frame, palette, chat, bottom);
+        render_progress(frame, palette, chat, widgets::hug(bottom, progress_height));
     } else {
-        render_form(frame, palette, chat, area);
+        render_form(frame, palette, chat, widgets::hug(area, form_height));
     }
+}
+
+/// The progress panel's content height (decision 79: the panel hugs what it holds): the framed
+/// empty state, the single planning row, or the counts line + bar + header + one row per planned
+/// item. Capped at the body by [`widgets::hug`], after which the list scrolls.
+fn progress_height(chat: &ChatMedia) -> u16 {
+    let content = match &chat.run {
+        Run::Idle | Run::Active { view: None, worker: Worker::Finished } => widgets::EMPTY_STATE_ROWS,
+        Run::Active { view: None, worker: Worker::Working } => 1,
+        Run::Active { view: Some(view), .. } => 3 + u16::try_from(view.rows.len()).unwrap_or(u16::MAX),
+    };
+    content.saturating_add(widgets::BORDER_ROWS)
 }
 
 fn render_form(frame: &mut Frame, palette: &Palette, chat: &ChatMedia, area: Rect) {

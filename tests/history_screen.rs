@@ -96,6 +96,47 @@ fn formats_row(buffer: &Buffer, y: u16) -> String {
 /// side, the picker taking its fixed budget and the formats pane the rest.
 const PICKER_PANEL_WIDTH: u16 = 34;
 
+/// The decision 79 density pin: every panel's content must reach within two rows of its bottom
+/// border. Walks the frame for panel top-left corners (`╭`), finds each panel's bottom border
+/// (`╰` in the same column), and requires a non-blank interior cell within the two rows above
+/// it — a panel whose last content row sits higher than that is dead space.
+///
+/// The interior scan stops at the panel's right border (`│`), so a neighbouring panel's cells on
+/// the same row cannot satisfy this panel's check.
+fn assert_panels_hug(buffer: &Buffer, top: u16) {
+    for y in top..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if buffer[(x, y)].symbol() != "╭" {
+                continue;
+            }
+            let bottom = (y + 1..buffer.area.height)
+                .find(|&by| buffer[(x, by)].symbol() == "╰")
+                .unwrap_or_else(|| panic!("the panel at ({x}, {y}) has no bottom border"));
+            let first = (bottom.saturating_sub(2)).max(y + 1);
+            let content = (first..bottom).any(|cy| {
+                (x.saturating_add(2)..buffer.area.width)
+                    .take_while(|&cx| buffer[(cx, cy)].symbol() != "│")
+                    .any(|cx| buffer[(cx, cy)].symbol() != " ")
+            });
+            assert!(content, "the panel at ({x}, {y}) has no content within two rows of its bottom border at row {bottom}");
+        }
+    }
+}
+
+#[test]
+fn the_panels_hug_their_content_at_the_designed_sizes() {
+    // Decision 79: a panel sizes to the rows it renders. At both designed sizes the panels sit
+    // side by side: the picker hugs its two conversation rows and the formats pane hugs its
+    // toggles, chip and counter slot — the body-height panels used to leave both mostly empty.
+    let dir = export_tree(&two_threads());
+    let mut app = app_on_history(&dir);
+    for (width, height) in [(80, 24), (110, 32)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+        assert_panels_hug(terminal.backend().buffer(), 1);
+    }
+}
+
 /// Walks to the history tab with `→`, bounded for the reason `tests/shell.rs`'s `on_tab_in`
 /// spells out in full: `→` is inert while a pane is descended, so an unbounded walk from a
 /// descended screen never terminates.
@@ -902,7 +943,8 @@ fn the_picker_only_walk_covers_the_chip_and_never_the_invisible_formats_rows() {
     let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
 
-    // Interior rows 2..21 at 24 high: the two conversation rows, then the chip and the counter.
+    // The pane hugs its content (decision 79): the two conversation rows, then the chip and the
+    // counter right below them, instead of the chip parked on the body-height pane's last rows.
     let row = |buffer: &Buffer, y: u16| (2..49).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned();
     assert_eq!(row(terminal.backend().buffer(), 2), "❯ [x] Alice's Thread");
     press(&mut app, KeyCode::Down);
@@ -911,7 +953,7 @@ fn the_picker_only_walk_covers_the_chip_and_never_the_invisible_formats_rows() {
     assert_eq!(row(terminal.backend().buffer(), 3), "❯ [x] bob");
     press(&mut app, KeyCode::Down);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    assert_eq!(row(terminal.backend().buffer(), 20), "❯  export 2", "the walk reaches the chip at the picker-only geometry");
+    assert_eq!(row(terminal.backend().buffer(), 4), "❯  export 2", "the walk reaches the chip at the picker-only geometry");
     press(&mut app, KeyCode::Down);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     assert_eq!(row(terminal.backend().buffer(), 2), "❯ [x] Alice's Thread", "the walk wraps back to the first row");
@@ -939,17 +981,16 @@ fn the_disabled_chips_reason_renders_under_the_chip_in_the_picker_only_arm() {
     press(&mut app, KeyCode::Char('t')); // deselects everything: the chip disables
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
 
-    // Disabled with a one-line reason at this width — the pane spans the full frame, so its
-    // 46-cell interior holds the reason whole: the slot is the chip, the reason, and the
-    // counter, the chip sitting three rows up from the pane's bottom, its reason row blank
-    // while the walk holds a conversation row.
+    // Disabled with a one-line reason at this width — the pane hugs its content (decision 79),
+    // so the slot is the chip, the reason, and the counter right under the two conversation
+    // rows; the chip's reason row stays blank while the walk holds a conversation row.
     let row = |buffer: &Buffer, y: u16| (2..49).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned();
-    assert_eq!(row(terminal.backend().buffer(), 19), "   export", "the disabled chip holds its row before the walk reaches it");
-    assert_eq!(row(terminal.backend().buffer(), 20), "", "the reserved reason row stays blank until the walk holds the chip");
+    assert_eq!(row(terminal.backend().buffer(), 4), "   export", "the disabled chip holds its row before the walk reaches it");
+    assert_eq!(row(terminal.backend().buffer(), 5), "", "the reserved reason row stays blank until the walk holds the chip");
 
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    assert_eq!(row(terminal.backend().buffer(), 19), "❯  export", "the walk's chip caret");
-    assert_eq!(row(terminal.backend().buffer(), 20), "  └ pick at least one conversation");
+    assert_eq!(row(terminal.backend().buffer(), 4), "❯  export", "the walk's chip caret");
+    assert_eq!(row(terminal.backend().buffer(), 5), "  └ pick at least one conversation");
 }
