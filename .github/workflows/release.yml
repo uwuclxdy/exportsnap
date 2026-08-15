@@ -16,9 +16,10 @@
 # The GitHub release is NOT created here with notes — a release script owns that
 # (right after the tag push, so the notes ride GitHub's release email); this
 # workflow only builds the binaries and uploads them (plus sums) to that release
-# from ONE job, so no concurrent find-or-create can duplicate it. exportsnap has
-# no release script yet, so today every tag takes the bare-release fallback in
-# the publish job (no notes). A hand-pushed tag gets its binaries either way.
+# from ONE job, so no concurrent find-or-create can duplicate it. The shared
+# ~/repos/rs/release.sh driver creates the release (with --notes, when given a
+# changelog); a tag pushed without it takes the bare-release fallback in the
+# publish job (no notes). A hand-pushed tag gets its binaries either way.
 #
 # Each target builds on its NATIVE runner (linux→ubuntu, macos→macos-latest,
 # windows→windows-latest, MSVC): a dep that vendors a C/C++ build (rusqlite's
