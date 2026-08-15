@@ -578,20 +578,20 @@ impl fmt::Display for ManifestError {
         match self {
             Self::NoDataDir => write!(
                 f,
-                "no per-user data directory to keep the download manifest in; set HOME (or XDG_DATA_HOME) so resume state has somewhere private to live"
+                "no per-user data directory to keep the resume manifest in; set HOME (or XDG_DATA_HOME) so resume state has somewhere private to live"
             ),
             Self::Create { path, source } => {
                 write!(f, "could not create the manifest at {}: {source}; check the directory is writable", path.display())
             }
             Self::Sqlite { op, path, source } => write!(
                 f,
-                "could not {op} in the manifest at {}: {source}; if this repeats, delete that file to redo this export's downloads from scratch",
+                "could not {op} in the manifest at {}: {source}; if this repeats, delete that file and the next run rebuilds it, re-checking every item against the media on disk",
                 path.display()
             ),
             Self::FutureSchema { path, found, supported } => write!(
                 f,
                 "the manifest at {} was written with schema version {found} and this build reads {supported}; \
-                 upgrade exportsnap, or delete that file to redo this export's downloads from scratch",
+                 upgrade exportsnap, or delete that file and let the next run rebuild it from scratch",
                 path.display()
             ),
             Self::WrongExport { path, found, wanted } => write!(
@@ -601,8 +601,8 @@ impl fmt::Display for ManifestError {
             ),
             Self::MissingExportPin { path } => write!(
                 f,
-                "the manifest at {} carries no export id; it was edited outside exportsnap, so delete it to redo this \
-                 export's downloads from scratch",
+                "the manifest at {} carries no export id; it was edited outside exportsnap, so delete it and the next \
+                 run rebuilds it from scratch",
                 path.display()
             ),
             // Two causes reach this and the message must not pick one: a NEWER build wrote a word
@@ -612,8 +612,8 @@ impl fmt::Display for ManifestError {
             Self::CorruptRow { column, value } => write!(
                 f,
                 "the manifest's {column} column holds {value:?}, which this build cannot read; a newer exportsnap may have \
-                 written it, or the file was edited outside exportsnap — upgrade first, and delete that file to redo this \
-                 export's downloads from scratch only if upgrading does not help"
+                 written it, or the file was edited outside exportsnap — upgrade first, and delete that file only if \
+                 upgrading does not help; the next run then rebuilds it from scratch"
             ),
             Self::Output { path, source } => write!(f, "could not read {} to check it in: {source}", path.display()),
             Self::OutputPath { path, problem } => match problem {
@@ -1811,4 +1811,52 @@ fn reserve_private(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn reserve_private(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod error_copy {
+    use super::*;
+
+    /// Decision 74 dropped the download feature, so a message telling the user to redo one names
+    /// an operation this build cannot perform — and the advice that survives around it is
+    /// "delete this file", which is destructive. Task 91 believed it had swept this class and
+    /// missed these because it grepped `downloader`, which never matches `downloads`.
+    ///
+    /// The match is exhaustive on purpose: a new variant does not compile until someone looks
+    /// here, which is the only part of this a grep cannot do for the next person.
+    #[test]
+    fn no_manifest_error_tells_the_user_to_redo_a_download() {
+        let every = vec![
+            ManifestError::NoDataDir,
+            ManifestError::Create { path: PathBuf::from("/x"), source: io::Error::other("x") },
+            ManifestError::Sqlite { op: "read", path: PathBuf::from("/x"), source: rusqlite::Error::QueryReturnedNoRows },
+            ManifestError::FutureSchema { path: PathBuf::from("/x"), found: 9, supported: 1 },
+            ManifestError::WrongExport { path: PathBuf::from("/x"), found: "a".into(), wanted: "b".into() },
+            ManifestError::MissingExportPin { path: PathBuf::from("/x") },
+            ManifestError::CorruptRow { column: Column::Status, value: "x".into() },
+            ManifestError::Output { path: PathBuf::from("/x"), source: io::Error::other("x") },
+            ManifestError::OutputPath { path: PathBuf::from("/x"), problem: PathProblem::Relative },
+            ManifestError::UnknownItem { kind: ItemKind::Memory, source_id: "x".into() },
+        ];
+
+        for error in &every {
+            match error {
+                ManifestError::NoDataDir
+                | ManifestError::Create { .. }
+                | ManifestError::Sqlite { .. }
+                | ManifestError::FutureSchema { .. }
+                | ManifestError::WrongExport { .. }
+                | ManifestError::MissingExportPin { .. }
+                | ManifestError::CorruptRow { .. }
+                | ManifestError::Output { .. }
+                | ManifestError::OutputPath { .. }
+                | ManifestError::UnknownItem { .. } => {}
+            }
+            let rendered = error.to_string();
+            assert!(
+                !rendered.to_ascii_lowercase().contains("download"),
+                "this build downloads nothing, so no error may name one: {rendered:?}"
+            );
+        }
+    }
 }
