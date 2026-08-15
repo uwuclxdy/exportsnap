@@ -737,7 +737,11 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
 
     let done = view.statuses.iter().filter(|&&status| status == ItemStatus::Done).count();
     frame.render_widget(Paragraph::new(overall_bar(palette, done, view.rows.len(), usize::from(inner.width))), bar_area);
-    let columns = ProgressColumns::for_width(usize::from(inner.width));
+    let max_identity = view.rows.iter().map(|row| cells(&row.source_id)).max().unwrap_or(0);
+    let max_output = view.rows.iter().map(|row| cells(&row.output_name)).max().unwrap_or(0);
+    // Chat rows carry no place name (decision 76's field is memories-only), so the location column
+    // keeps its floor and never steals width the output names need.
+    let columns = ProgressColumns::for_width(usize::from(inner.width), max_identity, 0, max_output);
     frame.render_widget(Paragraph::new(progress_header(palette, columns)), header_area);
 
     let rows: Vec<ProgressRow<'_>> = view

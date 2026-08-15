@@ -877,9 +877,9 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
     );
 
     // Wide enough that the 19-char output name below still renders whole in the output column:
-    // identity and location absorb the surplus first, so the output column only starts growing
-    // past its 6-cell floor once the table interior clears 103 cells.
-    let mut terminal = Terminal::new(TestBackend::new(170, 24)).unwrap();
+    // the chat leg has no place name, so the location column stays at its floor and the surplus
+    // reaches the output column rather than padding a blank.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
 

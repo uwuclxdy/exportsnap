@@ -162,22 +162,22 @@ fn the_form_renders_every_row_with_value_and_provenance() {
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
     assert_eq!(row(buffer, 0), format!("╭─ SETTINGS {}╮", "─".repeat(67)));
-    assert_eq!(row(buffer, 1), panel_row(&format!("{}   · file", padded("❯ output dir  /file/out", 44)), 0));
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /file/out   · file", 44));
     assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible   · file", 42));
-    assert_eq!(row(buffer, 3), panel_row(&format!("{}   · detection", padded("  ffmpeg path  /detected/ffmpeg", 31)), 0));
+    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg   · detection", 31));
     assert_eq!(row(buffer, 4), panel_row("  transcode  ─●   · default", 49));
     assert_eq!(row(buffer, 5), panel_row("  overlay mode  merged  both  originals   · default", 25));
 
     let palette = Palette::new(Tier::Full);
     // The focused row: the accent caret, the value in TEXT, the clause faint, the tint to the
-    // panel's interior edge. The grown value slot pushes the clause to the interior's edge, so
-    // the clause's `·` and the tint's last cell both sit at the panel's right margin.
+    // panel's interior edge. The value is ragged, so the clause trails it at its 3-cell gap and
+    // the tint fills the space to the right of the clause.
     assert_eq!(buffer[(2, 1)].symbol(), "❯");
     assert_eq!(buffer[(2, 1)].style().fg, Some(palette.accent));
     assert!(buffer[(2, 1)].style().add_modifier.contains(Modifier::BOLD));
     assert_eq!(buffer[(16, 1)].style().fg, Some(palette.text));
-    assert_eq!(buffer[(72, 1)].symbol(), "·");
-    assert_eq!(buffer[(72, 1)].style().fg, Some(palette.text_faint));
+    assert_eq!(buffer[(28, 1)].symbol(), "·");
+    assert_eq!(buffer[(28, 1)].style().fg, Some(palette.text_faint));
     assert_eq!(buffer[(77, 1)].style().bg, Some(palette.bg_hover));
     // The theme cycle: the effective tier is the selected word in accent, the other faint.
     assert_eq!(buffer[(11, 2)].style().fg, Some(palette.accent));
@@ -206,9 +206,9 @@ fn the_form_renders_at_57_columns_with_the_clause_gap() {
     let terminal = draw_screen(&settings, 57, 8);
     let buffer = terminal.backend().buffer();
     assert_eq!(row(buffer, 0), format!("╭─ SETTINGS {}╮", "─".repeat(44)));
-    assert_eq!(row(buffer, 1), panel_row(&format!("{}   · file", padded("❯ output dir  /file/out", 21)), 0));
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /file/out   · file", 21));
     assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible   · file", 19));
-    assert_eq!(row(buffer, 3), panel_row(&format!("{}   · detection", padded("  ffmpeg path  /detected/ffmpeg", 8)), 0));
+    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg   · detection", 8));
     assert_eq!(row(buffer, 4), panel_row("  transcode  ─●   · default", 26));
     assert_eq!(row(buffer, 5), panel_row("  overlay mode  merged  both  originals   · default", 2));
 }
@@ -217,8 +217,9 @@ fn the_form_renders_at_57_columns_with_the_clause_gap() {
 fn a_long_path_value_grows_with_the_panel_and_ellipsises_at_the_narrow_floor() {
     let dir = TempDir::new().unwrap();
     let path = PathBuf::from("/".to_owned() + &"f".repeat(42));
-    let config = Config { ffmpeg_path: Some(path.clone()), ..Config::default() };
-    let mut settings = Settings::with_layers(SettingsLayers { config, ..layers(Some(dir.path())) });
+    // A detected (not file-configured) ffmpeg carries the widest ` · detection` clause, which is
+    // what binds the 24-cell narrow floor.
+    let mut settings = Settings::with_layers(SettingsLayers { detected_ffmpeg: Some(path.clone()), ..layers(Some(dir.path())) });
     settings.set_source(PathBuf::from("/export"));
     let whole = path.to_string_lossy().into_owned();
 
@@ -231,7 +232,7 @@ fn a_long_path_value_grows_with_the_panel_and_ellipsises_at_the_narrow_floor() {
     // Narrow (57 wide): the same path still head-ellipsises to the 24-cell floor.
     let terminal = draw_screen(&settings, 57, 8);
     let narrow = row(terminal.backend().buffer(), 3);
-    assert!(narrow.contains('…'), "the 57-column ffmpeg row still truncates to the floor: {narrow}");
+    assert!(narrow.contains('…'), "the 57-column ffmpeg row still truncates to the 24-cell floor: {narrow}");
     assert!(!narrow.contains(&whole), "the 57-column ffmpeg row does not show the whole path: {narrow}");
 }
 
@@ -252,15 +253,15 @@ fn an_empty_draft_ellipsises_the_effective_value_and_marks_it_as_placeholder() {
 
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    // The 32-cell default fits the grown 50-cell slot whole, so no head-ellipsis fires; the
-    // trailing marker still names it a placeholder, and the clause sits at the panel's edge.
+    // The 32-cell default fits the grown 50-cell budget whole, so no head-ellipsis fires; the
+    // trailing marker still names it a placeholder, and the clause trails it at the 3-cell gap.
     assert_eq!(
         row(buffer, 1),
-        panel_row(&format!("✎ output dir  /export/long/tail/exportsnap-out…{}· default", " ".repeat(20)), 0),
+        panel_row("✎ output dir  /export/long/tail/exportsnap-out…   · default", 17),
         "the ghost shows the whole default and its marker stays inside the slot"
     );
     assert_eq!(buffer[(48, 1)].symbol(), "…", "the marker ends the shown default");
-    assert_eq!(buffer[(69, 1)].symbol(), "·", "the clause keeps its column at the panel's edge");
+    assert_eq!(buffer[(52, 1)].symbol(), "·", "the clause trails its value at the 3-cell gap");
 }
 
 #[test]
@@ -280,7 +281,7 @@ fn a_flag_overridden_row_shows_the_flag_value_and_reads_as_overridden() {
 
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    assert_eq!(row(buffer, 1), panel_row(&format!("{}   · flag", padded("❯ output dir  /flag/out", 44)), 0));
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /flag/out   · flag", 44));
     assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible   · flag", 42));
     assert_eq!(
         buffer[(18, 2)].style().fg,
@@ -288,7 +289,7 @@ fn a_flag_overridden_row_shows_the_flag_value_and_reads_as_overridden() {
         "the effective tier, not the file's, is the selected cycle word"
     );
     // The untouched rows keep their own values and clauses.
-    assert_eq!(row(buffer, 3), panel_row(&format!("{}   · detection", padded("  ffmpeg path  /detected/ffmpeg", 31)), 0));
+    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg   · detection", 31));
     assert_eq!(row(buffer, 4), panel_row("  transcode  ─●   · default", 49));
 }
 
@@ -341,7 +342,7 @@ fn a_commit_writes_the_file_and_a_restart_reads_it_back() {
     assert_eq!(config.out_dir.as_deref(), Some(Path::new("/new")));
     let mut restarted = Settings::with_layers(SettingsLayers { config, ..layers(Some(dir.path())) });
     restarted.set_source(PathBuf::from("/export"));
-    let expected = panel_row(&format!("{}   · file", padded("❯ output dir  /new", 49)), 0);
+    let expected = panel_row("❯ output dir  /new   · file", 49);
     assert_eq!(row(render_80(&restarted).backend().buffer(), 1), expected);
 }
 
@@ -367,7 +368,7 @@ fn an_empty_commit_drops_the_key_and_the_row_shows_the_default() {
     // The value joined the way the row itself derives it (`default_out_root`), so the platform's
     // separator reaches the comparison — on windows the row spells `/export\exportsnap-out`.
     let shown = format!("❯ output dir  {}", Path::new("/export").join("exportsnap-out").to_string_lossy());
-    let expected = panel_row(&format!("{}   · default", padded(&shown, 28)), 0);
+    let expected = panel_row(&format!("{}   · default", shown), 28);
     assert_eq!(row(render_80(&restarted).backend().buffer(), 1), expected, "the row falls back to the source-derived default");
 }
 
@@ -552,10 +553,10 @@ fn a_wide_char_draft_places_the_cursor_and_tag_in_display_cells() {
     );
     // `row` reads each cell's symbol, and a wide char's continuation cell is an empty " ",
     // so the expected row spells the slot "中 A".
-    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  中 A{}   · default", " ".repeat(47)), 0));
+    assert_eq!(row(buffer, 1), panel_row("✎ output dir  中 A   · default", 47));
 
-    // 26 wide chars (52 cells) overflow the 50-cell slot, so the window slides to keep the
-    // caret visible, holding at most the slot's cells, and the clause stays at its column
+    // 26 wide chars (52 cells) overflow the 50-cell budget, so the window slides to keep the
+    // caret visible, holding at most the budget's cells, and the clause trails the window
     // instead of being pushed past the panel edge.
     let mut settings = settings_in(&dir);
     settings.handle_key(key(KeyCode::Enter));
@@ -565,14 +566,14 @@ fn a_wide_char_draft_places_the_cursor_and_tag_in_display_cells() {
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
     assert_eq!(terminal.backend().cursor_position(), Position::new(64, 1), "the caret stays at the last cell of the slid window");
-    assert_eq!(buffer[(69, 1)].symbol(), "·", "the provenance clause stays inside the interior");
+    assert_eq!(buffer[(67, 1)].symbol(), "·", "the provenance clause stays inside the interior");
     // The window holds 24 wide chars, not 26 — a char-bounded window would spill past the
     // clause.
-    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}{}   · default", "中 ".repeat(24), "  "), 0));
+    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}   · default", "中 ".repeat(24)), 2));
 
     // A mid-draft caret is where the window's cell cap binds: 40 wide chars (80 cells) after
-    // the cut would spill past the slot, so the window must hold 25 wide chars — the slot,
-    // full — and the clause stays at its column.
+    // the cut would spill past the budget, so the window must hold 25 wide chars — the budget,
+    // full — and the clause trails it.
     let mut settings = settings_in(&dir);
     settings.handle_key(key(KeyCode::Enter));
     for _ in 0..40 {

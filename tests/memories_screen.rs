@@ -575,8 +575,8 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
     );
 
     // Wide enough that the 19-char output name below still renders whole in the output column:
-    // identity and location absorb the surplus first, so the output column only starts growing
-    // past its 6-cell floor once the table interior clears 103 cells (116 at this width).
+    // identity grows toward its 36-char uuid and the empty location column stays at its floor,
+    // so the surplus reaches the output column and the name need not ellipsise.
     let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();

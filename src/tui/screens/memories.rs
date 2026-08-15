@@ -689,7 +689,12 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
 
     let done = view.statuses.iter().filter(|&&status| status == ItemStatus::Done).count();
     frame.render_widget(Paragraph::new(overall_bar(palette, done, view.rows.len(), usize::from(inner.width))), bar_area);
-    let columns = ProgressColumns::for_width(usize::from(inner.width));
+    // The columns grow toward this view's own longest content, so a leg with no place names never
+    // hands its blank location column the surplus a sibling needs.
+    let max_identity = view.rows.iter().map(|row| cells(&row.source_id)).max().unwrap_or(0);
+    let max_location = view.rows.iter().map(|row| row.place_name.as_deref().map_or(0, cells)).max().unwrap_or(0);
+    let max_output = view.rows.iter().map(|row| cells(&row.output_name)).max().unwrap_or(0);
+    let columns = ProgressColumns::for_width(usize::from(inner.width), max_identity, max_location, max_output);
     frame.render_widget(Paragraph::new(progress_header(palette, columns)), header_area);
 
     let rows: Vec<ProgressRow<'_>> = view

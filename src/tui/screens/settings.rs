@@ -36,7 +36,7 @@ use ratatui::widgets::Paragraph;
 use crate::config::{self, Config};
 use crate::export::chat_fix::OverlayMode;
 use crate::export::local_fix::default_out_root;
-use crate::tui::format::{cells, head_ellipsis, right_pad, truncate_prose};
+use crate::tui::format::{cells, head_ellipsis, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, Tier, glyph};
 use crate::tui::widgets::{self, CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycle_options, form_label, panel, tint_to_edge};
@@ -773,8 +773,9 @@ fn value_budget(row: FormRow, provenance: Option<Provenance>, width: usize) -> u
 /// the chat-media form's path treatment; focused, `TEXT`. A live edit swaps in the draft
 /// window with the `✎` glyph for the caret; an empty draft shows the effective value as an
 /// ellipsised, `…`-marked placeholder naming what committing empty would apply, a draft in
-/// `TEXT` beside it. The value pads to the slot's grown budget ([`value_budget`]) so the
-/// provenance clause holds a fixed column at the panel's interior edge.
+/// `TEXT` beside it. The value is ragged like a state row's: it takes its natural width up to
+/// [`value_budget`] and the provenance clause trails it at its 3-cell gap, never padded flush
+/// against the panel edge.
 fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool, effective: String, width: usize) -> Line<'static> {
     let editing = settings.editing.as_ref().filter(|session| session.row == row);
     let budget = value_budget(row, settings.provenance(row), width);
@@ -792,20 +793,19 @@ fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool
         if window.is_empty() {
             // The draft is empty: the placeholder names what committing it would apply — the
             // effective value, or the honest "not found" when nothing was ever detected —
-            // ellipsised to the slot exactly like the idle row, and closed by a trailing `…`
+            // ellipsised to the budget exactly like the idle row, and closed by a trailing `…`
             // marking it as placeholder rather than text the user typed. The marker is a
             // content cue, so it survives NO_COLOR where the dim-vs-text contrast dies
             // (design.md: anything that must stay legible without color needs a content cue,
             // not an attribute).
             let shown = head_ellipsis(&effective, budget - 1);
             let marked = format!("{shown}{}", glyph::ELLIPSIS);
-            Span::styled(right_pad(&marked, budget), Style::new().fg(palette.text_faint))
+            Span::styled(marked, Style::new().fg(palette.text_faint))
         } else {
-            Span::styled(right_pad(&window, budget), Style::new().fg(palette.text))
+            Span::styled(window, Style::new().fg(palette.text))
         }
     } else {
-        let shown = head_ellipsis(&effective, budget);
-        Span::styled(right_pad(&shown, budget), Style::new().fg(if focused { palette.text } else { palette.accent }))
+        Span::styled(head_ellipsis(&effective, budget), Style::new().fg(if focused { palette.text } else { palette.accent }))
     };
     spans.push(value_span);
     spans.extend(provenance_tag(palette, settings.provenance(row)));
