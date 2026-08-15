@@ -1421,7 +1421,8 @@ fn a_wide_progress_table_grows_the_identity_and_location_columns() {
     let state = TempDir::new().unwrap();
     let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
     // A 36-char uuid and a 42-char place name: both fit their grown columns whole once the panel
-    // is wide enough that identity and location stop at their ceilings rather than padding output.
+    // is wide enough that output (here a 5-cell name) is whole and identity and location then
+    // reach their content lengths.
     let place = "x".repeat(42);
     feed_plan(
         &mut app,
@@ -1456,6 +1457,28 @@ fn the_narrow_progress_table_keeps_the_identity_floor_ellipsised() {
     let row_text =
         (0..30).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1)[..8])).unwrap_or_else(|| panic!("no table row rendered"));
     assert!(row_text.contains('…'), "the 18-cell identity floor still ellipsises: {row_text}");
+}
+
+#[test]
+fn the_stacked_progress_table_shows_the_full_output_name_at_110_wide() {
+    // The user's 110x32 capture: the panels stack, the table interior is 106 cells, and the output
+    // filename must render whole — its date prefix is the metadata this app restores, so it takes
+    // its full width before identity or location grow.
+    let mut app = app_on_fixed_source();
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "20240114_103000.mp4".to_owned(), place_name: None, leg: Leg::Image }],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row_text =
+        (0..32).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1))).unwrap_or_else(|| panic!("no table row rendered"));
+    assert!(row_text.contains("20240114_103000.mp4"), "the full output name renders at 110 wide: {row_text}");
+    assert!(!row_text.contains('…'), "no ellipsis in the identity or output column: {row_text}");
 }
 
 /// **Reach pin: the place name renders in the LOCATION column, middle-ellipsised.** A 50-char

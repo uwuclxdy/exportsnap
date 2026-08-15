@@ -35,16 +35,10 @@ const PANEL_CHROME: usize = widgets::CHROME_COLUMNS as usize;
 const LABEL_GAP: usize = 2;
 /// The empty state's inset inside its own frame, matching the contract's example.
 const EMPTY_STATE_INSET: usize = 3;
-/// Cells the source row's value occupies — always exactly this many, head-ellipsised when the path
-/// is longer and right-padded when it is shorter.
-///
-/// The padding is what makes the constant mean what it says. Truncating alone leaves the row's width
-/// at `min(path, 18)`, which feeds the panel's own minimum width and from there the two-versus-one
-/// layout decision — so the responsive breakpoint would move with how deep the user's source dir
-/// happens to sit, which is the exact thing a fixed budget is here to prevent.
-///
-/// Deliberate ceiling: the upgrade path is fitting it to the resolved panel width once a second
-/// variable-width row exists to share the fitting with.
+/// The narrow floor of the source row's value: the fewest cells it occupies before head-ellipsising.
+/// A wider panel hands the value the interior width left after the label column (in `render_panel`),
+/// so a short path shows whole; this only stops the column shrinking below the whole-or-not-at-all
+/// budget, which keeps the responsive breakpoint from moving with how deep the source dir sits.
 const SOURCE_PATH_CELLS: usize = 18;
 
 const DISK_FREE_LABEL: &str = "disk free";
@@ -352,6 +346,10 @@ pub fn render(frame: &mut Frame, palette: &Palette, overview: &Overview, area: R
 struct ScreenPanel {
     title: &'static str,
     body: Body,
+    /// The environment panel's source path, deferred because its value is head-ellipsised to the
+    /// panel's actual interior width rather than a fixed cell count. `None` on the summary panel
+    /// and on an environment with no source (whose `—` row is fixed-width and stays in `body`).
+    source: Option<String>,
 }
 
 /// A panel's interior.
@@ -365,12 +363,13 @@ enum Body {
 impl ScreenPanel {
     /// The panel width this content needs to render whole.
     fn min_width(&self) -> usize {
-        min_width_for_title(self.title).max(PANEL_CHROME + self.body.width())
+        let source = self.source.as_ref().map_or(0, |_| environment_label_column() + SOURCE_PATH_CELLS);
+        min_width_for_title(self.title).max(PANEL_CHROME + self.body.width()).max(PANEL_CHROME + source)
     }
 
     /// The panel height that shows every row this content has, borders included.
     fn height(&self) -> u16 {
-        self.body.height() + widgets::BORDER_ROWS
+        self.body.height() + u16::from(self.source.is_some()) + widgets::BORDER_ROWS
     }
 }
 
@@ -415,7 +414,12 @@ fn render_panel(frame: &mut Frame, palette: &Palette, content: ScreenPanel, area
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let need = content.body.width();
+    // The deferred source row's narrow floor counts toward the whole-or-not-at-all width, so the
+    // panel still refuses to clip it below [`SOURCE_PATH_CELLS`].
+    let mut need = content.body.width();
+    if content.source.is_some() {
+        need = need.max(environment_label_column() + SOURCE_PATH_CELLS);
+    }
 
     // Whole or not at all, across the width. A row clipped mid-way hides its value beside a label
     // that is still there, which reads as "no value" rather than as "no room" — the one failure a
@@ -426,7 +430,16 @@ fn render_panel(frame: &mut Frame, palette: &Palette, content: ScreenPanel, area
     }
 
     match content.body {
-        Body::Rows(lines) => frame.render_widget(Paragraph::new(lines), inner),
+        Body::Rows(mut lines) => {
+            if let Some(source) = content.source {
+                // The source is this panel's last row: head-ellipsise it to whatever the interior
+                // actually leaves after the label column, so a short path shows whole.
+                let budget = usize::from(inner.width).saturating_sub(environment_label_column()).max(SOURCE_PATH_CELLS);
+                let column = environment_label_column();
+                lines.push(row(palette, SOURCE_LABEL, column, vec![value_span(palette, head_ellipsis(&source, budget))]));
+            }
+            frame.render_widget(Paragraph::new(lines), inner);
+        }
         Body::Empty { hint, action } => {
             let width = u16::try_from(need).unwrap_or(u16::MAX);
             let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
@@ -457,7 +470,7 @@ fn summary_panel(palette: &Palette, overview: &Overview) -> ScreenPanel {
         Parts::One { zips, unpacked, missing } => Body::Rows(summary_rows(palette, zips, unpacked, missing, overview.counts)),
     };
 
-    ScreenPanel { title: "export summary", body }
+    ScreenPanel { title: "export summary", body, source: None }
 }
 
 fn summary_rows(palette: &Palette, zips: usize, unpacked: usize, missing: usize, counts: Counts) -> Vec<Line<'static>> {
@@ -574,20 +587,18 @@ fn environment_panel(palette: &Palette, overview: &Overview) -> ScreenPanel {
         }],
     ));
 
-    rows.push(row(
-        palette,
-        SOURCE_LABEL,
-        column,
-        vec![match &overview.source {
-            Some(path) => {
-                let shown = head_ellipsis(&path.display().to_string(), SOURCE_PATH_CELLS);
-                value_span(palette, right_pad(&shown, SOURCE_PATH_CELLS))
-            }
-            None => Span::styled("—", Style::new().fg(palette.text_faint)),
-        }],
-    ));
+    // The source row is deferred when there IS a source: its value is head-ellipsised to the
+    // panel's actual interior width at render time, so a short path shows whole. With no source,
+    // the fixed `—` placeholder stays in the eager rows.
+    let source = match &overview.source {
+        Some(path) => Some(path.display().to_string()),
+        None => {
+            rows.push(row(palette, SOURCE_LABEL, column, vec![Span::styled("—", Style::new().fg(palette.text_faint))]));
+            None
+        }
+    };
 
-    ScreenPanel { title: "environment", body: Body::Rows(rows) }
+    ScreenPanel { title: "environment", body: Body::Rows(rows), source }
 }
 
 /// Status pill (component: Status pill): brackets `TEXT_DIM`, label semantic and bold. A missing
@@ -627,7 +638,7 @@ fn label_column<const N: usize>(labels: [&str; N]) -> usize {
 }
 
 /// Shared cell-aware formatting; see [`crate::tui::format`].
-use crate::tui::format::{binary_bytes, cells, grouped, head_ellipsis, left_pad, plural, right_pad};
+use crate::tui::format::{binary_bytes, cells, grouped, head_ellipsis, left_pad, plural};
 
 #[cfg(test)]
 mod tests {

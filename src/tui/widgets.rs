@@ -315,12 +315,12 @@ impl ProgressColumns {
     /// Splits the panel's interior width into the identity, location and output columns.
     ///
     /// The caret gutter, the three column gaps and the status pill are fixed; what is left feeds
-    /// the three flexible columns. Identity and location keep their observed minimums as floors
-    /// and output keeps [`OUTPUT_MIN`]; the surplus then grows each column toward this view's
-    /// longest content — identity toward the longest id, location toward the longest place name,
-    /// output toward the longest output name — and only what remains widens the trailing output
-    /// column. A blank column (the chat leg has no place name) therefore keeps its floor instead
-    /// of eating the surplus a sibling needs to show its own content.
+    /// the three flexible columns, each floored at [`IDENTITY_CELLS`], [`LOCATION_CELLS`] and
+    /// [`OUTPUT_MIN`]. The output filename is the deliverable — its date prefix is the metadata this
+    /// app restores — so it takes its full width first. Identity and location are the flexible
+    /// columns: they middle-ellipsize, and share whatever remains after the output is whole. A blank
+    /// column (the chat leg has no place name) therefore keeps its floor instead of eating the
+    /// surplus a sibling needs.
     #[must_use]
     pub(crate) fn for_width(width: usize, max_identity: usize, max_location: usize, max_output: usize) -> Self {
         let mut flexible = width.saturating_sub(CARET_GUTTER + 3 * COLUMN_GAP + STATUS_CELLS);
@@ -330,12 +330,12 @@ impl ProgressColumns {
         flexible -= location;
         let output = OUTPUT_MIN.min(flexible);
         flexible -= output;
+        let output_growth = flexible.min(max_output.saturating_sub(output));
+        flexible -= output_growth;
         let identity_growth = flexible.min(max_identity.saturating_sub(identity));
         flexible -= identity_growth;
         let location_growth = flexible.min(max_location.saturating_sub(location));
         flexible -= location_growth;
-        let output_growth = flexible.min(max_output.saturating_sub(output));
-        flexible -= output_growth;
         Self { identity: identity + identity_growth, location: location + location_growth, output: output + output_growth + flexible }
     }
 }
@@ -664,34 +664,33 @@ mod tests {
     }
 
     #[test]
-    fn the_progress_columns_grow_toward_the_views_content() {
-        // At the narrow floor all three flexible columns sit at their minimums; surplus grows each
-        // column toward this view's longest content — identity first, then location, then output —
-        // and the leftover widens the trailing output column. The floor width is the fixed chrome
-        // plus the three floors.
+    fn the_progress_columns_grow_output_first_then_identity_and_location() {
+        // At the narrow floor all three flexible columns sit at their minimums; surplus then grows
+        // the output column to its full filename first, since its date prefix is the deliverable.
+        // Identity and location share what remains and middle-ellipsize. The floor width is the
+        // fixed chrome plus the three floors.
         let floor_width = CARET_GUTTER + 3 * COLUMN_GAP + STATUS_CELLS + IDENTITY_CELLS + LOCATION_CELLS + OUTPUT_MIN;
         assert_eq!(
             ProgressColumns::for_width(floor_width, 36, 42, 19),
             ProgressColumns { identity: IDENTITY_CELLS, location: LOCATION_CELLS, output: OUTPUT_MIN }
         );
-        // +4 of surplus: identity grows first, toward its longest id.
+        // +13 of surplus reaches the output column first: the full 19-cell name renders while
+        // identity and location stay at their floors.
         assert_eq!(
-            ProgressColumns::for_width(floor_width + 4, 36, 42, 19),
-            ProgressColumns { identity: IDENTITY_CELLS + 4, location: LOCATION_CELLS, output: OUTPUT_MIN }
+            ProgressColumns::for_width(floor_width + 13, 36, 42, 19),
+            ProgressColumns { identity: IDENTITY_CELLS, location: LOCATION_CELLS, output: 19 }
         );
-        // Enough surplus for the id and the name: both reach their content, output stays at its
-        // floor.
+        // Once output is whole, identity grows toward its id, then location toward its name.
         assert_eq!(
             ProgressColumns::for_width(floor_width + 31, 36, 42, 19),
-            ProgressColumns { identity: 36, location: 42, output: OUTPUT_MIN }
+            ProgressColumns { identity: 36, location: LOCATION_CELLS, output: 19 }
         );
-        // Past both, output grows toward its longest name, then takes the leftover.
-        assert_eq!(ProgressColumns::for_width(floor_width + 40, 36, 42, 19).output, OUTPUT_MIN + 9);
-        // A view with no place name (chat) keeps the location column at its floor and hands the
-        // surplus to the output column instead.
+        assert_eq!(ProgressColumns::for_width(floor_width + 40, 36, 42, 19), ProgressColumns { identity: 36, location: 38, output: 19 });
+        // A view with no place name (chat) keeps location at its floor and still gives output its
+        // full width first.
         assert_eq!(
             ProgressColumns::for_width(floor_width + 13, 20, 0, 19),
-            ProgressColumns { identity: 20, location: LOCATION_CELLS, output: 17 }
+            ProgressColumns { identity: IDENTITY_CELLS, location: LOCATION_CELLS, output: 19 }
         );
     }
 }

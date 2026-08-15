@@ -42,8 +42,9 @@ const FIRST_ROW: u16 = TOP_BORDER + 1;
 /// edge of a 50-cell panel.
 const LEFT: Range<u16> = 2..48;
 const RIGHT: Range<u16> = 52..98;
-/// Cells the source path is truncated to.
-const SOURCE_CELLS: usize = 18;
+/// Cells the source value gets at [`WIDE`]: the right panel's 46-cell interior minus the 11-cell
+/// label column. The source row's own floor is 18, but at this width the path may use all 35.
+const SOURCE_CELLS: usize = 35;
 
 // ---- harness ----
 
@@ -159,6 +160,23 @@ fn both_panels_report_the_export_they_were_pointed_at() {
         panel_rows(buffer, RIGHT, 4),
         ["ffmpeg     [ present ]", "vlc        [ missing ]", "disk free  2.0 GiB", format!("source     {}", shortened(&dir)).as_str(),]
     );
+}
+
+#[test]
+fn a_wide_overview_shows_the_source_path_whole() {
+    // At 200 wide the environment panel's source value budget outruns the scratch path, so the
+    // path renders whole instead of head-ellipsising to the narrow floor.
+    let dir = export_tree("overview-wide-source");
+    let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+    let mut app = App::new(Tier::Full).with_overview(Overview::load_with(&dir, environment()));
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let whole = dir.display().to_string();
+    let source_row = (0..buffer.area.height)
+        .map(|y| row(buffer, y))
+        .find(|line| line.contains(&whole))
+        .unwrap_or_else(|| panic!("the source path did not render: {whole}"));
+    assert!(!source_row.contains('…'), "a wide overview truncates the source: {source_row}");
 }
 
 #[test]
