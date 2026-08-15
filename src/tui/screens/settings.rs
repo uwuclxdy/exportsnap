@@ -47,8 +47,8 @@ use crate::tui::widgets::{self, CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycl
 /// gap. The ffmpeg path row is the widest text row — the longest label with the widest clause —
 /// and it must fit the 53-cell interior a 57-column terminal leaves (`57 - CHROME_COLUMNS`): the
 /// caret's 2, the label's 11, the label gap's 2 and the `   · detection` clause's 14 leave 24.
-/// A wider panel grows the slot up to the interior's edge (see [`value_budget`]); this only stops
-/// it shrinking below the 57-column case.
+/// A wider panel raises the slot's ceiling so a longer path shows whole (see [`value_budget`]);
+/// this only stops it shrinking below the 57-column case.
 const VALUE_CELLS: usize = 24;
 
 /// The overlay cycle's width — every mode's word, the 2-space gaps, and the two brackets a
