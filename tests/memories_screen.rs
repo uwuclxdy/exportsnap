@@ -575,7 +575,8 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
     );
 
     // Wide enough that the 19-char output name below still renders whole in the output column:
-    // at 120 wide the location column leaves the output only 10 cells, so the name ellipsises.
+    // identity and location absorb the surplus first, so the output column only starts growing
+    // past its 6-cell floor once the table interior clears 103 cells (116 at this width).
     let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1232,6 +1233,33 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
 }
 
 #[test]
+fn the_form_path_rows_grow_in_the_full_width_arm_and_keep_the_narrow_floor() {
+    let source = PathBuf::from(format!("/{}", "s".repeat(40)));
+    let mut app = App::new(Tier::Full).with_source_environment(
+        source.clone(),
+        RunDefaults { out_root: source.join("out"), ..RunDefaults::resolve(None, &Config::default(), &source) },
+        Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
+    );
+    on_memories(&mut app);
+    let whole = source.to_string_lossy().into_owned();
+
+    // Side by side (120 wide): the form panel is at its 36-cell interior, so the source row still
+    // head-ellipsises to the narrow value column.
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let narrow = cell_run(terminal.backend().buffer(), 2);
+    assert!(narrow.contains('…'), "the side-by-side source row still truncates: {narrow}");
+    assert!(!narrow.contains(&whole), "the side-by-side source row does not show the whole path: {narrow}");
+
+    // Stacked (80 wide): the form takes the full width, so the source row shows the whole path.
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let wide = cell_run(terminal.backend().buffer(), 2);
+    assert!(wide.contains(&whole), "the full-width source row shows the whole path: {wide}");
+    assert!(!wide.contains('…'), "the full-width source row does not ellipsise: {wide}");
+}
+
+#[test]
 fn the_empty_state_action_line_names_a_key_that_actually_starts_the_run() {
     let dir = export_tree("empty-action", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
@@ -1385,6 +1413,49 @@ fn the_output_column_keeps_the_extension_under_head_ellipsis() {
     let content = row_text.trim_end_matches('│').trim_end();
     assert!(content.ends_with(".jpg"), "the extension must survive the cut: {row_text}");
     assert!(content.contains('…'), "the name must actually be truncated at this width: {row_text}");
+}
+
+#[test]
+fn a_wide_progress_table_grows_the_identity_and_location_columns() {
+    let mut app = app_on_fixed_source();
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    // A 36-char uuid and a 42-char place name: both fit their grown columns whole once the panel
+    // is wide enough that identity and location stop at their ceilings rather than padding output.
+    let place = "x".repeat(42);
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: Some(place.clone()), leg: Leg::Image }],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row_text =
+        (0..24).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1))).unwrap_or_else(|| panic!("no table row rendered"));
+    assert!(row_text.contains(&uuid(1)), "the full 36-char uuid renders whole: {row_text}");
+    assert!(row_text.contains(&place), "the 42-char place name renders whole: {row_text}");
+    assert!(!row_text.contains('…'), "nothing ellipsises in the grown columns: {row_text}");
+}
+
+#[test]
+fn the_narrow_progress_table_keeps_the_identity_floor_ellipsised() {
+    let mut app = app_on_fixed_source();
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+    );
+    // 76 wide: the stacked table's interior is its 72-cell floor, where the identity column keeps
+    // its 18-cell floor and the uuid must still middle-ellipsise.
+    let mut terminal = Terminal::new(TestBackend::new(76, 30)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row_text =
+        (0..30).map(|y| cell_run(buffer, y)).find(|line| line.contains(&uuid(1)[..8])).unwrap_or_else(|| panic!("no table row rendered"));
+    assert!(row_text.contains('…'), "the 18-cell identity floor still ellipsises: {row_text}");
 }
 
 /// **Reach pin: the place name renders in the LOCATION column, middle-ellipsised.** A 50-char

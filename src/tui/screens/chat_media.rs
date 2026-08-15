@@ -50,9 +50,9 @@ use crate::tui::format::{cells, head_ellipsis, plural, right_pad, truncate_prose
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
-    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret,
-    cycle_options, disk_free_value, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header, progress_list,
-    static_row, tint_to_edge, tooltip,
+    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, OUTPUT_MIN, PanelStyle, ProgressColumns, ProgressRow, STATUS_CELLS,
+    action_chip, caret, cycle_options, disk_free_value, empty_state, form_label, overall_bar, panel, path_budget, planning_spinner,
+    progress_header, progress_list, static_row, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -62,8 +62,6 @@ use crate::tui::widgets::{
 const PATH_CELLS: usize = 22;
 /// The widest form label (`overlay mode`), which sets where the ragged rows' values land.
 const WIDEST_FORM_LABEL: usize = 12;
-/// The narrowest the output column may be before the panel gives up on the whole table.
-const OUTPUT_MIN: usize = 6;
 
 /// Cells the overlay-mode cycle control occupies at its widest — every option's word, a 2-space gap
 /// between each, and the two brackets the focused row wraps its selection in.
@@ -666,21 +664,23 @@ fn form_row(palette: &Palette, chat: &ChatMedia, row: FormRow, index: usize, wid
 
     match row {
         FormRow::Source => {
+            let budget = path_budget(width, row.label(), PATH_CELLS);
             let value = match chat.source.to_str().filter(|text| !text.is_empty()) {
-                Some(path) => Span::styled(right_pad(&head_ellipsis(path, PATH_CELLS), PATH_CELLS), Style::new().fg(palette.text)),
-                None => Span::styled(right_pad("—", PATH_CELLS), Style::new().fg(palette.text_faint)),
+                Some(path) => Span::styled(right_pad(&head_ellipsis(path, budget), budget), Style::new().fg(palette.text)),
+                None => Span::styled(right_pad("—", budget), Style::new().fg(palette.text_faint)),
             };
             static_row(palette, caret, row.label(), vec![value], selected, width)
         }
         FormRow::Output => {
             // The `chat/` level is where this leg's output actually lands, and naming it here is
             // what stops the row reading as the memories tree (decision 46a).
-            let shown = head_ellipsis(&chat.out_root.join(CHAT_DIR).to_string_lossy(), PATH_CELLS);
+            let budget = path_budget(width, row.label(), PATH_CELLS);
+            let shown = head_ellipsis(&chat.out_root.join(CHAT_DIR).to_string_lossy(), budget);
             static_row(
                 palette,
                 caret,
                 row.label(),
-                vec![Span::styled(right_pad(&shown, PATH_CELLS), Style::new().fg(palette.text))],
+                vec![Span::styled(right_pad(&shown, budget), Style::new().fg(palette.text))],
                 selected,
                 width,
             )
@@ -737,7 +737,8 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
 
     let done = view.statuses.iter().filter(|&&status| status == ItemStatus::Done).count();
     frame.render_widget(Paragraph::new(overall_bar(palette, done, view.rows.len(), usize::from(inner.width))), bar_area);
-    frame.render_widget(Paragraph::new(progress_header(palette)), header_area);
+    let columns = ProgressColumns::for_width(usize::from(inner.width));
+    frame.render_widget(Paragraph::new(progress_header(palette, columns)), header_area);
 
     let rows: Vec<ProgressRow<'_>> = view
         .rows
@@ -749,7 +750,7 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
             ProgressRow { identity: &row.source_id, location: None, output: &row.output_name, status: *status }
         })
         .collect();
-    progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, inner.right());
+    progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, columns);
 }
 
 /// What the plan found and will not produce output for, above the table.

@@ -877,8 +877,9 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
     );
 
     // Wide enough that the 19-char output name below still renders whole in the output column:
-    // at 120 wide the location column leaves the output only 10 cells, so the name ellipsises.
-    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+    // identity and location absorb the surplus first, so the output column only starts growing
+    // past its 6-cell floor once the table interior clears 103 cells.
+    let mut terminal = Terminal::new(TestBackend::new(170, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
 
@@ -1852,6 +1853,33 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
     assert_ne!(buffer[(1, 2)].style().bg, Some(palette.bg_hover));
     assert_ne!(buffer[(53, 2)].style().bg, Some(palette.bg_hover));
     assert_ne!(buffer[(2, 3)].style().bg, Some(palette.bg_hover));
+}
+
+#[test]
+fn the_form_path_rows_grow_in_the_full_width_arm_and_keep_the_narrow_floor() {
+    let source = PathBuf::from(format!("/{}", "s".repeat(40)));
+    let mut app = App::new(Tier::Full).with_source_environment(
+        source.clone(),
+        RunDefaults { out_root: source.join("out"), ..RunDefaults::resolve(None, &Config::default(), &source) },
+        environment(),
+    );
+    on_tab(&mut app, Tab::ChatMedia);
+    let whole = source.to_string_lossy().into_owned();
+
+    // Side by side (160 wide): the form panel is at its interior floor, so the source row still
+    // head-ellipsises to the narrow value column.
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let narrow = cell_run(terminal.backend().buffer(), 2);
+    assert!(narrow.contains('…'), "the side-by-side source row still truncates: {narrow}");
+    assert!(!narrow.contains(&whole), "the side-by-side source row does not show the whole path: {narrow}");
+
+    // Stacked (60 wide): the form takes the full width, so the source row shows the whole path.
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let wide = cell_run(terminal.backend().buffer(), 2);
+    assert!(wide.contains(&whole), "the full-width source row shows the whole path: {wide}");
+    assert!(!wide.contains('…'), "the full-width source row does not ellipsise: {wide}");
 }
 
 #[test]

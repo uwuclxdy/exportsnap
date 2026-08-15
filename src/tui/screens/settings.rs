@@ -43,13 +43,12 @@ use crate::tui::widgets::{self, CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycl
 
 // ---- layout budgets ----
 
-/// Cells a text row's value slot occupies before the clause gap. The ffmpeg path row is the
-/// widest text row — the longest label with the widest clause — and it must fit the 53-cell
-/// interior a 57-column terminal leaves (`57 - CHROME_COLUMNS`): the caret's 2, the label's
-/// 11, the label gap's 2 and the `   · detection` clause's 14 leave 24. The slot used to
-/// borrow the overlay cycle's whole 25; the two cells the clause gap gained (1 → 3) come out
-/// of it, and the assertion under [`FORM_INTERIOR`] pins that the trade keeps the 57-column
-/// form whole.
+/// The narrow floor of a text row's value slot: the fewest cells it may occupy before the clause
+/// gap. The ffmpeg path row is the widest text row — the longest label with the widest clause —
+/// and it must fit the 53-cell interior a 57-column terminal leaves (`57 - CHROME_COLUMNS`): the
+/// caret's 2, the label's 11, the label gap's 2 and the `   · detection` clause's 14 leave 24.
+/// A wider panel grows the slot up to the interior's edge (see [`value_budget`]); this only stops
+/// it shrinking below the 57-column case.
 const VALUE_CELLS: usize = 24;
 
 /// The overlay cycle's width — every mode's word, the 2-space gaps, and the two brackets a
@@ -717,7 +716,8 @@ pub fn render(frame: &mut Frame, palette: &Palette, settings: &Settings, area: R
     // The native cursor sits at the caret while a text input is being edited (cloudy-tui:
     // Text input — the terminal's own cursor marks the position). Nothing sets one otherwise.
     if let Some(session) = &settings.editing {
-        let window = draft_window(&session.draft, session.caret, VALUE_CELLS);
+        let budget = value_budget(session.row, settings.provenance(session.row), usize::from(inner.width));
+        let window = draft_window(&session.draft, session.caret, budget);
         let value_x = inner.x + (CARET_GUTTER + cells(session.row.label()) + LABEL_GAP + window.caret_cells) as u16;
         // The offset never reaches past the caret row: it clamps at the focus, and while a
         // session is live the session's row IS the focus row — `begin_edit` opens only the
@@ -760,14 +760,24 @@ fn form_row(palette: &Palette, settings: &Settings, row: FormRow, width: usize) 
     }
 }
 
+/// The value slot a text row gets at `width`: the interior cells left after the caret, the label,
+/// the gap and the row's actual provenance clause, floored at [`VALUE_CELLS`] so the 57-column
+/// form keeps its widest row whole. A row with no clause (ffmpeg with nothing detected) gets all
+/// of the remaining width for its value.
+fn value_budget(row: FormRow, provenance: Option<Provenance>, width: usize) -> usize {
+    let clause = provenance.map_or(0, |provenance| TAG_GAP + 2 + provenance.word().len());
+    width.saturating_sub(CARET_GUTTER + cells(row.label()) + LABEL_GAP + clause).max(VALUE_CELLS)
+}
+
 /// One path row. Blurred, the effective value reads in `ACCENT` — an actionable affordance,
 /// the chat-media form's path treatment; focused, `TEXT`. A live edit swaps in the draft
 /// window with the `✎` glyph for the caret; an empty draft shows the effective value as an
 /// ellipsised, `…`-marked placeholder naming what committing empty would apply, a draft in
-/// `TEXT` beside it. The value pads to [`VALUE_CELLS`] so the provenance clause holds a fixed
-/// column across both rows.
+/// `TEXT` beside it. The value pads to the slot's grown budget ([`value_budget`]) so the
+/// provenance clause holds a fixed column at the panel's interior edge.
 fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool, effective: String, width: usize) -> Line<'static> {
     let editing = settings.editing.as_ref().filter(|session| session.row == row);
+    let budget = value_budget(row, settings.provenance(row), width);
     // The edit glyph replaces the caret while the field is being edited (cloudy-tui: Text
     // input — `✎` plus the native cursor; the caret returns when the edit exits).
     let caret_span = if editing.is_some() {
@@ -777,8 +787,8 @@ fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool
     };
     let mut spans = vec![caret_span, form_label(palette, row.label(), focused), Span::raw("  ")];
     let value_span = if let Some(session) = editing {
-        let placement = draft_window(&session.draft, session.caret, VALUE_CELLS);
-        let window = draft_window_text(&session.draft, placement, VALUE_CELLS);
+        let placement = draft_window(&session.draft, session.caret, budget);
+        let window = draft_window_text(&session.draft, placement, budget);
         if window.is_empty() {
             // The draft is empty: the placeholder names what committing it would apply — the
             // effective value, or the honest "not found" when nothing was ever detected —
@@ -787,15 +797,15 @@ fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool
             // content cue, so it survives NO_COLOR where the dim-vs-text contrast dies
             // (design.md: anything that must stay legible without color needs a content cue,
             // not an attribute).
-            let shown = head_ellipsis(&effective, VALUE_CELLS - 1);
+            let shown = head_ellipsis(&effective, budget - 1);
             let marked = format!("{shown}{}", glyph::ELLIPSIS);
-            Span::styled(right_pad(&marked, VALUE_CELLS), Style::new().fg(palette.text_faint))
+            Span::styled(right_pad(&marked, budget), Style::new().fg(palette.text_faint))
         } else {
-            Span::styled(right_pad(&window, VALUE_CELLS), Style::new().fg(palette.text))
+            Span::styled(right_pad(&window, budget), Style::new().fg(palette.text))
         }
     } else {
-        let shown = head_ellipsis(&effective, VALUE_CELLS);
-        Span::styled(right_pad(&shown, VALUE_CELLS), Style::new().fg(if focused { palette.text } else { palette.accent }))
+        let shown = head_ellipsis(&effective, budget);
+        Span::styled(right_pad(&shown, budget), Style::new().fg(if focused { palette.text } else { palette.accent }))
     };
     spans.push(value_span);
     spans.extend(provenance_tag(palette, settings.provenance(row)));
@@ -889,6 +899,16 @@ mod tests {
     #[test]
     fn the_danger_toast_lifetime_is_six_seconds_at_the_app_tick() {
         assert_eq!(crate::app::TICK * DANGER_TOAST_TICKS, Duration::from_secs(6));
+    }
+
+    #[test]
+    fn the_value_budget_grows_with_the_panel_and_floors_at_value_cells() {
+        // At the 57-column interior (53) the ffmpeg row — the widest label with the widest
+        // clause — gets exactly the 24-cell floor. A wide panel hands a row its full remaining
+        // width, and a row with no clause keeps all of it.
+        assert_eq!(value_budget(FormRow::Ffmpeg, Some(Provenance::Detection), 53), VALUE_CELLS);
+        assert_eq!(value_budget(FormRow::OutputDir, Some(Provenance::Default), 106), 80);
+        assert_eq!(value_budget(FormRow::Ffmpeg, None, 76), 76 - CARET_GUTTER - cells("ffmpeg path") - LABEL_GAP);
     }
 
     #[test]

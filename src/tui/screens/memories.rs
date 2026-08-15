@@ -48,9 +48,9 @@ use crate::tui::format::{cells, head_ellipsis, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::Palette;
 use crate::tui::widgets::{
-    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, PanelStyle, ProgressRow, STATUS_CELLS, action_chip, caret,
-    disk_free_value, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header, progress_list, static_row,
-    tint_to_edge, tooltip,
+    self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, OUTPUT_MIN, PanelStyle, ProgressColumns, ProgressRow, STATUS_CELLS,
+    action_chip, caret, disk_free_value, empty_state, form_label, overall_bar, panel, path_budget, planning_spinner, progress_header,
+    progress_list, static_row, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -60,8 +60,6 @@ use crate::tui::widgets::{
 const PATH_CELLS: usize = 22;
 /// The widest form label, which sets where the ragged rows' widest value lands.
 const WIDEST_FORM_LABEL: usize = 10;
-/// The narrowest the output column may be before the panel gives up on the whole table.
-const OUTPUT_MIN: usize = 6;
 
 /// The form panel's interior cells at the widest ragged row (`output dir` + gap + value).
 const FORM_INTERIOR: usize = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + PATH_CELLS;
@@ -626,19 +624,21 @@ fn form_row(palette: &Palette, memories: &Memories, row: FormRow, index: usize, 
 
     match row {
         FormRow::Source => {
+            let budget = path_budget(width, row.label(), PATH_CELLS);
             let value = match memories.source.to_str().filter(|text| !text.is_empty()) {
-                Some(path) => Span::styled(right_pad(&head_ellipsis(path, PATH_CELLS), PATH_CELLS), Style::new().fg(palette.text)),
-                None => Span::styled(right_pad("—", PATH_CELLS), Style::new().fg(palette.text_faint)),
+                Some(path) => Span::styled(right_pad(&head_ellipsis(path, budget), budget), Style::new().fg(palette.text)),
+                None => Span::styled(right_pad("—", budget), Style::new().fg(palette.text_faint)),
             };
             static_row(palette, caret, row.label(), vec![value], selected, width)
         }
         FormRow::Output => {
-            let shown = head_ellipsis(&memories.out_root.to_string_lossy(), PATH_CELLS);
+            let budget = path_budget(width, row.label(), PATH_CELLS);
+            let shown = head_ellipsis(&memories.out_root.to_string_lossy(), budget);
             static_row(
                 palette,
                 caret,
                 row.label(),
-                vec![Span::styled(right_pad(&shown, PATH_CELLS), Style::new().fg(palette.text))],
+                vec![Span::styled(right_pad(&shown, budget), Style::new().fg(palette.text))],
                 selected,
                 width,
             )
@@ -689,7 +689,8 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
 
     let done = view.statuses.iter().filter(|&&status| status == ItemStatus::Done).count();
     frame.render_widget(Paragraph::new(overall_bar(palette, done, view.rows.len(), usize::from(inner.width))), bar_area);
-    frame.render_widget(Paragraph::new(progress_header(palette)), header_area);
+    let columns = ProgressColumns::for_width(usize::from(inner.width));
+    frame.render_widget(Paragraph::new(progress_header(palette, columns)), header_area);
 
     let rows: Vec<ProgressRow<'_>> = view
         .rows
@@ -702,7 +703,7 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
             status: *status,
         })
         .collect();
-    progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, inner.right());
+    progress_list(frame, palette, &rows, table.descended, &mut table.list, list_area, columns);
 }
 
 /// The footer alert a run outcome raises.

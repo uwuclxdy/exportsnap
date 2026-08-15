@@ -91,6 +91,16 @@ pub(crate) const LOCATION_CELLS: usize = 29;
 pub(crate) const STATUS_CELLS: usize = 11;
 /// The gap between two of a progress table's columns.
 pub(crate) const COLUMN_GAP: usize = 2;
+/// The widest an identity column grows to: a memory uuid is 36 cells and a chat-media `b~<id>` is
+/// shorter, so past 36 the column is padding for nothing.
+pub(crate) const IDENTITY_MAX: usize = 36;
+/// The widest a location column grows to: the observed place-name range tops out at 42 cells
+/// (decision 76), so past that the column is padding.
+pub(crate) const LOCATION_MAX: usize = 42;
+/// The narrowest the output column may be before the panel gives up on the whole table. Shared
+/// with the two screens' table-interior floor, so the distribution never shrinks below what the
+/// floor promises.
+pub(crate) const OUTPUT_MIN: usize = 6;
 
 /// The row's leading glyph: the selection caret in the focused pane, two blank cells otherwise.
 pub(crate) fn caret(palette: &Palette, focused: bool) -> Span<'static> {
@@ -122,6 +132,15 @@ pub(crate) fn static_row(
     spans.extend(value);
     let line = Line::from(spans);
     if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
+}
+
+/// The value budget a form's path row gets at `width`: the interior cells left after the caret,
+/// the label and the gap, floored at `floor` so the narrow side-by-side form keeps its tight value
+/// column (the two run screens' `PATH_CELLS`). In the full-width arms the row uses whatever the
+/// panel actually leaves, so a path shows whole instead of truncating to the narrow column.
+#[must_use]
+pub(crate) fn path_budget(width: usize, label: &str, floor: usize) -> usize {
+    width.saturating_sub(CARET_GUTTER + cells(label) + LABEL_GAP).max(floor)
 }
 
 /// An INTERACTIVE row's label: `TEXT_DIM` blurred, promoted to `TEXT + bold` when the row is
@@ -289,20 +308,53 @@ pub(crate) struct ProgressRow<'a> {
     pub status: ItemStatus,
 }
 
+/// The three flexible widths a progress table's columns get, computed once per render so the
+/// header and the rows split the same cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProgressColumns {
+    pub identity: usize,
+    pub location: usize,
+    pub output: usize,
+}
+
+impl ProgressColumns {
+    /// Splits the panel's interior width into the identity, location and output columns.
+    ///
+    /// The caret gutter, the three column gaps and the status pill are fixed; what is left feeds
+    /// the three flexible columns. Identity and location keep their observed minimums as floors,
+    /// output keeps [`OUTPUT_MIN`]; the surplus then grows identity toward the uuid's full 36,
+    /// location toward the observed 42, and only what remains widens output. A wide terminal
+    /// shows the id and the place name whole instead of gifting the blank to the output column.
+    #[must_use]
+    pub(crate) fn for_width(width: usize) -> Self {
+        let mut flexible = width.saturating_sub(CARET_GUTTER + 3 * COLUMN_GAP + STATUS_CELLS);
+        let identity = IDENTITY_CELLS.min(flexible);
+        flexible -= identity;
+        let location = LOCATION_CELLS.min(flexible);
+        flexible -= location;
+        let output = OUTPUT_MIN.min(flexible);
+        flexible -= output;
+        let identity_growth = flexible.min(IDENTITY_MAX - identity);
+        flexible -= identity_growth;
+        let location_growth = flexible.min(LOCATION_MAX - location);
+        flexible -= location_growth;
+        Self { identity: identity + identity_growth, location: location + location_growth, output: output + flexible }
+    }
+}
+
 /// The progress table's list and its scrollbar: caret gutter, middle-ellipsised identity, place
 /// name, status pill, output name.
 ///
-/// The selected row's identity promotes to `TEXT + bold` only while the pane is descended; the tint
-/// comes from the `List`'s highlight style, which paints the background alone (contract: only the
-/// label promotes). A focused row that carries a place name grows the `└ name` tooltip as a
-/// separate item right below it (decision 76) — a separate item, never a second highlighted line,
-/// because the highlight style would tint that line too.
+/// `columns` is the same [`ProgressColumns`] the header got, so the rows and their header stay
+/// aligned however wide the panel is. The selected row's identity promotes to `TEXT + bold` only
+/// while the pane is descended; the tint comes from the `List`'s highlight style, which paints the
+/// background alone (contract: only the label promotes). A focused row that carries a place name
+/// grows the `└ name` tooltip as a separate item right below it (decision 76) — a separate item,
+/// never a second highlighted line, because the highlight style would tint that line too.
 pub(crate) fn progress_list(
     frame: &mut Frame, palette: &Palette, rows: &[ProgressRow<'_>], descended: bool, state: &mut ListState, area: Rect,
-    scrollbar_column: u16,
+    columns: ProgressColumns,
 ) {
-    let output_cells = usize::from(area.width)
-        .saturating_sub(CARET_GUTTER + IDENTITY_CELLS + COLUMN_GAP + LOCATION_CELLS + COLUMN_GAP + STATUS_CELLS + COLUMN_GAP);
     let mut items: Vec<ListItem<'_>> = rows
         .iter()
         .enumerate()
@@ -311,18 +363,18 @@ pub(crate) fn progress_list(
             let identity_style = if selected { Style::new().fg(palette.text).bold() } else { Style::new().fg(palette.text_dim) };
             let mut spans = vec![
                 caret(palette, selected),
-                Span::styled(middle_ellipsis(row.identity, IDENTITY_CELLS), identity_style),
+                Span::styled(middle_ellipsis(row.identity, columns.identity), identity_style),
                 Span::raw("  "),
             ];
             // The empty name is the padded blank `middle_ellipsis` produces — a leg without the
             // concept (chat) shows an empty cell, never a placeholder.
-            spans.push(Span::styled(middle_ellipsis(row.location.unwrap_or(""), LOCATION_CELLS), Style::new().fg(palette.text_dim)));
+            spans.push(Span::styled(middle_ellipsis(row.location.unwrap_or(""), columns.location), Style::new().fg(palette.text_dim)));
             spans.push(Span::raw("  "));
             spans.extend(status_pill(palette, row.status));
             spans.push(Span::raw("  "));
             // Head-ellipsis, not trailing: the output name's leaf — its extension — is the point,
             // so the cut takes from the front and `.jpg` always survives.
-            spans.push(Span::styled(head_ellipsis(row.output, output_cells), Style::new().fg(palette.text_dim)));
+            spans.push(Span::styled(head_ellipsis(row.output, columns.output), Style::new().fg(palette.text_dim)));
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -340,7 +392,9 @@ pub(crate) fn progress_list(
     frame.render_stateful_widget(&list, area, state);
 
     let viewport = usize::from(area.height);
-    list_scrollbar(frame, palette, item_count, state.offset(), viewport, scrollbar_column, area);
+    // The list area always spans the panel interior's full width, so its right edge is the panel's
+    // right padding column — the scrollbar's home.
+    list_scrollbar(frame, palette, item_count, state.offset(), viewport, area.right(), area);
 }
 
 /// The scrollbar a scrollable list grows in its panel's right padding column, so the content never
@@ -382,13 +436,16 @@ pub(crate) fn list_scrollbar(frame: &mut Frame, palette: &Palette, rows: usize, 
 
 /// The progress table's column header (contract: List / table — UPPERCASE TRACKED, the underline
 /// rule dropped as the sanctioned variant). The 2-cell lead is the caret gutter the rows carry.
-pub(crate) fn progress_header(palette: &Palette) -> Line<'static> {
+///
+/// `columns` is the same [`ProgressColumns`] the rows got, so the header labels land on the same
+/// cells the rows' columns do.
+pub(crate) fn progress_header(palette: &Palette, columns: ProgressColumns) -> Line<'static> {
     let header = Style::new().fg(palette.text_dim);
     Line::from(vec![
         Span::raw("  "),
-        Span::styled(right_pad("IDENTITY", IDENTITY_CELLS), header),
+        Span::styled(right_pad("IDENTITY", columns.identity), header),
         Span::raw("  "),
-        Span::styled(right_pad("LOCATION", LOCATION_CELLS), header),
+        Span::styled(right_pad("LOCATION", columns.location), header),
         Span::raw("  "),
         Span::styled(right_pad("STATUS", STATUS_CELLS), header),
         Span::raw("  "),
@@ -595,5 +652,42 @@ mod tests {
         assert_eq!(label(1, 3), "33.3%");
         assert_eq!(label(3, 3), "100%");
         assert_eq!(label(0, 0), "—");
+    }
+
+    #[test]
+    fn the_path_budget_uses_the_remaining_width_and_keeps_the_floor() {
+        // The side-by-side form's widest row (`output dir`) leaves exactly the caller's floor;
+        // a shorter label gives its value the extra cells, and the floor never shrinks below the
+        // caller's constant even past the panel edge.
+        assert_eq!(path_budget(36, "output dir", 22), 22);
+        assert_eq!(path_budget(36, "source", 22), 26);
+        assert_eq!(path_budget(76, "source", 22), 66);
+        assert_eq!(path_budget(10, "source", 22), 22);
+    }
+
+    #[test]
+    fn the_progress_columns_grow_identity_then_location_and_only_then_output() {
+        // At the narrow floor all three flexible columns sit at their minimums; the surplus grows
+        // identity toward the uuid's 36, then location toward the observed 42, and only what
+        // remains widens output. The floor width is the fixed chrome plus the three floors.
+        let floor_width = CARET_GUTTER + 3 * COLUMN_GAP + STATUS_CELLS + IDENTITY_CELLS + LOCATION_CELLS + OUTPUT_MIN;
+        assert_eq!(
+            ProgressColumns::for_width(floor_width),
+            ProgressColumns { identity: IDENTITY_CELLS, location: LOCATION_CELLS, output: OUTPUT_MIN }
+        );
+        // +4 of surplus: identity grows first.
+        assert_eq!(
+            ProgressColumns::for_width(floor_width + 4),
+            ProgressColumns { identity: IDENTITY_CELLS + 4, location: LOCATION_CELLS, output: OUTPUT_MIN }
+        );
+        // Enough surplus for both ceilings: identity and location reach their maxima, output stays
+        // at its floor.
+        let full_growth = (IDENTITY_MAX - IDENTITY_CELLS) + (LOCATION_MAX - LOCATION_CELLS);
+        assert_eq!(
+            ProgressColumns::for_width(floor_width + full_growth),
+            ProgressColumns { identity: IDENTITY_MAX, location: LOCATION_MAX, output: OUTPUT_MIN }
+        );
+        // Past both ceilings, output absorbs the rest.
+        assert_eq!(ProgressColumns::for_width(floor_width + full_growth + 9).output, OUTPUT_MIN + 9);
     }
 }
