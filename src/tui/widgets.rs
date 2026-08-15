@@ -239,15 +239,23 @@ pub(crate) fn disk_free_value(palette: &Palette, environment: &Environment, budg
 /// An action-only chip (contract: Action-only chip), in the CTA variant — accent at rest on the
 /// raised fill, inverse block on focus — because starting a run is a screen's one primary action.
 /// A disabled chip is focusable-but-inert and reads faint.
+///
+/// The rest and disabled fill is a raised surface, so it paints through
+/// [`Palette::surface_raised`]: on the `compatible` tier it is unpainted (DNA rule 3) and the chip
+/// carries no background at rest or disabled. The focused inverse block (`ACCENT` fill, `BG` text)
+/// is not a surface fill and is unchanged on both tiers.
 pub(crate) fn action_chip(palette: &Palette, label: &str, enabled: bool, focused: bool) -> Span<'static> {
     let (fg, bg, bold) = if !enabled {
-        (palette.text_faint, palette.bg_raised, false)
+        (palette.text_faint, palette.surface_raised(), false)
     } else if focused {
-        (palette.bg, palette.accent, true)
+        (palette.bg, Some(palette.accent), true)
     } else {
-        (palette.accent, palette.bg_raised, true)
+        (palette.accent, palette.surface_raised(), true)
     };
-    let style = Style::new().fg(fg).bg(bg);
+    let mut style = Style::new().fg(fg);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
     Span::styled(format!(" {label} "), if bold { style.bold() } else { style })
 }
 
@@ -513,6 +521,8 @@ pub(crate) fn tooltip(palette: &Palette, reason: &str) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier};
 
@@ -708,5 +718,39 @@ mod tests {
             ProgressColumns::for_width(floor_width + 13, 20, 0, 19),
             ProgressColumns { identity: IDENTITY_CELLS, location: LOCATION_CELLS, output: 19 }
         );
+    }
+
+    #[test]
+    fn the_action_chip_drops_its_raised_fill_on_the_compatible_tier() {
+        // DNA rule 3: the compatible tier paints no surface fills, so the chip's rest and disabled
+        // states carry no background; the full tier keeps the BG_RAISED fill. The focused inverse
+        // block (ACCENT fill) is not a surface fill and stays on both tiers.
+        let full = Palette::new(Tier::Full);
+        let compatible = Palette::new(Tier::Compatible);
+
+        assert_eq!(action_chip(&full, "start", true, false).style.bg, Some(full.bg_raised), "full rest fill");
+        assert_eq!(action_chip(&compatible, "start", true, false).style.bg, None, "compatible rest paints none");
+        assert_eq!(action_chip(&compatible, "start", false, false).style.bg, None, "compatible disabled paints none");
+        assert_eq!(action_chip(&compatible, "start", true, true).style.bg, Some(compatible.accent), "focused inverse block is unchanged");
+    }
+
+    #[test]
+    fn the_shared_empty_state_frame_sits_centred_in_its_panel() {
+        // The shared empty state centers its frame inside the panel interior, so an odd leftover
+        // splits 10/11 — the two pads differ by one, whichever side takes the extra. The frame's
+        // width is the hint-or-action cells (the action line is 16, the floor) plus the 3-cell
+        // inset on each side plus the two borders.
+        let palette = Palette::new(Tier::Full);
+        let mut terminal = Terminal::new(TestBackend::new(45, 16)).unwrap();
+        terminal.draw(|frame| empty_state(frame, &palette, Rect::new(0, 0, 45, 16), "no deliveries")).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // 16 interior rows, a 4-row frame: 6 above and 6 below.
+        let framed: String = (0..buffer.area.width).map(|x| buffer[(x, 6)].symbol()).collect();
+        let left_pad = framed.chars().take_while(|c| *c == ' ').count();
+        let right_pad = framed.len() - framed.trim_end().len();
+
+        assert_eq!(framed.trim().chars().count(), 24, "frame width");
+        assert!(left_pad.abs_diff(right_pad) <= 1, "pads {left_pad} and {right_pad} are not a centred split");
     }
 }

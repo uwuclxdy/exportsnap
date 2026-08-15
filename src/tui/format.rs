@@ -59,39 +59,18 @@ pub fn head_ellipsis(text: &str, budget: usize) -> String {
 /// meaning, so the cut takes the middle, and the result is right-padded so the column holds its
 /// width whatever the id's length.
 ///
+/// The head/tail split is on cells, not chars: a wide character costs its full two cells, so the
+/// result can neither overrun the budget nor let the head and tail overlap on a shared character
+/// (both failures of a char-count split below `keep` chars). On ascii input the two measures agree,
+/// so ascii output is byte-identical to the char split. The cut walks `chars()` and indexes no
+/// bytes, so a wide character can never panic the split.
+///
 /// Shared by both media screens' identity column — a memory's uuid and a chat-media file's
 /// `b~<id>` — which is why it sits here beside [`head_ellipsis`] rather than inside one screen.
-///
-/// **The `keep` split is on chars while `budget` is in cells, so the two agree only on ascii
-/// input**, and nothing here checks. What holds is a gate at each grammar rather than a rule of this
-/// helper: `export::chat_media::ChatMediaFile::parse` builds its id out of a token literal, a `Day`
-/// written from integers, and runs its `is_alphanumeric_run` and `is_ascii_digit` accepted;
-/// `export::memories::MemoryFile::parse` builds its uuid out of a stem its `is_uuid` accepted. Every
-/// one of those predicates tests BYTES against an ascii class, and a non-ascii scalar carries a byte
-/// none of them admits, so an accepted run is ascii whole. **The compiler rejects none of that**, so
-/// it is a convention pinned by tests, not an invariant:
-/// `every_id_the_filename_grammar_mints_is_ascii` in `tests/chat_media.rs` and
-/// `every_uuid_the_filename_grammar_mints_is_ascii` in `tests/memories.rs`. Loosen either grammar to
-/// the `char` alphabetics and this is what breaks downstream of it.
-///
-/// What a wide character costs is never a panic — the cut walks `chars()` and indexes no bytes,
-/// which `a_middle_ellipsis_cuts_on_char_boundaries_rather_than_bytes` pins. It costs two other
-/// things. **An overflowed column**: `keep` wide chars plus the ellipsis reach `2 * budget - 1`
-/// cells, which is attained rather than merely bounded (the test's 5-cell budget yields 9) and is
-/// meaningless at `budget == 0`, where any non-empty text returns the ellipsis alone; [`right_pad`]
-/// then saturates rather than truncating, so the status pill and output name shift right and the
-/// last column loses its tail. **And a duplicated character**, which is the worse of the two,
-/// because an identity cell then misreports the id it names: with fewer than `keep` chars the head
-/// and the tail overlap, so `middle_ellipsis("世界語", 5)` yields `世界…界語`. Ascii reaches neither —
-/// there `cells > budget` implies `chars > keep`.
-///
-/// Being `pub`, this promises a caller outside the crate none of the above; the convention covers
-/// the crate's four call sites. The progress table's identity column — a uuid or `b~<id>` — is
-/// ascii-gated by the filename grammar that minted it. The account screen's username, the history
-/// picker's conversation labels, and the progress table's place-name column (decision 76) are
-/// free-form user data with no grammar gate: `Username::new` and the place-name split check
-/// emptiness only; `ConversationId::new` accepts even empty. The wide-char cost above is accepted
-/// for all three, not refused.
+/// Those ids are ascii by their filename grammars (`every_id_the_filename_grammar_mints_is_ascii`,
+/// `every_uuid_the_filename_grammar_mints_is_ascii`), but the free-form call sites — the account
+/// username, the history picker's conversation labels, and the place-name column (decision 76) —
+/// admit wide characters, and the cell-count cut is what keeps them inside the column.
 #[must_use]
 pub fn middle_ellipsis(text: &str, budget: usize) -> String {
     if cells(text) <= budget {
@@ -101,8 +80,31 @@ pub fn middle_ellipsis(text: &str, budget: usize) -> String {
     if keep == 0 {
         return right_pad(&glyph::ELLIPSIS.to_string(), budget);
     }
-    let head: String = text.chars().take(keep / 2).collect();
-    let tail: String = text.chars().rev().take(keep - keep / 2).collect::<Vec<_>>().into_iter().rev().collect();
+    let head_budget = keep / 2;
+    let tail_budget = keep - keep / 2;
+
+    let mut head = String::new();
+    let mut head_cells = 0;
+    for character in text.chars() {
+        let width = cells(&character.to_string());
+        if head_cells + width > head_budget {
+            break;
+        }
+        head_cells += width;
+        head.push(character);
+    }
+
+    let mut tail_rev = String::new();
+    let mut tail_cells = 0;
+    for character in text.chars().rev() {
+        let width = cells(&character.to_string());
+        if tail_cells + width > tail_budget {
+            break;
+        }
+        tail_cells += width;
+        tail_rev.push(character);
+    }
+    let tail: String = tail_rev.chars().rev().collect();
     right_pad(&format!("{head}{}{tail}", glyph::ELLIPSIS), budget)
 }
 
@@ -255,18 +257,15 @@ mod tests {
     /// is the obvious collapse of the two `chars()` walks and it PANICS here: `keep / 2` is 2 and
     /// `世` is three bytes, so byte 2 is not a char boundary.
     #[test]
-    fn a_middle_ellipsis_cuts_on_char_boundaries_rather_than_bytes() {
-        // Nine cells against a five-cell budget, which is the overflow those docs name and NOT a
-        // width this asserts is right: `right_pad` saturates rather than truncating, so what stops
-        // it reaching a screen is the ascii id alphabet upstream, pinned in the two grammars' own
-        // test files.
-        assert_eq!(middle_ellipsis("世界世界", 5), "世界…世界");
-        assert_eq!(cells(middle_ellipsis("世界世界", 5).as_str()), 9);
-        // Fewer than `keep` chars and the head and tail OVERLAP, so `界` renders twice — a cell
-        // misreporting the id it names, which is the worse half of what those docs describe. Ascii
-        // reaches neither: there `cells > budget` implies `chars > keep`.
-        assert_eq!(middle_ellipsis("世界語", 5), "世界…界語");
-        // A budget that fits takes the early return, where chars never come into it.
+    fn a_middle_ellipsis_counts_cells_so_a_wide_character_neither_overruns_nor_overlaps() {
+        // `世` is two cells, so a 5-cell budget holds the ellipsis plus one head and one tail wide
+        // character (2 + 1 + 2) — never the two per side a char-count split would take.
+        assert_eq!(middle_ellipsis("世界世界", 5), "世…界");
+        assert_eq!(cells(middle_ellipsis("世界世界", 5).as_str()), 5);
+        // Fewer chars than `keep` no longer overlap the head and tail on `界`: the cell-count cut
+        // takes one wide character per side and the middle is what the ellipsis replaces.
+        assert_eq!(middle_ellipsis("世界語", 5), "世…語");
+        // A budget that fits takes the early return, where the split never comes into it.
         assert_eq!(middle_ellipsis("世界世界", 8), "世界世界");
     }
 

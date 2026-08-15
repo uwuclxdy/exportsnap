@@ -160,6 +160,14 @@ fn palette_resolves_every_role_from_the_compatible_tier_module() {
     assert_eq!(palette.info, Color::Indexed(117));
 }
 
+#[test]
+fn the_raised_surface_is_painted_only_on_the_full_tier() {
+    // DNA rule 3: on compatible the raised fill is unpainted, so the accessor answers None and
+    // the chip falls back to no background; on full it answers the BG_RAISED value.
+    assert_eq!(Palette::new(Tier::Full).surface_raised(), Some(Color::Rgb(24, 24, 37)));
+    assert_eq!(Palette::new(Tier::Compatible).surface_raised(), None);
+}
+
 // ---- glyph degradation per tier (skill: Capability tiers table) ----
 
 #[test]
@@ -224,8 +232,10 @@ fn toast_bg_rounds_half_away_from_zero_at_exact_boundary() {
 }
 
 #[test]
-fn toast_bg_snaps_to_nearest_xterm256_on_compatible_tier() {
-    assert_eq!(toast_bg(Tier::Compatible, None), Color::Indexed(234));
+fn toast_bg_is_flat_sunken_on_compatible_tier() {
+    // The contract-wording bug ruling: a true blend needs the terminal's own background, which
+    // a 256-color tier cannot report, so the compatible tier paints a flat SUNKEN fill.
+    assert_eq!(toast_bg(Tier::Compatible, None), Color::Indexed(233));
     assert_eq!(toast_bg(Tier::Compatible, Some(Color::Rgb(0, 0, 0))), Color::Indexed(233));
 }
 
@@ -240,9 +250,11 @@ fn toast_bg_treats_non_rgb_underlay_as_unknown_full_tier() {
 }
 
 #[test]
-fn toast_bg_treats_non_rgb_underlay_as_unknown_compatible_tier() {
-    assert_eq!(toast_bg(Tier::Compatible, Some(Color::Reset)), Color::Indexed(234));
-    assert_eq!(toast_bg(Tier::Compatible, Some(Color::Indexed(42))), Color::Indexed(234));
+fn toast_bg_is_flat_sunken_on_compatible_tier_regardless_of_under() {
+    // `under` is ignored on compatible: the fill is flat SUNKEN whatever sits beneath, because
+    // there is no terminal background to blend against.
+    assert_eq!(toast_bg(Tier::Compatible, Some(Color::Reset)), Color::Indexed(233));
+    assert_eq!(toast_bg(Tier::Compatible, Some(Color::Indexed(42))), Color::Indexed(233));
 }
 
 // ---- usage-role threshold color (skill: Progress bar — usage/quota role) ----

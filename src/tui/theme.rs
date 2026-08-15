@@ -96,8 +96,9 @@ pub fn detect_from_env(cli: Option<Tier>, config: Option<Tier>) -> Tier {
 /// the single source of truth; this only selects between them.
 ///
 /// `bg` / `bg_raised` / `bg_sunken` are the surface roles DNA rule 3 leaves unpainted on the
-/// `compatible` tier. Paint the base one through [`Palette::surface`], which already resolves
-/// that; the bare fields are the color values, not a licence to fill with them.
+/// `compatible` tier. Paint the base one through [`Palette::surface`] and the raised one through
+/// [`Palette::surface_raised`], which already resolve that; the bare fields are the color values,
+/// not a licence to fill with them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     pub bg: Color,
@@ -132,6 +133,21 @@ impl Palette {
     pub const fn surface(&self) -> Option<Color> {
         match self.tier {
             Tier::Full => Some(self.bg),
+            Tier::Compatible => None,
+        }
+    }
+
+    /// The raised-card surface fill, or `None` on a tier that paints no surface fills (DNA rule 3:
+    /// on `compatible`, `BG_RAISED` inherits the terminal's own background and elevation falls to
+    /// borders + color).
+    ///
+    /// Distinct from the [`Palette::bg_raised`] field, which is the color value itself — the action
+    /// chip's rest and disabled fill is a surface fill, so it paints through this accessor rather
+    /// than reading the field.
+    #[must_use]
+    pub const fn surface_raised(&self) -> Option<Color> {
+        match self.tier {
+            Tier::Full => Some(self.bg_raised),
             Tier::Compatible => None,
         }
     }
@@ -314,16 +330,11 @@ pub mod full {
 }
 
 /// xterm-256 palette, plus the glyphs that only render on the `compatible` tier. Colors are
-/// the skill's own nearest-256 picks (Palette table), not derived at runtime. `nearest_xterm256`
-/// below is a separate, general-purpose Euclidean quantizer used only for the toast blend's
-/// arbitrary output — it is NOT guaranteed to reproduce this table (verified: disagrees with
-/// the table on 5 of 15 roles, e.g. `ACCENT` snaps to 74 here vs. the table's 75) because the
-/// table's xterm-256 column isn't itself distance-metric-derived. Don't use one to justify the
-/// other.
+/// the skill's own nearest-256 picks (Palette table), not derived at runtime.
 ///
 /// `BG` / `BG_RAISED` / `BG_SUNKEN` exist here for completeness and construction, but DNA
 /// rule 3 says the `compatible` tier does NOT paint them as ordinary surface fills — only
-/// `BG_HOVER` (selected-row tint) and `BG_SUNKEN` (toast glass-blend, via `toast_bg`) are
+/// `BG_HOVER` (selected-row tint) and `BG_SUNKEN` (the toast's flat fill, via `toast_bg`) are
 /// painted. Widget code choosing a background must gate on that; these constants alone don't
 /// encode it.
 pub mod compatible {
@@ -431,101 +442,30 @@ pub mod glyph {
     pub const KEY_ALT: char = '⌥';
 }
 
-/// Blends the toast "glass" background over whatever sits beneath it: `0.75 · BG_SUNKEN +
-/// 0.25 · under`, snapped to the nearest xterm-256 color on the `compatible` tier (Toast
-/// component: Background). `under: None` — an unknown or reset cell — counts as `BG`.
+/// Blends the toast "glass" background over whatever sits beneath it on the `full` tier:
+/// `0.75 · BG_SUNKEN + 0.25 · under`, rounded per channel (Toast component: Background).
+/// `under: None` — an unknown or reset cell — counts as `BG`.
 ///
-/// Both the alpha blend and the 256-color snap are hand-rolled: ratatui has no translucency
-/// primitive and no color-distance API (ratatui-patterns limitations.md: "alpha-blend /
-/// translucency" and "xterm-256 nearest-color quantization" are both listed gaps).
-///
-/// **The catch-all arm takes `Color::Indexed` with it, so on the `compatible` tier this blends against the base and nothing else.** That tier paints every background as an index, which is exactly where a toast sits, so the one tier whose flat palette makes the glass effect worth having is the one that never gets it. Stated rather than fixed, and the reason is NOT that it cannot be done: every index this palette paints is ≥ 75, so all of them sit in the 6×6×6 cube or the grayscale ramp and invert to RGB exactly. What stops it being a fix is that it is a decision first. The contract is silent here and its own reference implementation punts the same way, an inverse would still need an answer for the system indices 0-15 that no process can resolve (their RGB is terminal-configurable) even though this palette uses none of them, and a real blend on `compatible` would then re-snap through [`nearest_xterm256`] and land back on an index anyway, so the visible gain is unmeasured. Pinned as-is by `toast_bg_treats_non_rgb_underlay_as_unknown_full_tier` and its compatible twin, which fix `Color::Indexed(42)` to the `BG` fallback on both tiers against literal values, so this arm reds if it changes without the decision being taken.
+/// The `compatible` tier paints a flat `BG_SUNKEN` fill instead (contract-wording bug ruling:
+/// a true blend needs the terminal's own background, which a 256-color tier cannot report). The
+/// alpha blend is hand-rolled: ratatui has no translucency primitive (ratatui-patterns
+/// limitations.md: "alpha-blend / translucency" is a listed gap).
 pub fn toast_bg(tier: Tier, under: Option<Color>) -> Color {
-    let (under_r, under_g, under_b) = match under {
-        Some(Color::Rgb(r, g, b)) => (r, g, b),
-        _ => full::BG_RGB,
-    };
-    let (base_r, base_g, base_b) = full::BG_SUNKEN_RGB;
-
-    let r = blend_channel(base_r, under_r);
-    let g = blend_channel(base_g, under_g);
-    let b = blend_channel(base_b, under_b);
-
     match tier {
-        Tier::Full => Color::Rgb(r, g, b),
-        Tier::Compatible => nearest_xterm256(r, g, b),
+        Tier::Compatible => compatible::BG_SUNKEN,
+        Tier::Full => {
+            let (under_r, under_g, under_b) = match under {
+                Some(Color::Rgb(r, g, b)) => (r, g, b),
+                _ => full::BG_RGB,
+            };
+            let r = blend_channel(full::BG_SUNKEN_RGB.0, under_r);
+            let g = blend_channel(full::BG_SUNKEN_RGB.1, under_g);
+            let b = blend_channel(full::BG_SUNKEN_RGB.2, under_b);
+            Color::Rgb(r, g, b)
+        }
     }
 }
 
 fn blend_channel(base: u8, under: u8) -> u8 {
     (0.75 * f32::from(base) + 0.25 * f32::from(under)).round() as u8
-}
-
-/// Nearest xterm-256 index for an RGB triple: the 6×6×6 color cube (levels `0, 95, 135, 175,
-/// 215, 255`) versus the 24-step grayscale ramp (`8 + 10*n`), picking whichever is closer in
-/// squared Euclidean distance.
-///
-/// This is a general approximation, not a lookup into the palette table above: verified
-/// against all 15 named roles, it disagrees with the table's own picks for `LINE`,
-/// `LINE_STRONG`, `TEXT_DIM`, `TEXT_FAINT`, and `ACCENT` (the table's xterm-256 column isn't
-/// itself Euclidean-nearest, so no distance metric fully reproduces it — don't "correct" this
-/// function toward the table's values). It exists solely for the toast blend's arbitrary
-/// output, where no lookup table exists to consult instead.
-fn nearest_xterm256(r: u8, g: u8, b: u8) -> Color {
-    const CUBE_LEVELS: [i32; 6] = [0, 95, 135, 175, 215, 255];
-
-    let nearest_cube_index = |v: u8| -> usize {
-        let mut best_index = 0;
-        let mut best_diff = i32::MAX;
-        for (i, &level) in CUBE_LEVELS.iter().enumerate() {
-            let diff = (i32::from(v) - level).abs();
-            if diff < best_diff {
-                best_diff = diff;
-                best_index = i;
-            }
-        }
-        best_index
-    };
-
-    let sq_dist = |cr: i32, cg: i32, cb: i32| -> i64 {
-        let dr = i64::from(i32::from(r) - cr);
-        let dg = i64::from(i32::from(g) - cg);
-        let db = i64::from(i32::from(b) - cb);
-        dr * dr + dg * dg + db * db
-    };
-
-    let (ri, gi, bi) = (nearest_cube_index(r), nearest_cube_index(g), nearest_cube_index(b));
-    let cube_index = 16 + 36 * ri + 6 * gi + bi;
-    let cube_dist = sq_dist(CUBE_LEVELS[ri], CUBE_LEVELS[gi], CUBE_LEVELS[bi]);
-
-    let avg = (f32::from(r) + f32::from(g) + f32::from(b)) / 3.0;
-    let gray_step = ((avg - 8.0) / 10.0).round().clamp(0.0, 23.0) as i32;
-    let gray_val = 8 + 10 * gray_step;
-    let gray_index = 232 + gray_step;
-    let gray_dist = sq_dist(gray_val, gray_val, gray_val);
-
-    let index = if cube_dist <= gray_dist { cube_index } else { gray_index as usize };
-    Color::Indexed(index as u8)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // nearest_xterm256 is private; only its two branches (cube winner, grayscale winner) are
-    // worth pinning directly — the full blend pipeline is covered as public API in
-    // tests/theme.rs.
-    #[test]
-    fn nearest_xterm256_picks_grayscale_ramp_for_near_neutral_input() {
-        // (17, 17, 27) is near-black-and-slightly-blue: grayscale ramp wins over the cube.
-        assert_eq!(nearest_xterm256(17, 17, 27), Color::Indexed(233));
-    }
-
-    #[test]
-    fn nearest_xterm256_picks_cube_for_saturated_input() {
-        // Pure red sits exactly on a cube vertex; the grayscale ramp can't get close. This
-        // input is outside `toast_bg`'s reachable output range (r,g in [13,77], b in [20,84])
-        // — it exercises the cube branch directly, not caller behavior.
-        assert_eq!(nearest_xterm256(255, 0, 0), Color::Indexed(196));
-    }
 }
