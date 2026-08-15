@@ -750,7 +750,7 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     assert!(cell_run(buffer, 7).contains("start run"));
 
     // The empty state names the key that starts the run, centered in the full-height progress
-    // panel: 21 interior rows, a 4-row frame, 8 above and 8 below.
+    // panel: 20 interior rows, a 4-row frame, 8 above and 8 below.
     assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
     assert!(cell_run(buffer, 12).contains("press ↵ to start"), "{:?}", cell_run(buffer, 12));
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));

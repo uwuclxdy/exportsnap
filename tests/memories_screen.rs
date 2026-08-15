@@ -487,7 +487,7 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     assert!(cell_run(buffer, 5).contains("transcode"));
     assert!(cell_run(buffer, 6).contains("start run"));
     // The empty state names the key that starts the run, centered in the full-height progress
-    // panel: 21 interior rows, a 4-row frame, 8 above and 8 below.
+    // panel: 20 interior rows, a 4-row frame, 8 above and 8 below.
     assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
     assert!(cell_run(buffer, 12).contains("↵"), "{:?}", cell_run(buffer, 12));
     // The footer hint bar advertises the shell keys.
