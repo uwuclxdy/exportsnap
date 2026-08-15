@@ -902,6 +902,255 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
     );
 }
 
+/// Every status that lands before the run's `Finished` event reaches the table, including the ones
+/// committed in the same tick as the event itself.
+///
+/// `chat_run::run` commits each item as it goes and sends `Finished` only after the fix pass
+/// returns, so the tick that drains the finished event is the FIRST tick that could read the last
+/// rows. That tick is also the last one this screen ever gets: `run_in_flight` goes false the moment
+/// the event is drained, and the event loop stops ticking an idle screen. So a poll that runs only
+/// while the worker is still working never reads those rows at all, and the rows they belong to stay
+/// frozen at `[ pending ]` beside a completion alert, with the overall bar short of 100%.
+///
+/// The memories screen carries the same six-line tick and the same pin; the two are one defect
+/// class, so a fix to either alone leaves this one red.
+#[test]
+fn the_statuses_that_land_with_the_finished_event_still_reach_the_table() {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let state = TempDir::new().unwrap();
+    let mut writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    writer
+        .enroll(&[
+            NewItem { kind: ItemKind::ChatMedia, source_id: &media_id(1), url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: &media_id(2), url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: &media_id(3), url: None },
+        ])
+        .unwrap();
+    drop(writer);
+    let sender = feed_plan(
+        &mut app,
+        state.path(),
+        vec![
+            PlanRow { source_id: media_id(1), output_name: "20210304_143005.jpg".to_owned(), leg: Leg::Image },
+            PlanRow { source_id: media_id(2), output_name: "20210304_143006.jpg".to_owned(), leg: Leg::Image },
+            PlanRow { source_id: media_id(3), output_name: "20210304_143007.jpg".to_owned(), leg: Leg::Image },
+        ],
+        clean_counts(),
+    );
+
+    // `mark_done` hashes the output, so each one has to exist on disk first.
+    let mark_done = |name: &str, id: &str| {
+        let output = dir.path().join("out/chat/x").join(name);
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        fs::write(&output, b"fixed").unwrap();
+        let writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+        writer.mark_done(ItemKind::ChatMedia, id, &output).unwrap();
+    };
+
+    // Mid-run: one item finishes and the ordinary poll picks it up. This is the vacuity guard for
+    // the assertions below — without it a screen that never polled at all would read the same.
+    mark_done("20210304_143005.jpg", &media_id(1));
+    app.tick();
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(cell_run(buffer, 3).contains("33.3%"), "{:?}", cell_run(buffer, 3));
+    assert!(cell_run(buffer, 5).contains("[ done ]"), "{:?}", cell_run(buffer, 5));
+    assert!(cell_run(buffer, 7).contains("[ pending ]"), "{:?}", cell_run(buffer, 7));
+
+    // The user scrolls off the tail. `table_move` is what protects that selection — it clears
+    // `follow_tail` on every move — and the caret assertions below pin that the final poll honours
+    // the cleared flag instead of re-pinning the tail. `finish`'s own clearing is a different line
+    // and is pinned separately, by `a_run_that_plans_and_finishes_in_one_tick_…` — the one state
+    // where it is observable.
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Up);
+    assert!(app.chat_media().descended());
+
+    // The last two items commit, then the worker sends its finished event — the real order, since
+    // the fix pass returns before the send.
+    mark_done("20210304_143006.jpg", &media_id(2));
+    mark_done("20210304_143007.jpg", &media_id(3));
+    let report = FixReport {
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
+        fixed: 3,
+        failed: vec![],
+        skipped: 0,
+        deferred: 0,
+        excluded: 0,
+        notices: vec![],
+    };
+    sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();
+    app.tick();
+
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(cell_run(buffer, 6).contains("[ done ]"), "the status that landed with the event: {:?}", cell_run(buffer, 6));
+    assert!(cell_run(buffer, 7).contains("[ done ]"), "the status that landed with the event: {:?}", cell_run(buffer, 7));
+    assert!(cell_run(buffer, 3).contains("100%"), "the bar counts what the pills show: {:?}", cell_run(buffer, 3));
+    assert!(app.chat_media().alert().is_some(), "the completion alert is up beside those rows");
+
+    // The selection stayed on the row the user scrolled to; the poll did not re-pin the tail.
+    assert!(cell_run(buffer, 6).contains(&format!("❯ {}", media_id(2))), "{:?}", cell_run(buffer, 6));
+    assert!(!cell_run(buffer, 7).contains('❯'), "{:?}", cell_run(buffer, 7));
+
+    // And the premise that makes the poll above the LAST one: the event loop stops ticking here.
+    assert!(!app.chat_media().run_in_flight(), "the loop stops ticking, so no later tick can correct the table");
+}
+
+/// A run whose plan and completion are drained by ONE pump still renders its final statuses, and
+/// adopts no selection the user never made.
+///
+/// The fast path a small export takes: everything happens inside one 80 ms tick, so the plan and the
+/// finished event are in the channel together. The poll then runs for the first and only time after
+/// `finish`, which is where the two halves below come from — the statuses must be real, and
+/// `finish`'s clearing of `follow_tail` must hold, or the poll pins the tail on a table the user
+/// never scrolled. This is the ONLY reachable state where that clearing is observable: every other
+/// route to the transition tick has either already pinned the tail (follow on, selection at the tail
+/// anyway) or had it cleared by `table_move`.
+#[test]
+fn a_run_that_plans_and_finishes_in_one_tick_renders_its_statuses_and_adopts_no_selection() {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let state = TempDir::new().unwrap();
+    let mut writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    writer
+        .enroll(&[
+            NewItem { kind: ItemKind::ChatMedia, source_id: &media_id(1), url: None },
+            NewItem { kind: ItemKind::ChatMedia, source_id: &media_id(2), url: None },
+        ])
+        .unwrap();
+    drop(writer);
+    for (name, id) in [("20210304_143005.jpg", media_id(1)), ("20210304_143006.jpg", media_id(2))] {
+        let output = dir.path().join("out/chat/x").join(name);
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        fs::write(&output, b"fixed").unwrap();
+        let writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+        writer.mark_done(ItemKind::ChatMedia, &id, &output).unwrap();
+    }
+
+    // Both events are queued before the first tick, so one pump drains the pair.
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(RunEvent::Planned(PlanSnapshot {
+            export_id: ExportId::new(EXPORT_ID).unwrap(),
+            manifest_dir: state.path().to_path_buf(),
+            rows: vec![
+                PlanRow { source_id: media_id(1), output_name: "20210304_143005.jpg".to_owned(), leg: Leg::Image },
+                PlanRow { source_id: media_id(2), output_name: "20210304_143006.jpg".to_owned(), leg: Leg::Image },
+            ],
+            counts: clean_counts(),
+        }))
+        .unwrap();
+    sender.send(RunEvent::Finished(RunOutcome::Completed(one_fixed()))).unwrap();
+    app.with_chat_media_channel(receiver);
+    app.tick();
+
+    let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(cell_run(buffer, 3).contains("100%"), "{:?}", cell_run(buffer, 3));
+    assert!(cell_run(buffer, 5).contains("[ done ]"), "{:?}", cell_run(buffer, 5));
+    assert!(cell_run(buffer, 6).contains("[ done ]"), "{:?}", cell_run(buffer, 6));
+
+    // The caret renders only in the focused pane, so descend before reading it. A run the user
+    // watched from the form leaves the finished table with nothing selected.
+    press(&mut app, KeyCode::Enter);
+    assert!(app.chat_media().descended());
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    for y in [5, 6] {
+        assert!(!cell_run(buffer, y).contains('❯'), "the finished table adopted a selection: {:?}", cell_run(buffer, y));
+    }
+}
+
+/// One planned run with a live manifest behind it, and the sender for the run's later events.
+///
+/// The two pins below need the same live state and then break it in the same way at two different
+/// moments, so the setup is shared and the divergence is the whole test. Both tempdirs are returned
+/// because both must outlive the app.
+fn planned_run_over_a_live_manifest() -> (App, TempDir, TempDir, mpsc::Sender<RunEvent>) {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let state = TempDir::new().unwrap();
+    let mut writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    writer.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: &media_id(1), url: None }]).unwrap();
+    drop(writer);
+    let sender = feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: media_id(1), output_name: "20210304_143005.jpg".to_owned(), leg: Leg::Image }],
+        clean_counts(),
+    );
+    (app, dir, state, sender)
+}
+
+/// Replaces the manifest this screen polls with bytes sqlite will not open, so the next poll fails
+/// for real rather than through an injected error.
+fn corrupt_the_manifest(state: &TempDir) {
+    let db = state.path().join(format!("{EXPORT_ID}.sqlite"));
+    assert!(db.is_file(), "the fixture must corrupt a database that is there: {}", db.display());
+    fs::write(&db, b"this is not a database, and sqlite must refuse to read it as one").unwrap();
+}
+
+/// A completion report the alert spells as `1 fixed`.
+fn one_fixed() -> FixReport {
+    FixReport {
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
+        fixed: 1,
+        failed: vec![],
+        skipped: 0,
+        deferred: 0,
+        excluded: 0,
+        notices: vec![],
+    }
+}
+
+/// A manifest that goes unreadable MID-RUN ends the run and says so. The direction the pin below
+/// would otherwise let a guard mutate away: a poll error that never reported anything at all would
+/// satisfy that pin and leave a wedged run silent.
+#[test]
+fn a_manifest_that_goes_unreadable_mid_run_raises_its_own_failure() {
+    let (mut app, _dir, state, _sender) = planned_run_over_a_live_manifest();
+    assert!(app.chat_media().alert().is_none(), "the run is live and has reported nothing yet");
+
+    corrupt_the_manifest(&state);
+    app.tick();
+
+    let alert = app.chat_media().alert().expect("a poll that cannot read the manifest ends the run");
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert!(alert.message.contains("manifest"), "{}", alert.message);
+    assert!(!app.chat_media().run_in_flight(), "the failed poll ends the run rather than wedging it");
+}
+
+/// The same failure on the FINISHING tick leaves the run's own verdict standing.
+///
+/// The last poll runs after `pump` has already published the worker's outcome, so its error arm is
+/// the one path that can overwrite a verdict the run itself produced. The manifest's own message
+/// tells the user to delete the file and redo the export, which over a run that completed cleanly is
+/// destructive advice.
+///
+/// **Ceiling**: the dropped error goes nowhere, because the screen has one alert slot and the crate
+/// has no log to put the second fact in. Upgrade path is a second alert slot (or a status line) that
+/// can carry a display fault alongside a run outcome.
+#[test]
+fn a_manifest_error_on_the_finishing_tick_leaves_the_runs_own_verdict_standing() {
+    let (mut app, _dir, state, sender) = planned_run_over_a_live_manifest();
+
+    // The real order: the worker's outcome is already queued when the manifest goes bad, exactly as
+    // it would be for a run whose last commit landed and whose db was pulled out from under the
+    // screen's reader before the next tick.
+    corrupt_the_manifest(&state);
+    sender.send(RunEvent::Finished(RunOutcome::Completed(one_fixed()))).unwrap();
+    app.tick();
+
+    let alert = app.chat_media().alert().expect("the completion alert");
+    assert_eq!(alert.kind, AlertKind::Info, "the run succeeded, so the footer must not report a failure: {}", alert.message);
+    assert!(alert.message.contains("1 fixed"), "{}", alert.message);
+    assert!(!alert.message.contains("delete"), "a clean run must never be answered with delete-the-manifest advice: {}", alert.message);
+}
+
 // ---- the compatible tier ----
 //
 // Every other render test on this screen drives `Tier::Full`. Nothing in the widget code branches on

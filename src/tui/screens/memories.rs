@@ -341,15 +341,37 @@ impl Memories {
     /// One event-loop tick: advance the spinner, drain the worker's channel, refresh the
     /// per-item statuses. Only called while a run is live; an idle screen has nothing to
     /// advance or poll.
+    ///
+    /// The poll is gated on the state the tick STARTED in, not on the state [`Self::pump`] leaves
+    /// behind, and the difference is the whole run's last statuses. Every item is committed to the
+    /// manifest before the worker sends `Finished` (`memories_run::run` returns from
+    /// `local_fix::run` first), so the tick that drains that event is the first one that can read
+    /// the final rows — and also the last one this screen ever gets, since
+    /// [`Self::run_in_flight`] goes false with it and the loop stops ticking an idle screen.
+    /// Reading the post-pump state instead skipped exactly that poll and left everything the run
+    /// finished in its last frame frozen at `pending`, beside the completion alert, for good.
     pub fn tick(&mut self) {
         if !matches!(self.run, Run::Active { .. }) {
             return;
         }
         self.spinner = self.spinner.wrapping_add(1);
+        let live = self.run_in_flight();
         self.pump();
-        if matches!(self.run, Run::Active { view: Some(_), worker: Worker::Working }) {
+        if live && matches!(self.run, Run::Active { view: Some(_), .. }) {
             self.poll();
         }
+    }
+
+    /// Whether the run still owes the user a verdict — the question a failure the SCREEN discovers
+    /// has to ask before raising an alert of its own.
+    ///
+    /// Deliberately not [`Self::run_in_flight`], which happens to hold the same bytes today: that
+    /// one answers "should the event loop keep ticking this screen", and the two only agree while
+    /// [`Self::finish`] is the sole thing that both publishes an outcome and retires the worker. A
+    /// caller asking about the ALERT SLOT gets its own predicate, so a future state that keeps
+    /// ticking after a verdict lands cannot silently reopen the clobber this guards.
+    fn outcome_unreported(&self) -> bool {
+        matches!(self.run, Run::Active { worker: Worker::Working, .. })
     }
 
     /// Drains every event the worker has queued, in order.
@@ -409,6 +431,9 @@ impl Memories {
 
     /// Re-reads every row's status off the manifest, then keeps the tail pinned while the run is
     /// live and the user has not scrolled up.
+    ///
+    /// The tail is pinned only while `follow_tail` holds, which [`Self::table_move`] clears on every
+    /// move — that, not anything here, is what keeps a scrolled selection where the user put it.
     fn poll(&mut self) {
         let result = {
             let Run::Active { view: Some(view), .. } = &self.run else { return };
@@ -427,7 +452,20 @@ impl Memories {
                     self.table.list.select(Some(view.rows.len() - 1));
                 }
             }
-            Err(error) => self.finish(RunOutcome::Failed(RunError::Manifest(error))),
+            // Mid-run the manifest is the only thing that knows how far the run got, so a read it
+            // cannot answer ends the run and says so. On the finishing tick the worker has already
+            // published its own verdict into the one alert slot, and this failure must not take it:
+            // the manifest's message tells the user to delete the file and redo the export, which
+            // over a run that just completed cleanly is destructive advice.
+            //
+            // Ceiling: that late error is then dropped rather than reported, because there is one
+            // alert slot and no log in this crate to put the second fact in. Upgrade path is a
+            // second slot (or a status line) that can carry a display fault beside a run outcome.
+            Err(error) => {
+                if self.outcome_unreported() {
+                    self.finish(RunOutcome::Failed(RunError::Manifest(error)));
+                }
+            }
         }
     }
 
