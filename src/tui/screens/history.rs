@@ -278,6 +278,12 @@ impl History {
         (&self.source, &self.out_root)
     }
 
+    /// Re-seeds the output root the next run writes under after a settings commit, without touching
+    /// the run state: a live run keeps the root it captured at start.
+    pub(crate) fn apply_out_root(&mut self, out_root: PathBuf) {
+        self.out_root = out_root;
+    }
+
     /// Swaps in a receiver the caller feeds, exactly the channel [`Self::start_run_with`]
     /// creates — the seam the render and tick tests drive.
     pub fn with_channel(&mut self, receiver: Receiver<RunEvent>) {

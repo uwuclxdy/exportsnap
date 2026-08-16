@@ -220,6 +220,10 @@ pub struct Settings {
     /// The DANGER toast, or `None`. One slot: this screen is the only producer and raises one
     /// at a time, so the contract's ≤ 3-stack collapses to the common case.
     toast: Option<Toast>,
+    /// Set by [`Self::write`] on a successful commit, so the app can re-resolve the run screens
+    /// after routing a settings key. Read once via [`Self::take_config_commit`]; the flag holds no
+    /// other state.
+    committed: bool,
 }
 
 impl Settings {
@@ -228,7 +232,7 @@ impl Settings {
     /// `App::with_source_environment`'s hand-off.
     #[must_use]
     pub fn with_layers(layers: SettingsLayers) -> Self {
-        Self { source: PathBuf::new(), layers, form_focus: 0, editing: None, toast: None }
+        Self { source: PathBuf::new(), layers, form_focus: 0, editing: None, toast: None, committed: false }
     }
 
     /// The `--source` the runs read, delivered once by the app's source hand-off. The output
@@ -295,6 +299,13 @@ impl Settings {
     /// toast is inert, so the app's guard falls through to the alert dismissal.
     pub(crate) fn dismiss_toast(&mut self) -> bool {
         self.toast.take().is_some()
+    }
+
+    /// Whether a commit wrote the config since the last call — the app reads it once after routing
+    /// a settings key and re-resolves the run screens when it is set. Read-and-clear, so one commit
+    /// re-resolves exactly once and a failed write (a toast, no swap) stays silent here.
+    pub(crate) fn take_config_commit(&mut self) -> bool {
+        std::mem::take(&mut self.committed)
     }
 
     /// The keys this screen binds, for the help modal's screen section (cloudy-tui: Help modal).
@@ -452,6 +463,7 @@ impl Settings {
                 Ok(()) => {
                     self.layers.config = config;
                     self.toast = None;
+                    self.committed = true;
                     return;
                 }
                 Err(error) => error.to_string(),

@@ -46,7 +46,7 @@ use ratatui::widgets::{ListState, Paragraph, Wrap};
 
 use crate::export::chat_fix::{CHAT_DIR, OverlayMode};
 use crate::export::chat_run::{self, HistoryOutcome, PlanCounts, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
-use crate::export::env::Environment;
+use crate::export::env::{Environment, probe_target};
 use crate::export::local_fix::{VideoOptions, canonical_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::zip::discover_parts;
@@ -210,6 +210,14 @@ pub struct ChatMedia {
     environment: Environment,
     overlay: OverlayMode,
     transcode: bool,
+    /// Whether the user has cycled the overlay row since it was seeded from the resolved default.
+    /// See `transcode_overridden`: a settings commit re-seeds the default only while this is false.
+    overlay_overridden: bool,
+    /// Whether the user has flipped the transcode toggle since it was seeded from the resolved
+    /// default. A settings commit re-seeds the default only while this is false: once the user
+    /// has set a per-run override, a later settings commit must not move it out from under them
+    /// (`apply_run_defaults`).
+    transcode_overridden: bool,
     /// What the eager source probe found; drives the empty state's problem-and-fix copy.
     source_state: SourceState,
     run: Run,
@@ -233,7 +241,15 @@ pub struct ChatMedia {
 #[derive(Debug)]
 enum Run {
     Idle,
-    Active { view: Option<Box<RunView>>, worker: Worker },
+    Active {
+        view: Option<Box<RunView>>,
+        worker: Worker,
+        /// The out root this run captured at start. Kept beside the run rather than read off
+        /// [`ChatMedia::out_root`], which a settings commit mid-run moves through
+        /// [`ChatMedia::apply_run_defaults`] — the completion summary compares a run's recorded
+        /// outputs against the root it actually wrote under, not the one the next run will.
+        out_root: PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -293,6 +309,8 @@ impl ChatMedia {
             environment,
             overlay,
             transcode,
+            overlay_overridden: false,
+            transcode_overridden: false,
             source_state,
             run: Run::Idle,
             receiver: None,
@@ -330,7 +348,27 @@ impl ChatMedia {
     /// seam the render and tick tests drive.
     pub fn with_channel(&mut self, receiver: Receiver<RunEvent>) {
         self.receiver = Some(receiver);
-        self.run = Run::Active { view: None, worker: Worker::Working };
+        self.run = Run::Active { view: None, worker: Worker::Working, out_root: self.out_root.clone() };
+    }
+
+    /// Re-seeds the resolved defaults the next run reads after a settings commit, without touching
+    /// the run state: a live run keeps the inputs it captured at start, and only the values the
+    /// next run reads move. The disk-free row re-measures at the (possibly new) output root.
+    ///
+    /// `out_root` and `ffmpeg` are this screen's resolved defaults alone — it has no control over
+    /// either — so they always move. `transcode` and `overlay` are also live form controls, so each
+    /// moves only while the user has not overridden it: a settings commit that changed only
+    /// `out_dir` must not revert a per-run override the user set on this form.
+    pub(crate) fn apply_run_defaults(&mut self, out_root: PathBuf, ffmpeg: Option<PathBuf>, transcode: bool, overlay: OverlayMode) {
+        self.out_root = out_root.clone();
+        if !self.transcode_overridden {
+            self.transcode = transcode;
+        }
+        if !self.overlay_overridden {
+            self.overlay = overlay;
+        }
+        self.environment.ffmpeg = ffmpeg;
+        self.environment = self.environment.measured_at(probe_target(&out_root));
     }
 
     /// Names where runs started from this screen keep their manifest — the seam state tests use so
@@ -447,7 +485,7 @@ impl ChatMedia {
         self.alert = None;
         self.table.list = ListState::default();
         self.table.descended = false;
-        self.run = Run::Active { view: None, worker: Worker::Working };
+        self.run = Run::Active { view: None, worker: Worker::Working, out_root: self.out_root.clone() };
 
         let (sender, receiver) = std::sync::mpsc::channel();
         self.receiver = Some(receiver);
@@ -552,7 +590,7 @@ impl ChatMedia {
     /// The final event, or a failure this screen discovered on its own side.
     fn finish(&mut self, outcome: RunOutcome) {
         self.alert = Some(summary(self, &outcome));
-        if let Run::Active { view, worker } = &mut self.run {
+        if let Run::Active { view, worker, .. } = &mut self.run {
             if let Some(view) = view {
                 view.follow_tail = false;
             }
@@ -660,8 +698,14 @@ impl ChatMedia {
                 match FormRow::ALL[self.form_focus] {
                     // `enter` mirrors `space` on a cycle and on a toggle — neither has a separate
                     // commit step, so there is nothing else for it to mean.
-                    FormRow::Overlay => self.overlay = self.overlay.next(),
-                    FormRow::Transcode => self.transcode = !self.transcode,
+                    FormRow::Overlay => {
+                        self.overlay = self.overlay.next();
+                        self.overlay_overridden = true;
+                    }
+                    FormRow::Transcode => {
+                        self.transcode = !self.transcode;
+                        self.transcode_overridden = true;
+                    }
                     FormRow::Start => {
                         // The start chip triggers the action its label names (cloudy-tui: Action
                         // chip): enter starts the run when enabled, and a disabled chip is
@@ -689,8 +733,14 @@ impl ChatMedia {
             KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => {
                 // `space` activates a state control and is deliberately NOT bound on the chip.
                 match FormRow::ALL[self.form_focus] {
-                    FormRow::Overlay => self.overlay = self.overlay.next(),
-                    FormRow::Transcode => self.transcode = !self.transcode,
+                    FormRow::Overlay => {
+                        self.overlay = self.overlay.next();
+                        self.overlay_overridden = true;
+                    }
+                    FormRow::Transcode => {
+                        self.transcode = !self.transcode;
+                        self.transcode_overridden = true;
+                    }
                     FormRow::Start => {}
                 }
                 true
@@ -837,8 +887,8 @@ fn render_progress(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, a
     frame.render_widget(block, area);
 
     match &chat.run {
-        Run::Idle | Run::Active { view: None, worker: Worker::Finished } => render_idle(frame, palette, chat, inner),
-        Run::Active { view: None, worker: Worker::Working } => {
+        Run::Idle | Run::Active { view: None, worker: Worker::Finished, .. } => render_idle(frame, palette, chat, inner),
+        Run::Active { view: None, worker: Worker::Working, .. } => {
             frame.render_widget(Paragraph::new(planning_spinner(palette, chat.spinner)), inner);
         }
         Run::Active { view: Some(view), .. } => {
@@ -1020,25 +1070,31 @@ fn summary(chat: &ChatMedia, outcome: &RunOutcome) -> RunAlert {
     }
 }
 
-/// Whether a run skipped finished items whose recorded outputs live outside the current out root —
-/// the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at a new empty dir
-/// makes the resume sweep verify every `done` item at its OLD path (still present), so every item
-/// is skipped and nothing is written, with no screen saying why. The tell is a `done` row whose
-/// recorded `output_path` is not under the chat write root ([`ChatMedia::out_root`]`/`[`CHAT_DIR`]).
+/// Whether a run skipped finished items whose recorded outputs live outside the out root the RUN
+/// captured at start — the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at
+/// a new empty dir makes the resume sweep verify every `done` item at its OLD path (still present),
+/// so every item is skipped and nothing is written, with no screen saying why. The tell is a `done`
+/// row whose recorded `output_path` is not under the run's chat write root (the captured root `/`
+/// [`CHAT_DIR`]).
+///
+/// The root compared against is the one [`ChatMedia::start_run_with`] captured into the run state,
+/// never the live [`ChatMedia::out_root`]: a settings commit mid-run re-seeds the live field through
+/// [`ChatMedia::apply_run_defaults`], and comparing a run's own outputs against that freshly
+/// committed root would read every one of them as "elsewhere".
 fn skipped_outputs_recorded_elsewhere(chat: &ChatMedia, skipped: usize) -> bool {
     if skipped == 0 {
         return false;
     }
-    let Run::Active { view: Some(view), .. } = &chat.run else { return false };
+    let Run::Active { view: Some(view), out_root: run_out_root, .. } = &chat.run else { return false };
     // Both sides of a path-identity compare must be canonicalized the same way (cloudify rust index,
-    // 2026-07-11). The plan canonicalizes `out_root` through [`canonical_out_root`] before deriving
-    // any output, so a real record is already canonical — but `chat.out_root` is the raw value
-    // `RunDefaults::resolve` handed down, and a symlinked or relative `--out` (the default
-    // `source/exportsnap-out` under a symlinked source included) makes a raw-vs-canonical
-    // `starts_with` answer false even when the outputs ARE under the current root. Resolve the
+    // 2026-07-11). The plan canonicalizes the run's out root through [`canonical_out_root`] before
+    // deriving any output, so a real record is already canonical — but the run's captured root is
+    // the raw value `RunDefaults::resolve` handed down, and a symlinked or relative `--out` (the
+    // default `source/exportsnap-out` under a symlinked source included) makes a raw-vs-canonical
+    // `starts_with` answer false even when the outputs ARE under the run's root. Resolve the
     // recorded file too — it exists, since the resume sweep only skips outputs it verified — and
     // decline to warn when either side cannot be resolved.
-    let Ok(out_root) = canonical_out_root(&chat.out_root) else { return false };
+    let Ok(out_root) = canonical_out_root(run_out_root) else { return false };
     // The chat write root is one level below `out_root` (`out_root/`[`CHAT_DIR`]). Comparing the
     // recorded path against the out root alone reads an ANCESTOR out root as a match: a run into
     // `/export` after a run into `/export/out` sees the recorded `/export/out/chat/…` as "under"
@@ -1193,5 +1249,58 @@ mod tests {
         let counts = PlanCounts::default();
         let text: String = counts_line(&palette(), &counts, usize::MAX).spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(text, "no chat history, nothing attributed");
+    }
+
+    #[test]
+    fn a_settings_commit_mid_run_does_not_read_the_runs_own_outputs_as_elsewhere() {
+        // The run captured out_root at start and wrote under it. A settings commit mid-run re-seeds
+        // the LIVE out root (apply_run_defaults), so the completion summary must compare the run's
+        // recorded outputs against the captured root, not the freshly committed one — comparing the
+        // latter reads every done row under the run's own root as "elsewhere" (sweep: run screens).
+        use crate::export::local_fix::{FixReport, Leg};
+        use crate::export::manifest::{ExportId, NewItem, ResumeReport};
+
+        let state = tempfile::TempDir::new().unwrap();
+        let export_id = ExportId::new("1784667002819").unwrap();
+
+        // A finished item whose recorded output lives under the run's own chat write root.
+        let out = state.path().join("out");
+        let output = out.join(CHAT_DIR).join("friend").join("x.jpg");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(&output, b"jpeg").unwrap();
+        let mut manifest = Manifest::open_in(state.path(), &export_id).unwrap();
+        manifest.enroll(&[NewItem { kind: ItemKind::ChatMedia, source_id: "id-1", url: None }]).unwrap();
+        manifest.mark_done(ItemKind::ChatMedia, "id-1", &output).unwrap();
+
+        // Build the screen on that root, then feed the plan so the run reads the manifest.
+        let mut chat = ChatMedia::with_environment(PathBuf::from("/src"), out, Environment::default(), false, OverlayMode::Both);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(RunEvent::Planned(PlanSnapshot {
+                export_id,
+                manifest_dir: state.path().to_path_buf(),
+                rows: vec![PlanRow { source_id: "id-1".to_owned(), output_name: "x.jpg".to_owned(), leg: Leg::Image }],
+                counts: PlanCounts::default(),
+            }))
+            .unwrap();
+        chat.with_channel(receiver);
+        chat.tick();
+
+        // The settings commit moves the live out root out from under the run mid-flight.
+        chat.apply_run_defaults(state.path().join("committed"), None, false, OverlayMode::Both);
+
+        // The run finishes with one skip: the recorded output is under the run's own root.
+        chat.finish(RunOutcome::Completed(FixReport {
+            resumed: ResumeReport { demoted: vec![], verified: 1, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
+            fixed: 0,
+            failed: vec![],
+            skipped: 1,
+            deferred: 0,
+            excluded: 0,
+            notices: vec![],
+        }));
+
+        let alert = chat.alert().unwrap();
+        assert!(!alert.message.contains("different out dir"), "the run's own outputs must not read as elsewhere: {}", alert.message);
     }
 }

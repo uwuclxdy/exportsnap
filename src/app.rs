@@ -327,6 +327,29 @@ impl App {
         self.reprobe_with(source, defaults, locate);
     }
 
+    /// Re-resolves the run screens' values after the settings screen commits a config change.
+    ///
+    /// [`Self::reprobe_source`] re-resolves the same four keys but re-runs the whole startup
+    /// composition — a fresh machine probe and an overview re-read — and rebuilds every screen,
+    /// which drops a run in flight. A settings commit changes only the config, so the resolved
+    /// defaults (decision 66) are re-derived from the settings screen's own live layers and applied
+    /// to the run screens in place: a live run keeps the inputs it captured at start, and the values
+    /// the NEXT run reads move to what the settings screen now shows.
+    ///
+    /// `out_root` and `ffmpeg` always move — the run screens have no control over either. `transcode`
+    /// and `overlay` are also live form controls, so each screen's `apply_run_defaults` moves them
+    /// only while the user has not overridden them: a commit that changed only `out_dir` or the
+    /// theme must not revert a per-run override the user set on a run form.
+    fn refresh_run_defaults(&mut self) {
+        let out_root = self.settings.effective_out_root();
+        let ffmpeg = self.settings.effective_ffmpeg().map(Path::to_path_buf);
+        let transcode = self.settings.effective_transcode();
+        let overlay = self.settings.effective_overlay();
+        self.memories.apply_run_defaults(out_root.clone(), ffmpeg.clone(), transcode);
+        self.chat_media.apply_run_defaults(out_root.clone(), ffmpeg, transcode, overlay);
+        self.history.apply_out_root(out_root);
+    }
+
     /// Hands the overview screen a real read of the source dir. [`Self::start`] calls this before
     /// the first frame; [`Self::new`] on its own draws the unloaded state.
     #[must_use]
@@ -847,7 +870,13 @@ impl App {
             Tab::ChatMedia => self.chat_media.handle_key(key),
             Tab::History => self.history.handle_key(key),
             Tab::Account => self.account.handle_key(key),
-            Tab::Settings => self.settings.handle_key(key),
+            Tab::Settings => {
+                let consumed = self.settings.handle_key(key);
+                if self.settings.take_config_commit() {
+                    self.refresh_run_defaults();
+                }
+                consumed
+            }
             Tab::Overview => match self.overview.handle_key(key) {
                 OverviewKey::Reprobbed(path) => {
                     self.reprobe_source(path);
@@ -1092,5 +1121,112 @@ mod tests {
 
         let (_, out) = app.memories().run_paths();
         assert_eq!(out, Path::new("/committed/out"), "the committed out_dir must reach the run screens");
+    }
+
+    #[test]
+    fn a_committed_setting_reaches_the_run_screens_without_a_reprobe() {
+        // The bug: a setting committed on the settings tab never reached the already-built run
+        // screens, so the run kept the value it resolved at startup. Driving the app's own key
+        // routing must re-resolve the run screens from the settings screen's live config, with no
+        // manual `reprobe_source` call and no run-state rebuild in between.
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let layers = SettingsLayers { config_dir: Some(config_dir.path().to_path_buf()), ..SettingsLayers::defaults_for(Tier::Full) };
+        let mut app = App::start_with(
+            Tier::Full,
+            PathBuf::from("/nope"),
+            RunDefaults::resolve(None, &Config::default(), Path::new("/nope")),
+            layers,
+            |_| None,
+        );
+        app.switch_to(Tab::Settings);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // out_dir: the form opens focused on the output-dir row.
+        app.handle_key(key(KeyCode::Enter));
+        for ch in "/committed/out".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        // transcode: three Downs reach the transcode row (past theme and ffmpeg); enter flips it.
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        // overlay mode: one Down more, enter cycles both -> originals.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+
+        // ffmpeg path: two Ups back to the ffmpeg row, then edit and commit.
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Enter));
+        for ch in "/committed/ffmpeg".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.memories().run_paths().1, Path::new("/committed/out"), "out_dir reaches the memories root");
+        assert_eq!(app.chat_media().run_paths().1, Path::new("/committed/out"), "out_dir reaches the chat root");
+        assert_eq!(app.history().run_paths().1, Path::new("/committed/out"), "out_dir reaches the history root");
+        assert!(!app.memories().is_transcode_on(), "transcode reaches the memories screen");
+        assert!(!app.chat_media().is_transcode_on(), "transcode reaches the chat screen");
+        assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Originals, "overlay mode reaches the chat screen");
+        assert_eq!(
+            app.memories().environment().ffmpeg.as_deref(),
+            Some(Path::new("/committed/ffmpeg")),
+            "ffmpeg path reaches the memories screen"
+        );
+        assert_eq!(
+            app.chat_media().environment().ffmpeg.as_deref(),
+            Some(Path::new("/committed/ffmpeg")),
+            "ffmpeg path reaches the chat screen"
+        );
+    }
+
+    #[test]
+    fn a_settings_commit_preserves_a_per_run_form_override() {
+        // The bug: `refresh_run_defaults` treated a resolved default and a live form value as the
+        // same thing, so a settings commit that changed only out_dir reverted a per-run override the
+        // user had set on a run form. `out_root` and `ffmpeg` have no per-run control and must move;
+        // `transcode` and `overlay` are live form controls, so a commit must not move one the user
+        // already flipped. Drive the app's own key routing end to end, with no manual re-probe.
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let layers = SettingsLayers { config_dir: Some(config_dir.path().to_path_buf()), ..SettingsLayers::defaults_for(Tier::Full) };
+        let mut app = App::start_with(
+            Tier::Full,
+            PathBuf::from("/nope"),
+            RunDefaults::resolve(None, &Config::default(), Path::new("/nope")),
+            layers,
+            |_| None,
+        );
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // The memories form opens focused on the transcode row, so a bare space flips it off and
+        // marks it as the user's override.
+        app.switch_to(Tab::Memories);
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(!app.memories().is_transcode_on(), "space flips the memories toggle off");
+
+        // The chat form opens focused on the overlay row, so space cycles both -> originals and
+        // marks that as the user's override.
+        app.switch_to(Tab::ChatMedia);
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Originals, "space cycles the chat overlay to originals");
+
+        // Commit only out_dir on the settings tab, exactly the case that used to clobber the two
+        // overrides above.
+        app.switch_to(Tab::Settings);
+        app.handle_key(key(KeyCode::Enter));
+        for ch in "/committed/out".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        // The out root moves, and the two per-run overrides survive.
+        assert_eq!(app.memories().run_paths().1, Path::new("/committed/out"), "out_dir reaches the memories root");
+        assert!(!app.memories().is_transcode_on(), "the per-run transcode override survives an out_dir commit");
+        assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Originals, "the per-run overlay override survives an out_dir commit");
     }
 }

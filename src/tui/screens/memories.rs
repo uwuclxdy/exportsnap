@@ -41,7 +41,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListState, Paragraph, Wrap};
 
-use crate::export::env::Environment;
+use crate::export::env::{Environment, probe_target};
 use crate::export::local_fix::{VideoOptions, canonical_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::memories_run::{self, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
@@ -168,6 +168,11 @@ pub struct Memories {
     out_root: PathBuf,
     environment: Environment,
     transcode: bool,
+    /// Whether the user has flipped the transcode toggle since it was seeded from the resolved
+    /// default. A settings commit re-seeds the default only while this is false: once the user
+    /// has set a per-run override, a later settings commit must not move it out from under them
+    /// (`apply_run_defaults`).
+    transcode_overridden: bool,
     /// What the eager source probe found; drives the empty state's problem-and-fix copy.
     source_state: SourceState,
     run: Run,
@@ -190,7 +195,15 @@ pub struct Memories {
 #[derive(Debug)]
 enum Run {
     Idle,
-    Active { view: Option<Box<RunView>>, worker: Worker },
+    Active {
+        view: Option<Box<RunView>>,
+        worker: Worker,
+        /// The out root this run captured at start. Kept beside the run rather than read off
+        /// [`Memories::out_root`], which a settings commit mid-run moves through
+        /// [`Memories::apply_run_defaults`] — the completion summary compares a run's recorded
+        /// outputs against the root it actually wrote under, not the one the next run will.
+        out_root: PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -247,6 +260,7 @@ impl Memories {
             out_root,
             environment,
             transcode,
+            transcode_overridden: false,
             source_state,
             run: Run::Idle,
             receiver: None,
@@ -278,7 +292,24 @@ impl Memories {
     /// through the real `tick` machinery.
     pub fn with_channel(&mut self, receiver: Receiver<RunEvent>) {
         self.receiver = Some(receiver);
-        self.run = Run::Active { view: None, worker: Worker::Working };
+        self.run = Run::Active { view: None, worker: Worker::Working, out_root: self.out_root.clone() };
+    }
+
+    /// Re-seeds the resolved defaults the next run reads after a settings commit, without touching
+    /// the run state: a live run keeps the inputs it captured at start, and only the values the
+    /// next run reads move. The disk-free row re-measures at the (possibly new) output root.
+    ///
+    /// `out_root` and `ffmpeg` are this screen's resolved defaults alone — it has no control over
+    /// either — so they always move. `transcode` is also a live form control, so it moves only
+    /// while the user has not flipped it: a settings commit that changed only `out_dir` must not
+    /// revert a per-run override the user set on this form.
+    pub(crate) fn apply_run_defaults(&mut self, out_root: PathBuf, ffmpeg: Option<PathBuf>, transcode: bool) {
+        self.out_root = out_root.clone();
+        if !self.transcode_overridden {
+            self.transcode = transcode;
+        }
+        self.environment.ffmpeg = ffmpeg;
+        self.environment = self.environment.measured_at(probe_target(&out_root));
     }
 
     /// Names where runs started from this screen keep their manifest — the seam state tests use
@@ -391,7 +422,7 @@ impl Memories {
         self.alert = None;
         self.table.list = ListState::default();
         self.table.descended = false;
-        self.run = Run::Active { view: None, worker: Worker::Working };
+        self.run = Run::Active { view: None, worker: Worker::Working, out_root: self.out_root.clone() };
 
         let (sender, receiver) = std::sync::mpsc::channel();
         self.receiver = Some(receiver);
@@ -506,7 +537,7 @@ impl Memories {
     /// not read, a worker that died silently).
     fn finish(&mut self, outcome: RunOutcome) {
         self.alert = Some(summary(self, &outcome));
-        if let Run::Active { view, worker } = &mut self.run {
+        if let Run::Active { view, worker, .. } = &mut self.run {
             if let Some(view) = view {
                 view.follow_tail = false;
             }
@@ -617,7 +648,10 @@ impl Memories {
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                 match FormRow::ALL[self.form_focus] {
-                    FormRow::Transcode => self.transcode = !self.transcode,
+                    FormRow::Transcode => {
+                        self.transcode = !self.transcode;
+                        self.transcode_overridden = true;
+                    }
                     FormRow::Start => {
                         // The start chip triggers the action its label names (cloudy-tui: Action
                         // chip): enter starts the run when enabled, and a disabled chip is
@@ -646,6 +680,7 @@ impl Memories {
                 // `space` mirrors `enter` on the toggle; it is not bound on chips.
                 if FormRow::ALL[self.form_focus] == FormRow::Transcode {
                     self.transcode = !self.transcode;
+                    self.transcode_overridden = true;
                 }
                 true
             }
@@ -786,8 +821,8 @@ fn render_progress(frame: &mut Frame, palette: &Palette, memories: &mut Memories
     frame.render_widget(block, area);
 
     match &memories.run {
-        Run::Idle | Run::Active { view: None, worker: Worker::Finished } => render_idle(frame, palette, memories, inner),
-        Run::Active { view: None, worker: Worker::Working } => {
+        Run::Idle | Run::Active { view: None, worker: Worker::Finished, .. } => render_idle(frame, palette, memories, inner),
+        Run::Active { view: None, worker: Worker::Working, .. } => {
             frame.render_widget(Paragraph::new(planning_spinner(palette, memories.spinner)), inner);
         }
         Run::Active { view: Some(view), .. } => {
@@ -873,25 +908,30 @@ fn summary(memories: &Memories, outcome: &RunOutcome) -> RunAlert {
     }
 }
 
-/// Whether a run skipped finished items whose recorded outputs live outside the current out root —
-/// the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at a new empty dir
-/// makes the resume sweep verify every `done` item at its OLD path (still present), so every item
-/// is skipped and nothing is written, with no screen saying why. The tell is a `done` row whose
-/// recorded `output_path` is not under [`Memories::out_root`].
+/// Whether a run skipped finished items whose recorded outputs live outside the out root the RUN
+/// captured at start — the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at
+/// a new empty dir makes the resume sweep verify every `done` item at its OLD path (still present),
+/// so every item is skipped and nothing is written, with no screen saying why. The tell is a `done`
+/// row whose recorded `output_path` is not under the run's captured root.
+///
+/// The root compared against is the one [`Memories::start_run_with`] captured into the run state,
+/// never the live [`Memories::out_root`]: a settings commit mid-run re-seeds the live field through
+/// [`Memories::apply_run_defaults`], and comparing a run's own outputs against that freshly
+/// committed root would read every one of them as "elsewhere".
 fn skipped_outputs_recorded_elsewhere(memories: &Memories, skipped: usize) -> bool {
     if skipped == 0 {
         return false;
     }
-    let Run::Active { view: Some(view), .. } = &memories.run else { return false };
+    let Run::Active { view: Some(view), out_root: run_out_root, .. } = &memories.run else { return false };
     // Both sides of a path-identity compare must be canonicalized the same way (cloudify rust index,
-    // 2026-07-11). The plan canonicalizes `out_root` through [`canonical_out_root`] before deriving
-    // any output, so a real record is already canonical — but `memories.out_root` is the raw value
-    // `RunDefaults::resolve` handed down, and a symlinked or relative `--out` (the default
-    // `source/exportsnap-out` under a symlinked source included) makes a raw-vs-canonical
-    // `starts_with` answer false even when the outputs ARE under the current root. Resolve the
+    // 2026-07-11). The plan canonicalizes the run's out root through [`canonical_out_root`] before
+    // deriving any output, so a real record is already canonical — but the run's captured root is
+    // the raw value `RunDefaults::resolve` handed down, and a symlinked or relative `--out` (the
+    // default `source/exportsnap-out` under a symlinked source included) makes a raw-vs-canonical
+    // `starts_with` answer false even when the outputs ARE under the run's root. Resolve the
     // recorded file too — it exists, since the resume sweep only skips outputs it verified — and
     // decline to warn when either side cannot be resolved.
-    let Ok(out_root) = canonical_out_root(&memories.out_root) else { return false };
+    let Ok(out_root) = canonical_out_root(run_out_root) else { return false };
     view.manifest.items(ItemKind::Memory).is_ok_and(|items| {
         items.into_iter().any(|item| {
             item.status == ItemStatus::Done
@@ -951,5 +991,57 @@ mod tests {
         let cut = middle_ellipsis("20210115_143005_2.jpg", 12);
         assert!(cut.starts_with("2021"), "the date prefix survives: {cut}");
         assert!(cut.ends_with(".jpg"), "the extension survives: {cut}");
+    }
+
+    #[test]
+    fn a_settings_commit_mid_run_does_not_read_the_runs_own_outputs_as_elsewhere() {
+        // The run captured out_root at start and wrote under it. A settings commit mid-run re-seeds
+        // the LIVE out root (apply_run_defaults), so the completion summary must compare the run's
+        // recorded outputs against the captured root, not the freshly committed one — comparing the
+        // latter reads every done row under the run's own root as "elsewhere" (sweep: run screens).
+        use crate::export::local_fix::{FixReport, Leg};
+        use crate::export::manifest::{ExportId, NewItem, ResumeReport};
+
+        let state = tempfile::TempDir::new().unwrap();
+        let export_id = ExportId::new("1784667002819").unwrap();
+
+        // A finished item whose recorded output lives under the run's own root.
+        let out = state.path().join("out");
+        let output = out.join("2021").join("x.jpg");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(&output, b"jpeg").unwrap();
+        let mut manifest = Manifest::open_in(state.path(), &export_id).unwrap();
+        manifest.enroll(&[NewItem { kind: ItemKind::Memory, source_id: "id-1", url: None }]).unwrap();
+        manifest.mark_done(ItemKind::Memory, "id-1", &output).unwrap();
+
+        // Build the screen on that root, then feed the plan so the run reads the manifest.
+        let mut memories = Memories::with_environment(PathBuf::from("/src"), out, Environment::default(), false);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(RunEvent::Planned(PlanSnapshot {
+                export_id,
+                manifest_dir: state.path().to_path_buf(),
+                rows: vec![PlanRow { source_id: "id-1".to_owned(), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+            }))
+            .unwrap();
+        memories.with_channel(receiver);
+        memories.tick();
+
+        // The settings commit moves the live out root out from under the run mid-flight.
+        memories.apply_run_defaults(state.path().join("committed"), None, false);
+
+        // The run finishes with one skip: the recorded output is under the run's own root.
+        memories.finish(RunOutcome::Completed(FixReport {
+            resumed: ResumeReport { demoted: vec![], verified: 1, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
+            fixed: 0,
+            failed: vec![],
+            skipped: 1,
+            deferred: 0,
+            excluded: 0,
+            notices: vec![],
+        }));
+
+        let alert = memories.alert().unwrap();
+        assert!(!alert.message.contains("different out dir"), "the run's own outputs must not read as elsewhere: {}", alert.message);
     }
 }
