@@ -411,6 +411,10 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
     // which reads like a missing guard instead of a broken fixture.
     press(&mut app, KeyCode::Right);
     press(&mut app, KeyCode::Right);
+    // Descend via the chat start chip: two ↓ from the default overlay-cycle caret reach it, since
+    // the chat static rows dropped out of the walk.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
 

@@ -24,10 +24,15 @@
 //!
 //! # Focus
 //!
-//! The form's caret walks all six rows. The three static rows are focusable-but-inert, so their
-//! enter descends into the table (or, with no table yet, starts the run — the promise the empty
-//! state's action line makes). `space` cycles the overlay mode and flips the transcode toggle;
-//! `enter` mirrors it on both, per the contract's row-interaction grammar.
+//! The form's caret walks the three real controls — the overlay-mode cycle, the transcode toggle
+//! and the start chip — while the three informational rows (source, output dir, disk free) render
+//! as non-focusable, column-aligned key:value rows. Enter on the start chip descends into the
+//! table pane, which is read-only but focusable for scrolling; with no table yet (no run planned)
+//! there is nothing to descend into, so enter starts the run instead — the promise the empty
+//! state's action line makes. Starting a fresh run once a table exists goes through the action
+//! menu's `start run`. `space` cycles the overlay mode and flips the transcode toggle; `enter`
+//! mirrors it on both, per the contract's row-interaction grammar. esc or `←` ascends, `→` is
+//! inert while descended.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,21 +43,22 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::{ListState, Paragraph, Wrap};
 
 use crate::export::chat_fix::{CHAT_DIR, OverlayMode};
 use crate::export::chat_run::{self, HistoryOutcome, PlanCounts, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
 use crate::export::env::Environment;
-use crate::export::local_fix::VideoOptions;
+use crate::export::local_fix::{VideoOptions, canonical_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
-use crate::tui::alert::RunAlert;
+use crate::export::zip::discover_parts;
+use crate::tui::alert::{AlertKind, RunAlert};
 use crate::tui::format::{cells, head_ellipsis, plural, right_pad, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
     self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, OUTPUT_MIN, PanelStyle, ProgressColumns, ProgressRow, STATUS_CELLS,
-    action_chip, caret, cycle_options, disk_free_value, empty_state, form_label, overall_bar, panel, path_budget, planning_spinner,
-    progress_header, progress_list, static_row, tint_to_edge, tooltip,
+    action_chip, caret, cycle_options, disk_free_value, display_row, empty_state, form_label, overall_bar, panel, planning_spinner,
+    progress_header, progress_list, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -60,7 +66,12 @@ use crate::tui::widgets::{
 /// Cells a path value is head-ellipsised to, matching the memories form so the two screens' path
 /// rows read the same width.
 const PATH_CELLS: usize = 22;
-/// The widest form label (`overlay mode`), which sets where the ragged rows' values land.
+/// The widest static row's label (`output dir`), which sets the column the static values stack at.
+const WIDEST_STATIC_LABEL: usize = 10;
+/// The static rows' label column: the widest label plus the ≥ 2-space gap (contract: Static
+/// key:value rows pad each label to the group's widest label width + ≥ 2 spaces).
+const STATIC_LABEL_COLUMN: usize = WIDEST_STATIC_LABEL + LABEL_GAP;
+/// The widest focusable form label (`overlay mode`), which sets where the ragged rows' values land.
 const WIDEST_FORM_LABEL: usize = 12;
 
 /// Cells the overlay-mode cycle control occupies at its widest — every option's word, a 2-space gap
@@ -84,11 +95,14 @@ const fn cycle_cells() -> usize {
     total
 }
 
-/// The form panel's interior cells at its widest row.
-const FORM_INTERIOR: usize = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + widest_value();
+/// The form panel's interior cells at its widest row: the cycle row's focused width (caret + label
+/// + gap + the cycle's options) or a static path row (label column + path), whichever is wider.
+const FORM_INTERIOR: usize = form_interior();
 
-const fn widest_value() -> usize {
-    if CYCLE_CELLS > PATH_CELLS { CYCLE_CELLS } else { PATH_CELLS }
+const fn form_interior() -> usize {
+    let cycle = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + CYCLE_CELLS;
+    let stat = STATIC_LABEL_COLUMN + PATH_CELLS;
+    if cycle > stat { cycle } else { stat }
 }
 
 /// The table's interior cells when every column is at its narrowest. The location column is
@@ -99,41 +113,58 @@ const TABLE_INTERIOR_MIN: usize = CARET_GUTTER + IDENTITY_CELLS + 2 + LOCATION_C
 /// panel's two borders.
 const TABLE_FLOOR_ROWS: u16 = 1 + 2 + 1 + 1 + widgets::BORDER_ROWS;
 
-/// The form's rows, in caret order (the user's pick: the memories form plus the overlay-mode cycle).
-///
-/// The first three are informational: focus may land on them, but no key does anything there. Enter
-/// on one descends into the table, which is the whole reason the caret can rest on them at all. The
-/// last three are the interactive rows (contract: Cycle row; Toggle row; Action chip row).
+/// The form's static informational rows, rendered above the focusable rows as column-aligned
+/// key:value rows (contract: Static key:value rows — the ruling that makes them non-focusable).
+/// They are display-only: no caret, no selection tint, no key binding, and no enter-descend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormRow {
+enum StaticRow {
     Source,
     Output,
     DiskFree,
-    Overlay,
-    Transcode,
-    Start,
 }
 
-impl FormRow {
-    const ALL: [Self; 6] = [Self::Source, Self::Output, Self::DiskFree, Self::Overlay, Self::Transcode, Self::Start];
-
-    /// Where this row sits in [`Self::ALL`], resolved by IDENTITY rather than by position.
-    ///
-    /// The disabled-chip tooltip is gated on the start chip holding focus, and writing that as
-    /// `ALL.len() - 1` says "the last row" instead — the two agree only while [`Self::Start`] is
-    /// last. A `len - 1` index's discriminating growth is APPENDING, which is exactly how a form-row
-    /// list grows (this array was built by taking the memories form's five rows and adding one), so
-    /// a seventh row after `Start` would silently move the tooltip onto it with nothing red.
-    /// `the_tooltip_is_bound_to_the_start_chip_by_identity` pins the binding.
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|row| *row == self).unwrap_or(0)
-    }
+impl StaticRow {
+    const ALL: [Self; 3] = [Self::Source, Self::Output, Self::DiskFree];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Source => "source",
             Self::Output => "output dir",
             Self::DiskFree => "disk free",
+        }
+    }
+}
+
+/// The form's focusable rows, in caret order (the user's pick: the memories form plus the
+/// overlay-mode cycle).
+///
+/// The static rows dropped out of the walk (item 1): the caret now rests only on the three real
+/// controls, the overlay-mode cycle, the transcode toggle and the start chip. Enter on the start
+/// chip keeps the old static-row behaviour — descend into the table when one exists, start the run
+/// when it does not — so the empty state's "press ↵ to start" promise stays true through the chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormRow {
+    Overlay,
+    Transcode,
+    Start,
+}
+
+impl FormRow {
+    const ALL: [Self; 3] = [Self::Overlay, Self::Transcode, Self::Start];
+
+    /// Where this row sits in [`Self::ALL`], resolved by IDENTITY rather than by position.
+    ///
+    /// The disabled-chip tooltip is gated on the start chip holding focus, and writing that as
+    /// `ALL.len() - 1` says "the last row" instead — the two agree only while [`Self::Start`] is
+    /// last. A `len - 1` index's discriminating growth is APPENDING, which is exactly how a form-row
+    /// list grows, so a fourth row after `Start` would silently move the tooltip onto it with
+    /// nothing red. `the_tooltip_is_bound_to_the_start_chip_by_identity` pins the binding.
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|row| *row == self).unwrap_or(0)
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
             Self::Overlay => "overlay mode",
             Self::Transcode => "transcode",
             Self::Start => "start run",
@@ -153,6 +184,22 @@ fn row_focused(chat: &ChatMedia, index: usize) -> bool {
     !chat.table.descended && chat.form_focus == index
 }
 
+/// Whether the source dir holds a Snapchat export, probed eagerly at build time so the empty state
+/// can name the problem before any run starts (sweep: empty and error states).
+///
+/// Only the "no export at all" case is distinguished: anything deeper — no `json/`, no
+/// `chat_history.json`, no `chat_media` dir — is the run's own error to report, since answering it
+/// here would duplicate the pipeline's load for every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceState {
+    /// No `mydata~*` part was found under the source: the run would refuse with
+    /// [`RunError::NoExportId`], so the empty state says so instead of inviting a run.
+    NoExport,
+    /// An export is present, or the source could not be listed (which the run's own error path
+    /// diagnoses). The ordinary empty state applies.
+    Ready,
+}
+
 // ---- the screen state ----
 
 /// The chat media tab's state.
@@ -163,6 +210,8 @@ pub struct ChatMedia {
     environment: Environment,
     overlay: OverlayMode,
     transcode: bool,
+    /// What the eager source probe found; drives the empty state's problem-and-fix copy.
+    source_state: SourceState,
     run: Run,
     receiver: Option<Receiver<RunEvent>>,
     /// Where runs started from the screen keep their manifest. `None` resolves the platform's
@@ -231,12 +280,20 @@ impl ChatMedia {
     /// reaching for the real filesystem.
     #[must_use]
     pub fn with_environment(source: PathBuf, out_root: PathBuf, environment: Environment, transcode: bool, overlay: OverlayMode) -> Self {
+        // The empty state's no-export copy needs to know whether the source holds an export before
+        // any run starts. `discover_parts` is the same cheap listing the overview runs; a deeper
+        // probe (json, chat_media) is left to the run, whose error path owns that diagnosis.
+        let source_state = match discover_parts(&source) {
+            Ok(groups) if groups.is_empty() => SourceState::NoExport,
+            _ => SourceState::Ready,
+        };
         Self {
             source,
             out_root,
             environment,
             overlay,
             transcode,
+            source_state,
             run: Run::Idle,
             receiver: None,
             manifest_dir_override: None,
@@ -488,7 +545,7 @@ impl ChatMedia {
 
     /// The final event, or a failure this screen discovered on its own side.
     fn finish(&mut self, outcome: RunOutcome) {
-        self.alert = Some(summary(&outcome));
+        self.alert = Some(summary(self, &outcome));
         if let Run::Active { view, worker } = &mut self.run {
             if let Some(view) = view {
                 view.follow_tail = false;
@@ -594,23 +651,20 @@ impl ChatMedia {
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                 match FormRow::ALL[self.form_focus] {
-                    FormRow::Source | FormRow::Output | FormRow::DiskFree => {
-                        // A static row has no row action, so its enter descends into the table.
-                        // With no table yet there is nothing to descend into, and the empty state's
-                        // "press ↵ to start" promise is what the key does instead.
-                        let has_table = matches!(&self.run, Run::Active { view: Some(_), .. });
-                        if has_table {
-                            self.table.descended = true;
-                        } else if self.start_enabled() {
-                            self.start_run();
-                        }
-                    }
                     // `enter` mirrors `space` on a cycle and on a toggle — neither has a separate
                     // commit step, so there is nothing else for it to mean.
                     FormRow::Overlay => self.overlay = self.overlay.next(),
                     FormRow::Transcode => self.transcode = !self.transcode,
                     FormRow::Start => {
-                        if self.start_enabled() {
+                        // The start chip carries the old static-row behaviour: descend into the
+                        // table when one exists, start the run when it does not — the promise the
+                        // empty state's "press ↵ to start" line makes (item 1: enter-on-empty still
+                        // starts the run via the start chip). Starting a fresh run once a table
+                        // exists is the action menu's `start run`, which `a` opens.
+                        let has_table = matches!(&self.run, Run::Active { view: Some(_), .. });
+                        if has_table {
+                            self.table.descended = true;
+                        } else if self.start_enabled() {
                             self.start_run();
                         }
                     }
@@ -622,7 +676,7 @@ impl ChatMedia {
                 match FormRow::ALL[self.form_focus] {
                     FormRow::Overlay => self.overlay = self.overlay.next(),
                     FormRow::Transcode => self.transcode = !self.transcode,
-                    FormRow::Source | FormRow::Output | FormRow::DiskFree | FormRow::Start => {}
+                    FormRow::Start => {}
                 }
                 true
             }
@@ -636,7 +690,8 @@ impl ChatMedia {
 /// Draws the screen into `area`: the setup form and the progress table.
 pub fn render(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, area: Rect) {
     let tooltip_row = !chat.start_enabled() && row_focused(chat, FormRow::Start.index());
-    let form_height = u16::try_from(FormRow::ALL.len() + usize::from(tooltip_row)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
+    let form_height =
+        u16::try_from(StaticRow::ALL.len() + FormRow::ALL.len() + usize::from(tooltip_row)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
 
     // The side-by-side form panel grows from its narrow floor to fit the longest raw path, capped
     // so the progress table keeps its interior floor. The gate itself stays on the floor width, so
@@ -648,7 +703,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, area: 
     let form_panel_width = u16::try_from(widgets::side_by_side_form_panel_width(
         usize::from(area.width),
         FORM_INTERIOR,
-        WIDEST_FORM_LABEL,
+        WIDEST_STATIC_LABEL,
         longest_path,
         TABLE_INTERIOR_MIN,
     ))
@@ -689,7 +744,10 @@ fn render_form(frame: &mut Frame, palette: &Palette, chat: &ChatMedia, area: Rec
 /// The form's rows, one `Line` per row plus the disabled-chip tooltip. `width` is the panel's
 /// interior width, which the selected rows' tint pads out to.
 fn form_panel(palette: &Palette, chat: &ChatMedia, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::with_capacity(FormRow::ALL.len() + 1);
+    let mut rows = Vec::with_capacity(StaticRow::ALL.len() + FormRow::ALL.len() + 1);
+    for row in StaticRow::ALL {
+        rows.push(static_form_row(palette, chat, row, width));
+    }
     for (index, row) in FormRow::ALL.into_iter().enumerate() {
         rows.push(form_row(palette, chat, row, index, width));
     }
@@ -699,40 +757,47 @@ fn form_panel(palette: &Palette, chat: &ChatMedia, width: usize) -> Vec<Line<'st
     rows
 }
 
+/// One static (non-focusable) key:value row, column-aligned (contract: Static key:value rows): the
+/// key is `TEXT_DIM + bold`, padded to [`STATIC_LABEL_COLUMN`] so the values stack, no colon, no
+/// caret, no selection tint. The values take what the panel leaves after the label column, floored
+/// at [`PATH_CELLS`] for the two path rows so the narrow side-by-side form keeps its tight value.
+fn static_form_row(palette: &Palette, chat: &ChatMedia, row: StaticRow, width: usize) -> Line<'static> {
+    match row {
+        StaticRow::Source => {
+            let budget = (width.saturating_sub(STATIC_LABEL_COLUMN)).max(PATH_CELLS);
+            let value = match chat.source.to_str().filter(|text| !text.is_empty()) {
+                Some(path) => Span::styled(right_pad(&head_ellipsis(path, budget), budget), Style::new().fg(palette.text)),
+                None => Span::styled(right_pad("—", budget), Style::new().fg(palette.text_faint)),
+            };
+            display_row(palette, row.label(), STATIC_LABEL_COLUMN, vec![value])
+        }
+        StaticRow::Output => {
+            // The `chat/` level is where this leg's output actually lands, and naming it here is
+            // what stops the row reading as the memories tree (decision 46a).
+            let budget = (width.saturating_sub(STATIC_LABEL_COLUMN)).max(PATH_CELLS);
+            let shown = head_ellipsis(&chat.out_root.join(CHAT_DIR).to_string_lossy(), budget);
+            display_row(
+                palette,
+                row.label(),
+                STATIC_LABEL_COLUMN,
+                vec![Span::styled(right_pad(&shown, budget), Style::new().fg(palette.text))],
+            )
+        }
+        StaticRow::DiskFree => {
+            // The value budget is what the row has left after the label column.
+            let budget = width.saturating_sub(STATIC_LABEL_COLUMN);
+            let value = disk_free_value(palette, &chat.environment, budget);
+            display_row(palette, row.label(), STATIC_LABEL_COLUMN, value)
+        }
+    }
+}
+
 fn form_row(palette: &Palette, chat: &ChatMedia, row: FormRow, index: usize, width: usize) -> Line<'static> {
     let selected = row_selected(chat, index);
     let focused = row_focused(chat, index);
     let caret = caret(palette, focused);
 
     match row {
-        FormRow::Source => {
-            let budget = path_budget(width, row.label(), PATH_CELLS);
-            let value = match chat.source.to_str().filter(|text| !text.is_empty()) {
-                Some(path) => Span::styled(right_pad(&head_ellipsis(path, budget), budget), Style::new().fg(palette.text)),
-                None => Span::styled(right_pad("—", budget), Style::new().fg(palette.text_faint)),
-            };
-            static_row(palette, caret, row.label(), vec![value], selected, width)
-        }
-        FormRow::Output => {
-            // The `chat/` level is where this leg's output actually lands, and naming it here is
-            // what stops the row reading as the memories tree (decision 46a).
-            let budget = path_budget(width, row.label(), PATH_CELLS);
-            let shown = head_ellipsis(&chat.out_root.join(CHAT_DIR).to_string_lossy(), budget);
-            static_row(
-                palette,
-                caret,
-                row.label(),
-                vec![Span::styled(right_pad(&shown, budget), Style::new().fg(palette.text))],
-                selected,
-                width,
-            )
-        }
-        FormRow::DiskFree => {
-            // The value budget is what the row has left after the caret, the label and the gap.
-            let budget = width.saturating_sub(CARET_GUTTER + cells(row.label()) + LABEL_GAP);
-            let value = disk_free_value(palette, &chat.environment, budget);
-            static_row(palette, caret, row.label(), value, selected, width)
-        }
         FormRow::Overlay => {
             let mut spans = vec![caret, form_label(palette, row.label(), focused), Span::raw("  ")];
             let words = OverlayMode::ALL.map(OverlayMode::as_word);
@@ -756,17 +821,36 @@ fn render_progress(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, a
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if usize::from(inner.width) < TABLE_INTERIOR_MIN {
-        return;
-    }
-
     match &chat.run {
-        Run::Idle => empty_state(frame, palette, inner, "no run yet"),
+        Run::Idle | Run::Active { view: None, worker: Worker::Finished } => render_idle(frame, palette, chat, inner),
         Run::Active { view: None, worker: Worker::Working } => {
             frame.render_widget(Paragraph::new(planning_spinner(palette, chat.spinner)), inner);
         }
-        Run::Active { view: None, worker: Worker::Finished } => empty_state(frame, palette, inner, "no run yet"),
-        Run::Active { view: Some(view), .. } => render_table(frame, palette, view, &mut chat.table, inner),
+        Run::Active { view: Some(view), .. } => {
+            // The table is all-or-nothing across the width: its columns share a floor. Below the
+            // floor the panel must still say why it is empty rather than going blank while a live
+            // run writes files (sweep: run screens). The empty state and the spinner render at any
+            // width; only the table itself is gated.
+            if usize::from(inner.width) < TABLE_INTERIOR_MIN {
+                let note = Line::styled("not enough room for the table — widen the terminal", Style::new().fg(palette.text_dim));
+                frame.render_widget(Paragraph::new(note), inner);
+            } else {
+                render_table(frame, palette, view, &mut chat.table, inner);
+            }
+        }
+    }
+}
+
+/// The empty progress panel: the problem-and-fix copy when the source holds no export (sweep:
+/// empty and error states), the ordinary empty state otherwise.
+fn render_idle(frame: &mut Frame, palette: &Palette, chat: &ChatMedia, inner: Rect) {
+    if chat.source_state == SourceState::NoExport {
+        // The run's own refusal, shown before the run is ever started — the history tab's
+        // failed-load pattern, wrapped so a long path never clips mid-word.
+        let text = RunError::NoExportId(chat.source.clone()).to_string();
+        frame.render_widget(Paragraph::new(Line::styled(text, Style::new().fg(palette.text_dim))).wrap(Wrap { trim: true }), inner);
+    } else {
+        empty_state(frame, palette, inner, "no run yet");
     }
 }
 
@@ -893,16 +977,67 @@ fn fit_clauses(palette: &Palette, clauses: Vec<(String, Style)>, width: usize) -
 }
 
 /// The footer alert a run outcome raises.
-fn summary(outcome: &RunOutcome) -> RunAlert {
+fn summary(chat: &ChatMedia, outcome: &RunOutcome) -> RunAlert {
     match outcome {
-        RunOutcome::Completed(report) => RunAlert::completion(report),
+        RunOutcome::Completed(report) => {
+            let mut alert = RunAlert::completion(report);
+            // Reconcile the run's rows with the overview's every-message count: the tokens a
+            // message names but no file carries are `source_missing`, and they appear nowhere else
+            // on this tab after the counts line scrolls away (sweep: run screens). Naming the count
+            // makes the difference visible.
+            if report.resumed.source_missing > 0 {
+                alert.message = format!("{} {} {} missing media", alert.message, glyph::CLAUSE_SEPARATOR, report.resumed.source_missing);
+            }
+            // A run into a new --out skips every finished item whose recorded output still verifies
+            // at its old path; say where the manifest holds them rather than leaving "N skipped"
+            // unexplained (sweep: run screens). Appended to, never rebuilt from: the completion copy
+            // above already carries the fixed/failed/skipped/deferred/dropped clauses, and a mixed
+            // resume (new items fixed + old items skipped elsewhere) must keep both counts visible.
+            if skipped_outputs_recorded_elsewhere(chat, report.skipped) {
+                alert.kind = AlertKind::Warning;
+                alert.message = format!("{} {} outputs recorded under a different out dir", alert.message, glyph::CLAUSE_SEPARATOR);
+            }
+            alert
+        }
         RunOutcome::Failed(error) => RunAlert::failure(error),
     }
 }
 
+/// Whether a run skipped finished items whose recorded outputs live outside the current out root —
+/// the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at a new empty dir
+/// makes the resume sweep verify every `done` item at its OLD path (still present), so every item
+/// is skipped and nothing is written, with no screen saying why. The tell is a `done` row whose
+/// recorded `output_path` is not under [`ChatMedia::out_root`].
+fn skipped_outputs_recorded_elsewhere(chat: &ChatMedia, skipped: usize) -> bool {
+    if skipped == 0 {
+        return false;
+    }
+    let Run::Active { view: Some(view), .. } = &chat.run else { return false };
+    // Both sides of a path-identity compare must be canonicalized the same way (cloudify rust index,
+    // 2026-07-11). The plan canonicalizes `out_root` through [`canonical_out_root`] before deriving
+    // any output, so a real record is already canonical — but `chat.out_root` is the raw value
+    // `RunDefaults::resolve` handed down, and a symlinked or relative `--out` (the default
+    // `source/exportsnap-out` under a symlinked source included) makes a raw-vs-canonical
+    // `starts_with` answer false even when the outputs ARE under the current root. Resolve the
+    // recorded file too — it exists, since the resume sweep only skips outputs it verified — and
+    // decline to warn when either side cannot be resolved.
+    let Ok(out_root) = canonical_out_root(&chat.out_root) else { return false };
+    view.manifest.items(ItemKind::ChatMedia).is_ok_and(|items| {
+        items.into_iter().any(|item| {
+            item.status == ItemStatus::Done
+                && item.output_path.as_ref().is_some_and(|path| {
+                    let Ok(canonical) = path.canonicalize() else { return false };
+                    !canonical.starts_with(&out_root)
+                })
+        })
+    })
+}
+
 /// The form's rows must fit the body a panel is guaranteed at the compact floor, the same invariant
-/// the overview's and the memories screen's panels rest on.
-const _: () = assert!(FormRow::ALL.len() <= GUARANTEED_INTERIOR_ROWS as usize);
+/// the overview's and the memories screen's panels rest on. The strict `<` reserves the disabled
+/// chip's tooltip row on top of the six visible rows (`a + 1 <= b` spelled `a < b`, the clippy-fix
+/// form).
+const _: () = assert!(StaticRow::ALL.len() + FormRow::ALL.len() < GUARANTEED_INTERIOR_ROWS as usize);
 
 #[cfg(test)]
 mod tests {

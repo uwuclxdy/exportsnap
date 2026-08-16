@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     if header_fits {
         frame.render_widget(
-            header::render(&palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width, app.alt_held()),
+            header::render(&palette, app.active(), env!("CARGO_PKG_VERSION"), header_area.width, app.alt_held(), app.activity()),
             header_area,
         );
     } else {

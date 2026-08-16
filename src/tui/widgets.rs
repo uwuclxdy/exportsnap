@@ -142,15 +142,6 @@ pub(crate) fn display_row(palette: &Palette, label: &str, column: usize, value: 
     Line::from(spans)
 }
 
-/// The value budget a form's path row gets at `width`: the interior cells left after the caret,
-/// the label and the gap, floored at `floor` so the narrow side-by-side form keeps its tight value
-/// column (the two run screens' `PATH_CELLS`). In the full-width arms the row uses whatever the
-/// panel actually leaves, so a path shows whole instead of truncating to the narrow column.
-#[must_use]
-pub(crate) fn path_budget(width: usize, label: &str, floor: usize) -> usize {
-    width.saturating_sub(CARET_GUTTER + cells(label) + LABEL_GAP).max(floor)
-}
-
 /// The setup-form panel width a run screen's side-by-side arm should use, in cells: the screen's
 /// narrow interior floor grown to fit its longest raw path value (source or output dir), then
 /// capped so the progress table keeps its own interior floor. Callers still gate side-by-side on
@@ -831,17 +822,6 @@ mod tests {
         assert_eq!(label(1, 3), "33.3%");
         assert_eq!(label(3, 3), "100%");
         assert_eq!(label(0, 0), "—");
-    }
-
-    #[test]
-    fn the_path_budget_uses_the_remaining_width_and_keeps_the_floor() {
-        // The side-by-side form's widest row (`output dir`) leaves exactly the caller's floor;
-        // a shorter label gives its value the extra cells, and the floor never shrinks below the
-        // caller's constant even past the panel edge.
-        assert_eq!(path_budget(36, "output dir", 22), 22);
-        assert_eq!(path_budget(36, "source", 22), 26);
-        assert_eq!(path_budget(76, "source", 22), 66);
-        assert_eq!(path_budget(10, "source", 22), 22);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::export::chat_fix::OverlayMode;
 use crate::export::env::{Environment, Tool, locate, probe_target};
 use crate::export::local_fix::default_out_root;
-use crate::tui::alert::RunAlert;
+use crate::tui::alert::{RunAlert, TabActivity};
 use crate::tui::screens::account::Account;
 use crate::tui::screens::chat_media::ChatMedia;
 use crate::tui::screens::history::History;
@@ -210,6 +210,10 @@ pub struct App {
     running: bool,
     /// The open modal, if any. `None` while input goes to the active screen.
     modal: Option<Modal>,
+    /// Per-tab activity: a run finishing on a background tab colors that tab's label until it is
+    /// visited (cloudy-tui: Tab bar → Tab activity). Indexed by [`Tab::index`], which is why the
+    /// array is sized by [`Tab::ALL`].
+    activity: [Option<TabActivity>; Tab::ALL.len()],
     overview: Overview,
     memories: Memories,
     chat_media: ChatMedia,
@@ -238,6 +242,7 @@ impl App {
             quit_armed: false,
             running: true,
             modal: None,
+            activity: [None; Tab::ALL.len()],
             overview: Overview::unloaded(),
             memories: Memories::with_environment(PathBuf::new(), defaults.out_root.clone(), Environment::default(), defaults.transcode),
             chat_media: ChatMedia::with_environment(
@@ -465,7 +470,15 @@ impl App {
     /// the active screen wins rather than a priority order across screens.
     #[must_use]
     pub const fn alert(&self) -> Option<&RunAlert> {
-        match self.active {
+        self.screen_alert(self.active)
+    }
+
+    /// The run-completion alert a given tab holds, `None` on the screens that never drive one.
+    /// [`Self::alert`] is this for the active screen; the tab-activity propagation reads it for
+    /// whichever screen a background run belongs to.
+    #[must_use]
+    pub const fn screen_alert(&self, tab: Tab) -> Option<&RunAlert> {
+        match tab {
             Tab::Memories => self.memories.alert(),
             Tab::ChatMedia => self.chat_media.alert(),
             Tab::History => self.history.alert(),
@@ -522,9 +535,25 @@ impl App {
         }
     }
 
+    /// Makes `tab` the active screen and clears its activity — visiting a tab is what resolves its
+    /// tab-activity color (cloudy-tui: Tab bar → Tab activity). The only way tabs change, so the
+    /// two cannot drift apart.
+    fn switch_to(&mut self, tab: Tab) {
+        self.active = tab;
+        self.activity[tab.index()] = None;
+    }
+
     #[must_use]
     pub const fn active(&self) -> Tab {
         self.active
+    }
+
+    /// The per-tab activity the header colors each inactive label with, indexed by tab-bar
+    /// position. `None` for a tab with nothing outstanding; a run finishing on a background tab
+    /// fills its slot and visiting the tab clears it.
+    #[must_use]
+    pub fn activity(&self) -> &[Option<TabActivity>] {
+        self.activity.as_slice()
     }
 
     #[must_use]
@@ -646,10 +675,37 @@ impl App {
     /// costs nothing when one is idle — and the toast ages only while the gate above says it is
     /// live.
     pub fn tick(&mut self) {
+        let before = self.alert_presence();
         self.memories.tick();
         self.chat_media.tick();
         self.history.tick();
         self.settings.tick();
+        self.record_activity(before);
+    }
+
+    /// Which run screens held a completion alert before a tick, in [`Tab`] order. The propagation
+    /// below compares this to the after state, so it records a run's finish exactly once — the
+    /// alert persists until dismissed or the next run, so presence alone would re-color a tab the
+    /// user already visited and left again.
+    fn alert_presence(&self) -> [bool; 3] {
+        [self.memories.alert().is_some(), self.chat_media.alert().is_some(), self.history.alert().is_some()]
+    }
+
+    /// Colors a background tab's label when its run finishes there (cloudy-tui: Tab bar → Tab
+    /// activity). A screen whose alert appeared between `before` and now, on a tab the user is not
+    /// looking at, sets that tab's activity from the alert's kind. A run that finishes on the
+    /// active tab needs no cue — its footer alert is already on the row — and a run that finished
+    /// on an earlier tick has no new edge, so it is not re-recorded after a visit.
+    fn record_activity(&mut self, before: [bool; 3]) {
+        for (index, tab) in [Tab::Memories, Tab::ChatMedia, Tab::History].into_iter().enumerate() {
+            let activity = self.screen_alert(tab).map(RunAlert::activity);
+            if !before[index]
+                && tab != self.active
+                && let Some(activity) = activity
+            {
+                self.activity[tab.index()] = Some(activity);
+            }
+        }
     }
 
     /// Applies one terminal event. Resizes need no state change — the next draw reads the new
@@ -791,10 +847,10 @@ impl App {
 
         match key.code {
             KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
-                self.active = self.active.previous();
+                self.switch_to(self.active.previous());
             }
             KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
-                self.active = self.active.next();
+                self.switch_to(self.active.next());
             }
             KeyCode::Char(c) if key.modifiers == KeyModifiers::ALT => {
                 if let Some(tab) = c.to_digit(10).and_then(Tab::from_jump_digit) {
@@ -802,7 +858,7 @@ impl App {
                     // implicitly), and moving focus away disarms the quit like any other key.
                     // Ascending every screen instead would reset a pane the user is not on.
                     self.ascend_active();
-                    self.active = tab;
+                    self.switch_to(tab);
                 }
             }
             _ => {}

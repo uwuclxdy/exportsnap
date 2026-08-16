@@ -33,6 +33,17 @@ pub enum AlertKind {
     Warning,
 }
 
+/// What a finished run does to its tab's label while the user is on another tab (cloudy-tui:
+/// Tab bar → Tab activity). The inactive label takes the semantic color until the tab is visited;
+/// the footer alert stays behind on the screen it came from, to be read there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabActivity {
+    /// A run that finished cleanly: the inactive label takes SUCCESS.
+    Success,
+    /// A run that failed somewhere, or could not start: the inactive label takes DANGER.
+    Danger,
+}
+
 impl RunAlert {
     /// The alert a finished run raises: a clean completion is `INFO`, anything with a failure is
     /// `WARNING`.
@@ -96,5 +107,19 @@ impl RunAlert {
     #[must_use]
     pub fn failure(error: &impl std::fmt::Display) -> Self {
         Self { kind: AlertKind::Warning, message: error.to_string() }
+    }
+
+    /// The tab-activity state this alert raises on a background tab (cloudy-tui: Tab bar → Tab
+    /// activity). The two-way map is the two kinds the alert already keeps: a clean run is
+    /// [`TabActivity::Success`], anything else — a failure, a run that could not start, a resume
+    /// whose outputs land under a different root — is [`TabActivity::Danger`]. The contract's
+    /// `WARNING` "needs attention" tier is a possible refinement, not a thing this channel
+    /// distinguishes yet.
+    #[must_use]
+    pub const fn activity(&self) -> TabActivity {
+        match self.kind {
+            AlertKind::Info => TabActivity::Success,
+            AlertKind::Warning => TabActivity::Danger,
+        }
     }
 }

@@ -5,6 +5,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
+use super::alert::TabActivity;
 use super::theme::{Palette, glyph};
 use crate::app::Tab;
 
@@ -33,6 +34,10 @@ pub fn min_width() -> u16 {
 
 /// Builds the header row for `width` cells, with the jump-key overlay when `alt_held` is true.
 ///
+/// `activity` is one [`TabActivity`] per tab-bar position: an inactive tab carrying one renders
+/// its label in the activity's semantic color instead of `TEXT_DIM` (cloudy-tui: Tab bar → Tab
+/// activity). The active tab ignores it — being active is its own cue.
+///
 /// Right-edge suppression follows the contract's order (cloudy-tui: App shell → right-edge
 /// suppression priority): the overlay drops first, then the version, and only then does the tab
 /// strip collapse to the ` ‹   active   › ` overflow form. Tabs never drop. Once the version
@@ -43,15 +48,17 @@ pub fn min_width() -> u16 {
 /// [`min_width`] the overflow form simply overruns, and the active label loses characters
 /// from the right until nothing of it is left.
 #[must_use]
-pub fn render(palette: &Palette, active: Tab, version: &str, width: u16, alt_held: bool) -> Line<'static> {
+pub fn render(
+    palette: &Palette, active: Tab, version: &str, width: u16, alt_held: bool, activity: &[Option<TabActivity>],
+) -> Line<'static> {
     let width = width as usize;
 
     let lead = lead_spans(palette);
     let lead_width = total_width(&lead);
 
     let version = Span::styled(format!("v{version} "), Style::new().fg(palette.text_dim));
-    let indexed = tab_spans(palette, active, true);
-    let plain = tab_spans(palette, active, false);
+    let indexed = tab_spans(palette, active, true, activity);
+    let plain = tab_spans(palette, active, false, activity);
 
     // The overlay is the first thing dropped, before the version and long before the overflow
     // form (cloudy-tui: Tab bar → Jump-key overlay — a transient hint must never trigger a layout
@@ -105,7 +112,7 @@ fn lead_spans(palette: &Palette) -> Vec<Span<'static>> {
     vec![Span::styled(brand, Style::new().fg(palette.accent_2).bold()), Span::styled(separator, Style::new().fg(palette.text_dim))]
 }
 
-fn tab_spans(palette: &Palette, active: Tab, overlay: bool) -> Vec<Span<'static>> {
+fn tab_spans(palette: &Palette, active: Tab, overlay: bool, activity: &[Option<TabActivity>]) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(Tab::ALL.len() * 4);
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         if i > 0 {
@@ -119,7 +126,8 @@ fn tab_spans(palette: &Palette, active: Tab, overlay: bool) -> Vec<Span<'static>
         if let Some(digit) = jump {
             spans.extend(index_prefix(palette, digit));
         }
-        spans.push(Span::styled(tab.label(), label_style(palette, is_active)));
+        let activity = activity.get(i).copied().flatten();
+        spans.push(Span::styled(tab.label(), label_style(palette, is_active, activity)));
     }
     spans
 }
@@ -136,7 +144,7 @@ fn overflow_spans(palette: &Palette, active: Tab) -> Vec<Span<'static>> {
         Span::styled(prev.to_string(), marker),
         Span::raw(TAB_GAP),
         active_marker(palette),
-        Span::styled(active.label(), label_style(palette, true)),
+        Span::styled(active.label(), label_style(palette, true, None)),
         Span::raw(TAB_GAP),
         Span::styled(next.to_string(), marker),
     ]
@@ -163,6 +171,17 @@ fn index_prefix(palette: &Palette, digit: u8) -> [Span<'static>; 3] {
     [Span::styled("[", bracket), Span::styled(digit.to_string(), digit_style), Span::styled("]", bracket)]
 }
 
-fn label_style(palette: &Palette, active: bool) -> Style {
-    if active { Style::new().fg(palette.accent).bold().underlined() } else { Style::new().fg(palette.text_dim) }
+/// A tab label's style. The active label is `ACCENT + bold + underline`; an inactive one is
+/// `TEXT_DIM`, or the activity's semantic color when a background run left one (cloudy-tui: Tab
+/// bar → Tab activity — the label takes the color, no underline rule beneath it).
+fn label_style(palette: &Palette, active: bool, activity: Option<TabActivity>) -> Style {
+    if active {
+        Style::new().fg(palette.accent).bold().underlined()
+    } else {
+        match activity {
+            Some(TabActivity::Success) => Style::new().fg(palette.success),
+            Some(TabActivity::Danger) => Style::new().fg(palette.danger),
+            None => Style::new().fg(palette.text_dim),
+        }
+    }
 }

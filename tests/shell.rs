@@ -65,7 +65,7 @@ fn header_only_held(active: Tab, width: u16, alt_held: bool) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
     terminal
         .draw(|frame| {
-            frame.render_widget(header::render(&Palette::new(Tier::Full), active, "9.9.9", width, alt_held), frame.area());
+            frame.render_widget(header::render(&Palette::new(Tier::Full), active, "9.9.9", width, alt_held, &[]), frame.area());
         })
         .unwrap();
     row(terminal.backend().buffer(), 0)
@@ -140,6 +140,10 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
     // descend would reach memories in five presses and the test would fail as "no panic", which
     // reads like a missing guard instead of a broken fixture.
     on_tab_in(&mut app, Tab::ChatMedia);
+    // Descend via the start chip: two ↓ from the default overlay-cycle caret reach it, since the
+    // static rows dropped out of the walk.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
 
@@ -205,6 +209,36 @@ fn active_tab_label_is_accent_bold_underlined_and_inactive_is_dim() {
     assert_eq!(inactive.fg, Some(palette.text_dim));
     assert!(!inactive.add_modifier.contains(Modifier::BOLD));
     assert!(!inactive.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn an_inactive_tab_with_activity_takes_the_activity_color_and_the_active_ignores_it() {
+    use exportsnap::tui::alert::TabActivity;
+    let palette = Palette::new(Tier::Full);
+    let mut activity = [None; Tab::ALL.len()];
+    activity[2] = Some(TabActivity::Success);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(header::render(&palette, Tab::Overview, "9.9.9", 120, false, &activity), frame.area());
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // "chat media" is the third tab: memories (8 cells) plus a 3-cell gap past the inactive second
+    // tab. Its label takes the activity color — no underline rule beneath it (cloudy-tui: Tab bar →
+    // Tab activity).
+    let chat = INACTIVE_SECOND_COLUMN + 8 + 3;
+    for x in chat..chat + 10 {
+        assert_eq!(buffer[(x, 0)].style().fg, Some(palette.success), "success activity on cell ({x}, 0)");
+        assert!(!buffer[(x, 0)].style().add_modifier.contains(Modifier::UNDERLINED), "no underline rule beneath an activity label");
+        assert!(!buffer[(x, 0)].style().add_modifier.contains(Modifier::BOLD), "activity is color, not weight");
+    }
+    // The active tab keeps accent + underline, ignoring any activity.
+    for x in ACTIVE_LABEL_COLUMN..ACTIVE_LABEL_COLUMN + 8 {
+        assert_eq!(buffer[(x, 0)].style().fg, Some(palette.accent), "active label keeps accent");
+    }
 }
 
 #[test]
@@ -383,7 +417,7 @@ fn the_overlay_index_is_brackets_dim_and_digit_accent_bold() {
     let mut terminal = Terminal::new(TestBackend::new(109, 1)).unwrap();
     terminal
         .draw(|frame| {
-            frame.render_widget(header::render(&Palette::new(Tier::Full), Tab::Overview, "9.9.9", 109, true), frame.area());
+            frame.render_widget(header::render(&Palette::new(Tier::Full), Tab::Overview, "9.9.9", 109, true, &[]), frame.area());
         })
         .unwrap();
     let buffer = terminal.backend().buffer();
@@ -746,7 +780,7 @@ fn the_header_never_leaves_a_hole_in_its_row() {
     // wrote there.
     for tab in Tab::ALL {
         for width in 0..=120u16 {
-            let line = header::render(&Palette::new(Tier::Full), tab, "9.9.9", width, false);
+            let line = header::render(&Palette::new(Tier::Full), tab, "9.9.9", width, false, &[]);
             assert!(line.width() >= width as usize, "{tab:?} at width {width}: line is {} cells", line.width());
         }
     }

@@ -25,7 +25,7 @@ use exportsnap::export::chat_run::{self, HistoryOutcome, PlanCounts, PlanRow, Pl
 use exportsnap::export::env::Environment;
 use exportsnap::export::local_fix::{FixReport, Leg, VideoOptions};
 use exportsnap::export::manifest::{ExportId, ItemKind, ItemStatus, Manifest, NewItem, ResumeReport};
-use exportsnap::tui::alert::AlertKind;
+use exportsnap::tui::alert::{AlertKind, TabActivity};
 use exportsnap::tui::shell;
 use exportsnap::tui::theme::{Palette, Tier};
 use image::{ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
@@ -616,6 +616,14 @@ fn press(app: &mut App, code: KeyCode) {
     app.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
 }
 
+/// Moves the caret from the default (the overlay cycle) onto the start chip and presses enter —
+/// the screen's one start/descend trigger now that the static rows are out of the walk.
+fn enter_on_start_chip(app: &mut App) {
+    press(app, KeyCode::Down);
+    press(app, KeyCode::Down);
+    press(app, KeyCode::Enter);
+}
+
 /// Walks to `tab` with `→`, bounded by the tab count.
 ///
 /// The bound is not decoration: `→` is INERT while a pane is descended (the contract traps the
@@ -722,6 +730,13 @@ fn clean_counts() -> PlanCounts {
     PlanCounts { history: HistoryOutcome::Joined, ..PlanCounts::default() }
 }
 
+/// The tab-activity a tab carries, resolved by tab-bar position rather than by the private
+/// `Tab::index` (cloudy-tui: Tab bar → Tab activity).
+fn activity_at(app: &App, tab: Tab) -> Option<TabActivity> {
+    let index = Tab::ALL.iter().position(|candidate| *candidate == tab).unwrap();
+    app.activity()[index]
+}
+
 #[test]
 fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     let mut app = app_on_fixed_source(Tier::Full);
@@ -734,18 +749,32 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     assert!(row(buffer, 1).starts_with("╭─ SETUP ─"), "{:?}", row(buffer, 1));
     assert!(row(buffer, 1).contains("PROGRESS"));
 
-    // The six rows the user picked, in caret order. Focusable rows are ragged: label, exactly the
-    // ≥ 2-space gap, then the value — never padded to a shared column.
-    assert!(cell_run(buffer, 2).contains("❯ source  /export"), "{:?}", cell_run(buffer, 2));
+    // The three static rows render as column-aligned key:value rows — no caret, key padded to the
+    // shared label column so the values stack (contract: Static key:value rows). The disk bar shows
+    // 40% used (3 of 5 GiB free). The three real controls sit below them, ragged.
+    let source_row = cell_run(buffer, 2);
+    assert!(!source_row.contains('❯'), "the static source row takes no caret: {source_row}");
+    assert!(source_row.contains("source"), "{source_row}");
+    assert!(source_row.contains("/export"), "{source_row}");
     // The output row names the `chat/` level this leg actually writes into (decision 46a), so it
     // cannot be read as the memories tree. The expected value is built by joining the same way
     // the row builds it, so the platform's separator reaches the comparison (on windows the row
     // spells `/export/out\chat`).
     let output_row = format!("output dir  {}", Path::new("/export/out").join("chat").to_string_lossy());
-    assert!(cell_run(buffer, 3).contains(&output_row), "{:?}", cell_run(buffer, 3));
+    let rendered_output_row = cell_run(buffer, 3);
+    assert!(!rendered_output_row.contains('❯'), "the static output row takes no caret: {rendered_output_row}");
+    assert!(rendered_output_row.contains(&output_row), "{:?}", rendered_output_row);
+    // The values stack in one column: the `s` that opens the source label and the `o` of the output
+    // label sit at the same cell offset.
+    let value_col = |line: &str| line.chars().position(|c| c == '/').unwrap_or(0);
+    assert_eq!(
+        value_col(&source_row),
+        value_col(&rendered_output_row),
+        "static values stack in one column:\n{source_row}\n{rendered_output_row}"
+    );
     assert!(cell_run(buffer, 4).contains("3.0 GiB"));
     assert!(cell_run(buffer, 4).contains("40%"));
-    assert!(cell_run(buffer, 5).contains("overlay mode"), "{:?}", cell_run(buffer, 5));
+    assert!(cell_run(buffer, 5).contains("❯ overlay mode"), "the caret starts on the first real control: {:?}", cell_run(buffer, 5));
     assert!(cell_run(buffer, 6).contains("transcode"));
     assert!(cell_run(buffer, 7).contains("start run"));
 
@@ -784,20 +813,22 @@ fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
     let mut app = app_on_fixed_source(Tier::Full);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
 
-    // Blurred (the caret starts on `source`): every option is a bare word, no brackets anywhere.
+    // Focused (the caret starts on the cycle row, now the first focusable row): the default is
+    // bracketed, and only the default.
+    assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Both);
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let focused = cell_run(terminal.backend().buffer(), 5);
+    assert!(focused.contains("overlay mode  merged  [both]  originals"), "{focused}");
+
+    // Blurred (the caret moves to the toggle): every option is a bare word, no brackets anywhere.
+    press(&mut app, KeyCode::Down);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let blurred = cell_run(terminal.backend().buffer(), 5);
     assert!(blurred.contains("overlay mode  merged  both  originals"), "{blurred}");
     assert!(!blurred.contains('['), "a blurred cycle row carries its selection by color alone: {blurred}");
 
-    // Focused: the default is bracketed, and only the default.
-    for _ in 0..3 {
-        press(&mut app, KeyCode::Down);
-    }
-    assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Both);
-    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    let focused = cell_run(terminal.backend().buffer(), 5);
-    assert!(focused.contains("overlay mode  merged  [both]  originals"), "{focused}");
+    // Back to the cycle row for the cycling assertions.
+    press(&mut app, KeyCode::Up);
 
     // `space` cycles; `enter` mirrors it on a state control.
     press(&mut app, KeyCode::Char(' '));
@@ -987,7 +1018,7 @@ fn the_statuses_that_land_with_the_finished_event_still_reach_the_table() {
     // the cleared flag instead of re-pinning the tail. `finish`'s own clearing is a different line
     // and is pinned separately, by `a_run_that_plans_and_finishes_in_one_tick_…` — the one state
     // where it is observable.
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     press(&mut app, KeyCode::Up);
     assert!(app.chat_media().descended());
 
@@ -1079,7 +1110,7 @@ fn a_run_that_plans_and_finishes_in_one_tick_renders_its_statuses_and_adopts_no_
 
     // The caret renders only in the focused pane, so descend before reading it. A run the user
     // watched from the form leaves the finished table with nothing selected.
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     assert!(app.chat_media().descended());
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1217,9 +1248,8 @@ fn the_cycle_rows_brackets_and_selection_colours_survive_the_compatible_tier() {
         [(Tier::Full, Color::Rgb(67, 171, 229), Color::Rgb(127, 132, 156)), (Tier::Compatible, Color::Indexed(75), Color::Indexed(102))]
     {
         let mut app = app_on_fixed_source(tier);
-        for _ in 0..3 {
-            press(&mut app, KeyCode::Down);
-        }
+        // The caret starts on the cycle row — the first focusable row now the static rows are out
+        // of the walk — so no walk is needed to bracket the default.
 
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
@@ -1371,10 +1401,8 @@ fn the_stacked_and_form_only_arms_render_on_both_tiers() {
     for tier in [Tier::Full, Tier::Compatible] {
         let palette = Palette::new(tier);
         let mut app = app_on_fixed_source(tier);
-        // Onto the overlay row, so the form carries a focus-promoted interactive label at all.
-        for _ in 0..3 {
-            press(&mut app, KeyCode::Down);
-        }
+        // The caret starts on the overlay row (the first focusable row now the static rows are out
+        // of the walk), so the form carries a focus-promoted interactive label at rest.
 
         // Stacked: too narrow to hold both panels side by side, tall enough for the table's floor.
         let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
@@ -1404,7 +1432,7 @@ fn no_conversation_key_reaches_the_screen() {
     let state = TempDir::new().unwrap();
     app.chat_media_mut().set_manifest_dir(state.path().to_path_buf());
 
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     wait_for_alert(&mut app);
 
     // The run really did name a directory after the key, so the search below is not vacuous.
@@ -1451,7 +1479,7 @@ fn a_failing_chat_item_keeps_its_conversation_out_of_the_alert() {
     fs::create_dir_all(&chat_root).unwrap();
     fs::write(chat_root.join(SECRET_KEY), b"not a directory").unwrap();
 
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     wait_for_alert(&mut app);
 
     // The vacuity guard, and the reason the sweep below means anything: the run really did produce a
@@ -1546,10 +1574,8 @@ fn the_start_chip_runs_under_the_overlay_mode_the_cycle_row_shows() {
     let state = TempDir::new().unwrap();
     app.chat_media_mut().set_manifest_dir(state.path().to_path_buf());
 
-    // Walk to the cycle row and pick `originals`.
-    for _ in 0..3 {
-        press(&mut app, KeyCode::Down);
-    }
+    // The caret starts on the cycle row, so `space` picks `originals` directly, then two ↓ reach
+    // the start chip and `enter` runs under it.
     press(&mut app, KeyCode::Char(' '));
     assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Originals);
     press(&mut app, KeyCode::Down);
@@ -1650,7 +1676,7 @@ fn an_alert_raised_on_a_background_tab_survives_until_its_tab_is_visited() {
 // ---- focus and the worker ----
 
 #[test]
-fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
+fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
     let dir = export_tree(&[], &[1]);
     let mut app = app_on_export(&dir);
     let state = TempDir::new().unwrap();
@@ -1662,7 +1688,8 @@ fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
         clean_counts(),
     );
 
-    press(&mut app, KeyCode::Enter);
+    // Enter on the start chip descends (two ↓ from the default cycle caret reach it).
+    enter_on_start_chip(&mut app);
     assert!(app.chat_media().descended());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -1674,6 +1701,8 @@ fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
     press(&mut app, KeyCode::Left);
     assert!(!app.chat_media().descended(), "← ascends");
 
+    // The caret is still on the start chip after ascending, so a plain enter descends again; `q`
+    // ascends like esc, because q is the back key here — and arms nothing.
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('q'));
     assert!(!app.chat_media().descended(), "q ascends while descended");
@@ -1709,7 +1738,7 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
     // descend would reach the memories tab in five `→` presses (`Tab::next` wraps, `src/app.rs:66`)
     // and the test would fail as "no panic", which reads like a missing guard instead of a broken
     // fixture.
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
     assert_eq!(app.active(), Tab::ChatMedia, "the walk has to START somewhere other than its target");
 
@@ -1739,7 +1768,7 @@ fn the_alt_jump_ascends_the_pane_it_leaves_on_either_screen() {
         vec![PlanRow { source_id: media_id(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }],
         clean_counts(),
     );
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     assert!(app.chat_media().descended());
 
     // `→` is trapped while descended, so the jump is the only way off this tab that is not a `←`.
@@ -1850,12 +1879,18 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
+    // The interior runs from column 2 to 52 (border + padding on each side of the 55-cell panel).
+    // The focused overlay row (the first focusable row, now that the static rows are out of the
+    // walk) carries the tint out to column 52 — the padding boundary.
     for x in 2..53 {
-        assert_eq!(buffer[(x, 2)].style().bg, Some(palette.bg_hover), "focused row column {x}");
+        assert_eq!(buffer[(x, 5)].style().bg, Some(palette.bg_hover), "focused row column {x}");
     }
-    assert_ne!(buffer[(1, 2)].style().bg, Some(palette.bg_hover));
-    assert_ne!(buffer[(53, 2)].style().bg, Some(palette.bg_hover));
-    assert_ne!(buffer[(2, 3)].style().bg, Some(palette.bg_hover));
+    // The padding columns stay on the base surface, and neither a static row above nor the toggle
+    // row below carries the tint.
+    assert_ne!(buffer[(1, 5)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(53, 5)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(2, 2)].style().bg, Some(palette.bg_hover), "the static source row takes no tint");
+    assert_ne!(buffer[(2, 6)].style().bg, Some(palette.bg_hover), "the toggle row is unfocused");
 }
 
 #[test]
@@ -1925,4 +1960,160 @@ fn every_tab_renders_with_the_chat_media_screen_at_degenerate_sizes() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap_or_else(|error| panic!("at {width}x{height}: {error}"));
     }
+}
+
+#[test]
+fn a_completed_run_names_the_missing_media_count() {
+    // The overview counts every chat message; the run enrols only files that are actually on disk.
+    // The tokens a message names but no file carries — `source_missing` — appear nowhere on this tab
+    // once the counts line scrolls away, so the completion alert names them (sweep: run screens).
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let (sender, receiver) = mpsc::channel();
+    let report = FixReport {
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 5, retired: 0, excluded: 0 },
+        fixed: 3,
+        failed: vec![],
+        skipped: 0,
+        deferred: 0,
+        excluded: 0,
+        notices: vec![],
+    };
+    sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();
+    drop(sender);
+    app.with_chat_media_channel(receiver);
+    app.tick();
+
+    let alert = app.chat_media().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
+    assert!(alert.message.contains("3 fixed"), "{}", alert.message);
+    assert!(alert.message.contains("5 missing media"), "the tokens without media are named: {}", alert.message);
+}
+
+#[test]
+fn resuming_into_a_new_out_dir_reports_where_the_manifest_holds_the_outputs() {
+    let dir = export_tree(&[], &[1]);
+    let state = TempDir::new().unwrap();
+
+    // First run writes under the source-derived `out/chat`.
+    let mut app = app_on_export(&dir);
+    app.chat_media_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app);
+    wait_for_alert(&mut app);
+    let alert = app.chat_media().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
+    assert!(alert.message.contains("1 fixed"), "{}", alert.message);
+
+    // Second run points at a fresh, empty out root. The manifest is keyed on the export id (decision
+    // 6), so the resume sweep verifies the first run's outputs at their OLD path, skips every item,
+    // and writes nothing — the screen must say the manifest holds them elsewhere.
+    let out2 = dir.path().join("out2");
+    let mut app2 = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: out2.clone(), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        environment(),
+    );
+    on_tab(&mut app2, Tab::ChatMedia);
+    app2.chat_media_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app2);
+    wait_for_alert(&mut app2);
+
+    let alert = app2.chat_media().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert!(alert.message.contains("1 skipped"), "{}", alert.message);
+    assert!(alert.message.contains("outputs recorded under a different out dir"), "{}", alert.message);
+    assert!(!out2.join("chat").exists(), "the fresh out root stays empty: {}", out2.display());
+}
+
+#[test]
+fn a_live_run_below_the_table_floor_says_why_the_panel_is_empty() {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: media_id(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }],
+        clean_counts(),
+    );
+    // 70 wide: the stacked progress panel's interior (66) is below the table floor, so the panel
+    // must say why it is empty instead of going blank while the run is live (sweep: run screens).
+    let mut terminal = Terminal::new(TestBackend::new(70, 30)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = screen_text(buffer);
+    assert!(text.contains("not enough room for the table"), "{text}");
+}
+
+#[test]
+fn a_source_with_no_export_names_the_problem_instead_of_inviting_a_run() {
+    let dir = TempDir::new().unwrap();
+    let mut app = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: dir.path().join("out"), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        environment(),
+    );
+    on_tab(&mut app, Tab::ChatMedia);
+    // Wide enough that the problem-and-fix copy stays on one line even where the gate's symlinked
+    // TMPDIR lengthens the tempdir path that the message names.
+    let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = screen_text(buffer);
+    // The empty state names the problem and the fix (the run's own `NoExportId` refusal), the way
+    // the history tab does — never the bare "press ↵ to start" (sweep: empty and error states).
+    assert!(text.contains("no mydata~ export part under"), "{text}");
+    assert!(text.contains("export's parts"), "the fix clause renders: {text}");
+    assert!(!text.contains("press ↵ to start"), "a no-export source must not invite a run: {text}");
+}
+
+#[test]
+fn a_run_finishing_on_a_background_tab_colors_that_tab_and_visiting_clears_it() {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+
+    // Switch away so chat becomes a background tab before its run finishes.
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.active(), Tab::Memories);
+
+    let (sender, receiver) = mpsc::channel();
+    sender.send(RunEvent::Finished(RunOutcome::Failed(RunError::Panicked))).unwrap();
+    drop(sender);
+    app.with_chat_media_channel(receiver);
+    app.tick();
+
+    assert_eq!(activity_at(&app, Tab::ChatMedia), Some(TabActivity::Danger), "a background failure colors the tab DANGER");
+    assert_eq!(activity_at(&app, Tab::Memories), None, "the active tab takes no activity");
+
+    // Visiting the tab resolves its activity (cloudy-tui: Tab bar → Tab activity).
+    on_tab(&mut app, Tab::ChatMedia);
+    assert_eq!(activity_at(&app, Tab::ChatMedia), None, "visiting the tab clears its activity");
+}
+
+#[test]
+fn a_clean_background_run_colors_the_tab_success() {
+    let dir = export_tree(&[], &[1]);
+    let mut app = app_on_export(&dir);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.active(), Tab::Memories);
+
+    let (sender, receiver) = mpsc::channel();
+    let report = FixReport {
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 0, retired: 0, excluded: 0 },
+        fixed: 1,
+        failed: vec![],
+        skipped: 0,
+        deferred: 0,
+        excluded: 0,
+        notices: vec![],
+    };
+    sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();
+    drop(sender);
+    app.with_chat_media_channel(receiver);
+    app.tick();
+
+    assert_eq!(activity_at(&app, Tab::ChatMedia), Some(TabActivity::Success), "a clean background run colors the tab SUCCESS");
 }
