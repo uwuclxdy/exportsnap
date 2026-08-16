@@ -617,11 +617,18 @@ fn press(app: &mut App, code: KeyCode) {
 }
 
 /// Moves the caret from the default (the overlay cycle) onto the start chip and presses enter —
-/// the screen's one start/descend trigger now that the static rows are out of the walk.
+/// the start trigger now that the static rows are out of the walk. Descending into the table is a
+/// separate key, [`descend_into_table`].
 fn enter_on_start_chip(app: &mut App) {
     press(app, KeyCode::Down);
     press(app, KeyCode::Down);
     press(app, KeyCode::Enter);
+}
+
+/// Descends into the read-only table pane via `tab`, wherever the caret sits. The start chip no
+/// longer descends on enter, so every test that reaches the table goes through this helper.
+fn descend_into_table(app: &mut App) {
+    press(app, KeyCode::Tab);
 }
 
 /// Walks to `tab` with `→`, bounded by the tab count.
@@ -1018,7 +1025,7 @@ fn the_statuses_that_land_with_the_finished_event_still_reach_the_table() {
     // the cleared flag instead of re-pinning the tail. `finish`'s own clearing is a different line
     // and is pinned separately, by `a_run_that_plans_and_finishes_in_one_tick_…` — the one state
     // where it is observable.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     press(&mut app, KeyCode::Up);
     assert!(app.chat_media().descended());
 
@@ -1110,7 +1117,7 @@ fn a_run_that_plans_and_finishes_in_one_tick_renders_its_statuses_and_adopts_no_
 
     // The caret renders only in the focused pane, so descend before reading it. A run the user
     // watched from the form leaves the finished table with nothing selected.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     assert!(app.chat_media().descended());
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1688,8 +1695,8 @@ fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
         clean_counts(),
     );
 
-    // Enter on the start chip descends (two ↓ from the default cycle caret reach it).
-    enter_on_start_chip(&mut app);
+    // `tab` descends into the table, wherever the caret sits.
+    descend_into_table(&mut app);
     assert!(app.chat_media().descended());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -1701,14 +1708,14 @@ fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
     press(&mut app, KeyCode::Left);
     assert!(!app.chat_media().descended(), "← ascends");
 
-    // The caret is still on the start chip after ascending, so a plain enter descends again; `q`
-    // ascends like esc, because q is the back key here — and arms nothing.
-    press(&mut app, KeyCode::Enter);
+    // `tab` descends again directly after ascending; `q` ascends like esc, because q is the back
+    // key here — and arms nothing.
+    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Char('q'));
     assert!(!app.chat_media().descended(), "q ascends while descended");
     assert!(!app.is_quit_armed(), "that q armed nothing");
 
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Esc);
     assert!(!app.chat_media().descended());
 }
@@ -1738,7 +1745,7 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
     // descend would reach the memories tab in five `→` presses (`Tab::next` wraps, `src/app.rs:66`)
     // and the test would fail as "no panic", which reads like a missing guard instead of a broken
     // fixture.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
     assert_eq!(app.active(), Tab::ChatMedia, "the walk has to START somewhere other than its target");
 
@@ -1768,7 +1775,7 @@ fn the_alt_jump_ascends_the_pane_it_leaves_on_either_screen() {
         vec![PlanRow { source_id: media_id(1), output_name: "x.jpg".to_owned(), leg: Leg::Image }],
         clean_counts(),
     );
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     assert!(app.chat_media().descended());
 
     // `→` is trapped while descended, so the jump is the only way off this tab that is not a `←`.
@@ -1797,10 +1804,8 @@ fn the_alt_jump_ascends_the_pane_it_leaves_on_either_screen() {
     let _ = sender;
 
     on_tab(&mut app, Tab::Memories);
-    // The memories descend moved onto the start chip when its static rows dropped out of the walk,
-    // so one ↓ reaches it from the default toggle caret.
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Enter);
+    // `tab` descends the memories pane, wherever the caret sits.
+    press(&mut app, KeyCode::Tab);
     assert!(app.memories().descended());
     app.handle_event(&Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT)));
     assert_eq!(app.active(), Tab::ChatMedia);
@@ -2023,6 +2028,41 @@ fn resuming_into_a_new_out_dir_reports_where_the_manifest_holds_the_outputs() {
     assert!(alert.message.contains("1 skipped"), "{}", alert.message);
     assert!(alert.message.contains("outputs recorded under a different out dir"), "{}", alert.message);
     assert!(!out2.join("chat").exists(), "the fresh out root stays empty: {}", out2.display());
+}
+
+#[test]
+fn a_resume_into_an_ancestor_out_dir_still_reports_the_old_outputs() {
+    let dir = export_tree(&[], &[1]);
+    let state = TempDir::new().unwrap();
+
+    // First run writes under the source-derived `out/chat`.
+    let mut app = app_on_export(&dir);
+    app.chat_media_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app);
+    wait_for_alert(&mut app);
+    let alert = app.chat_media().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
+    assert!(alert.message.contains("1 fixed"), "{}", alert.message);
+
+    // Second run points `--out` at the source dir itself — an ANCESTOR of the first run's
+    // `dir/out`. `Path::starts_with` reads the recorded `dir/out/chat/…` as "under" `dir`, so a
+    // prefix check against the out root alone suppresses the warning; the chat write root is
+    // `dir/chat`, which the recorded output is NOT under, so the warning must still fire.
+    let mut app2 = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: dir.path().to_path_buf(), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        environment(),
+    );
+    on_tab(&mut app2, Tab::ChatMedia);
+    app2.chat_media_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app2);
+    wait_for_alert(&mut app2);
+
+    let alert = app2.chat_media().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert!(alert.message.contains("1 skipped"), "{}", alert.message);
+    assert!(alert.message.contains("outputs recorded under a different out dir"), "{}", alert.message);
+    assert!(!dir.path().join("chat").exists(), "the ancestor out root stays free of a chat tree");
 }
 
 #[test]

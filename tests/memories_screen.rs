@@ -358,10 +358,17 @@ fn press(app: &mut App, code: KeyCode) {
 }
 
 /// Moves the caret from the default (the transcode toggle) onto the start chip and presses enter —
-/// the screen's one start/descend trigger now that the static rows are out of the walk.
+/// the start trigger now that the static rows are out of the walk. Descending into the table is a
+/// separate key, [`descend_into_table`].
 fn enter_on_start_chip(app: &mut App) {
     press(app, KeyCode::Down);
     press(app, KeyCode::Enter);
+}
+
+/// Descends into the read-only table pane via `tab`, wherever the caret sits. The start chip no
+/// longer descends on enter, so every test that reaches the table goes through this helper.
+fn descend_into_table(app: &mut App) {
+    press(app, KeyCode::Tab);
 }
 
 /// Bounded for the reason `chat_media_screen.rs`'s `on_tab` spells out in full: `→` is inert while
@@ -382,7 +389,7 @@ fn on_memories(app: &mut App) {
 
 /// [`on_memories`]'s panic arm: a walk off a descended pane gives up with a diagnosis instead of spinning.
 ///
-/// The memories pane cannot be the trap for its own walk — `→` is inert only while descended, and this helper returns the moment the memories tab is active — so the fixture descends the CHAT MEDIA pane and walks from there. The chat-media import is function-local: it is the state the guard needs, not a surface this file tests. No export tree and no media are involved; a plan with no rows suffices, because `with_channel` sets `Run::Active` (`src/tui/screens/chat_media.rs:257`) and `plan_landed` fills the view regardless of row count (`:413`), so `has_table` is true and `enter` descends.
+/// The memories pane cannot be the trap for its own walk — `→` is inert only while descended, and this helper returns the moment the memories tab is active — so the fixture descends the CHAT MEDIA pane and walks from there. The chat-media import is function-local: it is the state the guard needs, not a surface this file tests. No export tree and no media are involved; a plan with no rows suffices, because `with_channel` sets `Run::Active` (`src/tui/screens/chat_media.rs:257`) and `plan_landed` fills the view regardless of row count (`:413`), so `has_table` is true and `tab` descends.
 ///
 /// **`should_panic` on the WHOLE message, not a fragment**, so the origin tab and the diagnosis are both pinned. A fragment would also be satisfied by the `tests/shell.rs` and `tests/chat_media_screen.rs` twins, whose literals share the trailing clause; the full string is what makes this pin this file's own.
 ///
@@ -411,11 +418,8 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
     // which reads like a missing guard instead of a broken fixture.
     press(&mut app, KeyCode::Right);
     press(&mut app, KeyCode::Right);
-    // Descend via the chat start chip: two ↓ from the default overlay-cycle caret reach it, since
-    // the chat static rows dropped out of the walk.
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Enter);
+    // Descend the chat pane via `tab` — a pane key, so no caret walk onto the chip is needed.
+    press(&mut app, KeyCode::Tab);
     assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
 
     // `sender` lives to end of scope, which is what keeps the channel connected across the tick
@@ -621,7 +625,7 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
 
     // The selection follows the tail even while the form owns the caret; the caret glyph itself
     // renders only in the focused pane, so descend and redraw to see it on the last row.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     assert!(cell_run(buffer, 6).contains("❯ 00000003"), "{:?}", cell_run(buffer, 6));
@@ -716,7 +720,7 @@ fn the_statuses_that_land_with_the_finished_event_still_reach_the_table() {
     // the cleared flag instead of re-pinning the tail. `finish`'s own clearing is a different line
     // and is pinned separately, by `a_run_that_plans_and_finishes_in_one_tick_…` — the one state
     // where it is observable.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     press(&mut app, KeyCode::Up);
     assert!(app.memories().descended());
 
@@ -807,7 +811,7 @@ fn a_run_that_plans_and_finishes_in_one_tick_ends_selected_and_down_lands_on_row
     // The caret renders only in the focused pane, so descend before reading it. A one-tick run ends
     // with the tail selected, exactly like a normally-completed run — the plan-time tail pin, since
     // the finishing poll's pin is skipped once `finish` clears `follow_tail`.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     assert!(app.memories().descended());
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -968,8 +972,8 @@ fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
         vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
     );
 
-    // Enter on the start chip descends (one ↓ from the default toggle caret reaches it).
-    enter_on_start_chip(&mut app);
+    // `tab` descends into the table, wherever the caret sits.
+    descend_into_table(&mut app);
     assert!(app.memories().descended());
 
     // The descended hint set advertises every ascend key, esc included — never a dead binding.
@@ -983,9 +987,9 @@ fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
     press(&mut app, KeyCode::Left);
     assert!(!app.memories().descended(), "← ascends");
 
-    // The caret is still on the start chip after ascending, so enter descends again directly;
-    // `q` ascends like esc, because q is the back key here — and arms nothing.
-    press(&mut app, KeyCode::Enter);
+    // `tab` descends again directly after ascending; `q` ascends like esc, because q is the back
+    // key here — and arms nothing.
+    press(&mut app, KeyCode::Tab);
     assert!(app.memories().descended());
     press(&mut app, KeyCode::Char('q'));
     assert!(!app.memories().descended(), "q ascends while descended");
@@ -993,7 +997,7 @@ fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
     assert!(app.is_running());
 
     // And esc ascends too.
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Esc);
     assert!(!app.memories().descended());
 }
@@ -1010,11 +1014,11 @@ fn arrows_are_trapped_while_descended_but_the_alt_jump_still_lands() {
         vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
     );
 
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     assert!(app.memories().descended());
     press(&mut app, KeyCode::Left);
     assert_eq!(app.active(), exportsnap::app::Tab::Memories, "← ascends rather than switching tabs");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Right);
     assert_eq!(app.active(), exportsnap::app::Tab::Memories, "→ is inert while descended");
 
@@ -1326,29 +1330,64 @@ fn the_empty_state_action_line_names_a_key_that_actually_starts_the_run() {
 }
 
 #[test]
-fn enter_on_the_start_chip_starts_without_a_table_and_descends_with_one() {
-    let dir = export_tree("static-enter", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+fn enter_on_the_start_chip_always_starts_a_run_and_tab_descends_into_the_table() {
+    let dir = export_tree("start-chip", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
     app.memories_mut().set_manifest_dir(state.path().to_path_buf());
 
-    // No table yet: enter on the start chip starts the run rather than descending into nothing.
+    // No table yet: `tab` is inert, and enter on the start chip starts the run rather than
+    // descending into nothing.
+    press(&mut app, KeyCode::Tab);
+    assert!(!app.memories().descended(), "tab with no table is inert");
     enter_on_start_chip(&mut app);
     assert!(!app.memories().descended());
     assert!(app.memories().run_in_flight());
 
-    // Wait for the plan so the table exists; a fresh run's enter then descends. The alert is what
-    // the wait above is for, so check it landed rather than leaning on it silently — a helper that
-    // gave up would otherwise leave `descended()` true off the plan alone and read as a pass.
+    // Wait for the plan so the table exists. The alert is what the wait above is for, so check it
+    // landed rather than leaning on it silently.
     wait_for_alert(&mut app);
     assert!(app.memories().alert().is_some(), "the wait above must have produced the alert it waited for");
-    // The caret is still on the start chip, so a plain enter descends into the now-live table.
+
+    // With a table live, `tab` descends — a pane key, wherever the caret sits.
+    descend_into_table(&mut app);
+    assert!(app.memories().descended(), "tab descends into the finished table");
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.memories().descended());
+
+    // The caret is still on the start chip: enter there starts a FRESH run. It never descends,
+    // even now that a table exists — that is the overload this test pins out.
     press(&mut app, KeyCode::Enter);
-    assert!(app.memories().descended(), "with a table live, enter on the start chip descends");
+    assert!(app.memories().run_in_flight(), "enter on the start chip starts a fresh run once a table exists");
+    assert!(!app.memories().descended(), "enter never descends into the table");
 }
 
 #[test]
-fn descending_moves_the_caret_and_tint_off_the_toggle() {
+fn enter_on_the_disabled_start_chip_is_inert() {
+    let dir = export_tree("disabled-chip", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    let mut app = app_on_memories(&dir);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+    );
+
+    // Mid-run the worker is live, so the start chip is disabled (cloudy-tui: Disabled action chip —
+    // focusable but inert). Move the caret onto it and press enter.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.memories().descended(), "enter on a disabled chip must not descend");
+    assert!(app.memories().run_in_flight(), "enter on a disabled chip must not start a second run");
+
+    // The pane key still works on a disabled chip: `tab` descends into the live table.
+    descend_into_table(&mut app);
+    assert!(app.memories().descended(), "tab still descends while the chip is disabled");
+}
+
+#[test]
+fn descending_drops_the_caret_but_keeps_the_toggle_tint() {
     let dir = export_tree("blur-tint", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
@@ -1370,13 +1409,14 @@ fn descending_moves_the_caret_and_tint_off_the_toggle() {
     assert_eq!(buffer[(2, 5)].style().bg, Some(palette.bg_hover));
     assert_eq!(buffer[(2, 5)].symbol(), "❯");
 
-    // Descend via the start chip: the caret drops, and the toggle's tint drops with it — the
-    // selection moved to the chip, which never carries a tint (the chip is its own block).
-    enter_on_start_chip(&mut app);
+    // Descend via `tab`: the caret drops, but the blurred pane preserves the last-selected row's
+    // `BG_HOVER` tint (cloudy-tui: blurred panes preserve the last-selected row's tint). `tab` is a
+    // pane key and does not move the form selection, unlike the old enter-on-start-chip overload.
+    descend_into_table(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     assert_ne!(buffer[(2, 5)].symbol(), "❯", "the caret drops when the pane blurs");
-    assert_ne!(buffer[(2, 5)].style().bg, Some(palette.bg_hover), "the toggle's tint drops when the selection moves to the chip");
+    assert_eq!(buffer[(2, 5)].style().bg, Some(palette.bg_hover), "the blurred pane keeps the last-selected row's tint");
 }
 
 #[test]
@@ -1809,7 +1849,7 @@ fn the_focused_rows_place_name_grows_a_tooltip_below_it_only_while_descended() {
     }
 
     // Descend: the selection follows the tail, which is the row WITHOUT a name — still no tooltip.
-    enter_on_start_chip(&mut app);
+    descend_into_table(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     for y in 4..=8 {
@@ -1827,14 +1867,19 @@ fn the_focused_rows_place_name_grows_a_tooltip_below_it_only_while_descended() {
     assert!(tooltip.contains(LONG_PLACE), "the tooltip shows the FULL place name: {tooltip}");
     assert!(!tooltip.contains('…'), "the tooltip never ellipsises the name: {tooltip}");
     assert!(!tooltip.contains('❯'), "the tooltip must not carry the selection caret: {tooltip}");
-    assert_ne!(buffer[(2, 5)].style().bg, Some(Palette::new(Tier::Full).bg_hover), "the tooltip must not take the highlight");
+    // The tooltip row in the table must not take the selection highlight — the highlight stays on
+    // the selected row above it (`progress_list` inserts the tooltip as a non-selected item). Pin
+    // the tooltip's own `└` leader rather than the form's toggle cell, which legitimately keeps its
+    // tint while the pane is blurred.
+    let leader = (0..buffer.area.width).find(|&x| buffer[(x, 5)].symbol() == "└").expect("the tooltip leader is on row 5");
+    assert_ne!(buffer[(leader, 5)].style().bg, Some(Palette::new(Tier::Full).bg_hover), "the tooltip must not take the highlight");
     assert!(cell_run(buffer, 6).contains(&uuid(2)[..8]), "the row below the tooltip is the shifted second row: {:?}", cell_run(buffer, 6));
 
     // Ascend with the selection still on the named row: the tooltip's gate is the pane's focus,
     // so it must vanish even though the row that grew it is still selected. Whole-frame sweep,
     // because the gate's absence would drop the tooltip below the row, not above the form. Swept
-    // for the FULL name rather than the `└` leader — the caret is on the disabled start chip here,
-    // whose own `a run is already in flight` tooltip also carries a `└`.
+    // for the FULL name rather than the `└` leader — `tab` descends without moving the form caret,
+    // so the name, not any `└`-carrying tooltip, is the specific claim.
     press(&mut app, KeyCode::Esc);
     assert!(!app.memories().descended(), "esc must ascend from the table");
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
@@ -1843,7 +1888,7 @@ fn the_focused_rows_place_name_grows_a_tooltip_below_it_only_while_descended() {
 
     // Re-descend: the selection survived the ascend, so the tooltip returns — the phase above
     // measured the focus gate, not the selection moving.
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     assert!(cell_run(buffer, 5).contains(LONG_PLACE), "the tooltip must return on re-descend: {:?}", cell_run(buffer, 5));

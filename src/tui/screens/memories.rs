@@ -22,13 +22,13 @@
 //!
 //! The form's caret walks the two real controls — the transcode toggle and the start chip — while
 //! the three informational rows (source, output dir, disk free) render as non-focusable,
-//! column-aligned key:value rows. Enter on the start chip descends into the table pane, which is
-//! read-only but focusable for scrolling; with no table yet (no run planned) there is nothing to
-//! descend into, so enter starts the run instead — the promise the empty state's action line
-//! makes. Starting a fresh run once a table exists goes through the action menu's `start run`.
-//! esc or `←` ascends, `→` is inert while descended. The selection caret renders only in
-//! the focused pane; the selected form row keeps its tint while the form is blurred. While a run
-//! is live the table follows its tail until the user scrolls up.
+//! column-aligned key:value rows. Enter on the start chip starts the run when it is enabled and
+//! is inert when it is disabled mid-run (cloudy-tui: Action chip — enter triggers the action the
+//! label names, and a disabled chip is focusable-but-inert). The read-only table pane is reached
+//! with `tab`, which descends only when a table exists. esc or `←` ascends, `→` is inert while
+//! descended. The selection caret renders only in the focused pane; the selected form row keeps
+//! its tint while the form is blurred. While a run is live the table follows its tail until the
+//! user scrolls up.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -99,9 +99,10 @@ impl StaticRow {
 /// The form's focusable rows, in caret order.
 ///
 /// The static rows dropped out of the walk (item 1): the caret now rests only on the two real
-/// controls, the transcode toggle and the start chip. Enter on the start chip keeps the old
-/// static-row behaviour — descend into the table when one exists, start the run when it does not —
-/// so the empty state's "press ↵ to start" promise stays true through the chip.
+/// controls, the transcode toggle and the start chip. Enter on the start chip starts the run when
+/// enabled and is inert when disabled, per the contract's Action chip rule — the empty state's
+/// "press ↵ to start" promise stays true through the chip. The table pane is reached with `tab`,
+/// a pane key rather than a row action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormRow {
     Transcode,
@@ -329,7 +330,13 @@ impl Memories {
         if self.table.descended {
             vec![("↑ ↓", "scroll"), ("esc", "back")]
         } else {
-            vec![("↑ ↓", "move"), ("↵", "start / descend"), ("space", "toggle transcode")]
+            let mut keys = vec![("↑ ↓", "move"), ("↵", "start run"), ("space", "toggle transcode")];
+            // `tab` is advertised only when it does something this frame: with no table there is
+            // nothing to descend into (cloudy-tui: a hint advertises only keys that do something).
+            if matches!(self.run, Run::Active { view: Some(_), .. }) {
+                keys.push(("tab", "view progress"));
+            }
+            keys
         }
     }
 
@@ -599,7 +606,8 @@ impl Memories {
     }
 
     /// The form pane owns the caret: arrows walk the rows (wrapping), enter acts on the focused
-    /// row or descends, space flips the toggle.
+    /// row (the toggle flips, the start chip starts when enabled and is inert when disabled),
+    /// `tab` descends into the table, space flips the toggle.
     fn handle_form_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
@@ -611,20 +619,28 @@ impl Memories {
                 match FormRow::ALL[self.form_focus] {
                     FormRow::Transcode => self.transcode = !self.transcode,
                     FormRow::Start => {
-                        // The start chip carries the old static-row behaviour: descend into the
-                        // table when one exists, start the run when it does not — the promise the
-                        // empty state's "press ↵ to start" line makes (item 1: enter-on-empty still
-                        // starts the run via the start chip). Starting a fresh run once a table
-                        // exists is the action menu's `start run`, which `a` opens.
-                        let has_table = matches!(&self.run, Run::Active { view: Some(_), .. });
-                        if has_table {
-                            self.table.descended = true;
-                        } else if self.start_enabled() {
+                        // The start chip triggers the action its label names (cloudy-tui: Action
+                        // chip): enter starts the run when enabled, and a disabled chip is
+                        // focusable-but-inert, so enter does nothing mid-run. Descending into the
+                        // table is `tab`'s job, never enter's — that split is what keeps a finished
+                        // run's table from stealing the start key.
+                        if self.start_enabled() {
                             self.start_run();
                         }
                     }
                 }
                 true
+            }
+            KeyCode::Tab if key.modifiers == KeyModifiers::NONE => {
+                // `tab` descends into the read-only table pane when one exists, wherever the caret
+                // sits — a pane key, not a row action. With no table there is nothing to descend
+                // into, so it falls through as inert (the shell binds nothing behind `tab`).
+                if matches!(self.run, Run::Active { view: Some(_), .. }) {
+                    self.table.descended = true;
+                    true
+                } else {
+                    false
+                }
             }
             KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => {
                 // `space` mirrors `enter` on the toggle; it is not bound on chips.

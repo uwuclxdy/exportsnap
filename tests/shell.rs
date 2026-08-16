@@ -106,7 +106,7 @@ fn on_tab_in(app: &mut App, tab: Tab) {
 
 /// [`on_tab_in`]'s panic arm: a walk off a descended pane gives up with a diagnosis instead of spinning.
 ///
-/// The state no ordinary caller here produces, built on purpose. Every import is function-local, so nothing chat-media enters this file's surface — the shell is what these tests are about, and a descended pane is only the state the guard needs. It is reachable in a plan with no rows at all: `with_channel` sets `Run::Active` (`src/tui/screens/chat_media.rs:257`) and `plan_landed` fills the view regardless of row count (`:413`), so `has_table` is true and `enter` descends.
+/// The state no ordinary caller here produces, built on purpose. Every import is function-local, so nothing chat-media enters this file's surface — the shell is what these tests are about, and a descended pane is only the state the guard needs. It is reachable in a plan with no rows at all: `with_channel` sets `Run::Active` (`src/tui/screens/chat_media.rs:257`) and `plan_landed` fills the view regardless of row count (`:413`), so `has_table` is true and `tab` descends.
 ///
 /// **`should_panic` on the WHOLE message, not a fragment.** The `on_tab_in(&mut app, Tab::ChatMedia)` walk in the setup would itself panic as `could not reach ChatMedia from …` if it ever failed, which a fragment like `is a pane descended and trapping the arrows?` would happily accept — the full literal is what keeps a setup failure from passing as the subject. Deleting the bound makes this test HANG rather than red, which is unavoidable rather than sloppy: the property under test is "does not hang", and nothing short of a timeout harness can red on its absence.
 ///
@@ -140,11 +140,8 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
     // descend would reach memories in five presses and the test would fail as "no panic", which
     // reads like a missing guard instead of a broken fixture.
     on_tab_in(&mut app, Tab::ChatMedia);
-    // Descend via the start chip: two ↓ from the default overlay-cycle caret reach it, since the
-    // static rows dropped out of the walk.
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Enter);
+    // Descend the chat pane via `tab` — a pane key, so no caret walk onto the chip is needed.
+    press(&mut app, KeyCode::Tab);
     assert!(app.chat_media().descended(), "the fixture must leave the pane descended, or the walk below is not trapped");
 
     // `sender` lives to end of scope, which is what keeps the channel connected across the tick
@@ -477,6 +474,26 @@ fn the_overlay_drops_before_the_version_even_where_it_alone_would_fit() {
         header_only_alt(Tab::Overview, 99),
         format!("{}{:>18}", " exportsnap  •  ● overview   memories   chat media   history   account   settings", "v9.9.9 ")
     );
+}
+
+#[test]
+fn an_alt_press_flows_through_shell_render_into_the_jump_index_overlay() {
+    use ratatui::crossterm::event::ModifierKeyCode;
+
+    // Every overlay test above calls `header::render` directly, so hardcoding the `app.alt_held()`
+    // argument in `shell::render` to `false` leaves them all green. This drives a real ⌥ press
+    // through `App::handle_event` and reads the overlay off the composed frame, so that mutation
+    // reds here.
+    let mut app = App::new(Tier::Full);
+    app.handle_event(&Event::Key(KeyEvent::new(KeyCode::Modifier(ModifierKeyCode::LeftAlt), KeyModifiers::NONE)));
+    assert!(app.alt_held(), "the press must land as the held modifier before the frame draws");
+
+    let mut terminal = Terminal::new(TestBackend::new(109, 20)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let header = row(terminal.backend().buffer(), 0);
+
+    assert!(header.contains("[1]overview"), "the overlay reaches the header through the shell: {header}");
+    assert!(header.contains("[6]settings"), "the last tab is indexed too: {header}");
 }
 
 // ---- body panel (skill: Panel) ----

@@ -26,13 +26,12 @@
 //!
 //! The form's caret walks the three real controls — the overlay-mode cycle, the transcode toggle
 //! and the start chip — while the three informational rows (source, output dir, disk free) render
-//! as non-focusable, column-aligned key:value rows. Enter on the start chip descends into the
-//! table pane, which is read-only but focusable for scrolling; with no table yet (no run planned)
-//! there is nothing to descend into, so enter starts the run instead — the promise the empty
-//! state's action line makes. Starting a fresh run once a table exists goes through the action
-//! menu's `start run`. `space` cycles the overlay mode and flips the transcode toggle; `enter`
-//! mirrors it on both, per the contract's row-interaction grammar. esc or `←` ascends, `→` is
-//! inert while descended.
+//! as non-focusable, column-aligned key:value rows. Enter on the start chip starts the run when
+//! it is enabled and is inert when it is disabled mid-run (cloudy-tui: Action chip — enter
+//! triggers the action the label names, and a disabled chip is focusable-but-inert). The
+//! read-only table pane is reached with `tab`, which descends only when a table exists. `space`
+//! cycles the overlay mode and flips the transcode toggle; `enter` mirrors it on both, per the
+//! contract's row-interaction grammar. esc or `←` ascends, `→` is inert while descended.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -140,8 +139,9 @@ impl StaticRow {
 ///
 /// The static rows dropped out of the walk (item 1): the caret now rests only on the three real
 /// controls, the overlay-mode cycle, the transcode toggle and the start chip. Enter on the start
-/// chip keeps the old static-row behaviour — descend into the table when one exists, start the run
-/// when it does not — so the empty state's "press ↵ on start run" promise stays true through the chip.
+/// chip starts the run when enabled and is inert when disabled, per the contract's Action chip
+/// rule — the empty state's "press ↵ on start run" promise stays true through the chip. The table
+/// pane is reached with `tab`, a pane key rather than a row action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormRow {
     Overlay,
@@ -388,7 +388,13 @@ impl ChatMedia {
         if self.table.descended {
             vec![("↑ ↓", "scroll"), ("esc", "back")]
         } else {
-            vec![("↑ ↓", "move"), ("↵", "start / descend"), ("space", "cycle / toggle")]
+            let mut keys = vec![("↑ ↓", "move"), ("↵", "start run"), ("space", "cycle / toggle")];
+            // `tab` is advertised only when it does something this frame: with no table there is
+            // nothing to descend into (cloudy-tui: a hint advertises only keys that do something).
+            if matches!(self.run, Run::Active { view: Some(_), .. }) {
+                keys.push(("tab", "view progress"));
+            }
+            keys
         }
     }
 
@@ -640,8 +646,9 @@ impl ChatMedia {
         }
     }
 
-    /// The form pane owns the caret: arrows walk the rows (wrapping), enter acts on the focused row
-    /// or descends, space activates the state controls.
+    /// The form pane owns the caret: arrows walk the rows (wrapping), enter acts on the focused
+    /// row (the cycle and toggle flip, the start chip starts when enabled and is inert when
+    /// disabled), `tab` descends into the table, space activates the state controls.
     fn handle_form_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
@@ -656,20 +663,28 @@ impl ChatMedia {
                     FormRow::Overlay => self.overlay = self.overlay.next(),
                     FormRow::Transcode => self.transcode = !self.transcode,
                     FormRow::Start => {
-                        // The start chip carries the old static-row behaviour: descend into the
-                        // table when one exists, start the run when it does not — the promise the
-                        // empty state's "press ↵ on start run" line makes (item 1: enter-on-empty still
-                        // starts the run via the start chip). Starting a fresh run once a table
-                        // exists is the action menu's `start run`, which `a` opens.
-                        let has_table = matches!(&self.run, Run::Active { view: Some(_), .. });
-                        if has_table {
-                            self.table.descended = true;
-                        } else if self.start_enabled() {
+                        // The start chip triggers the action its label names (cloudy-tui: Action
+                        // chip): enter starts the run when enabled, and a disabled chip is
+                        // focusable-but-inert, so enter does nothing mid-run. Descending into the
+                        // table is `tab`'s job, never enter's — that split is what keeps a finished
+                        // run's table from stealing the start key.
+                        if self.start_enabled() {
                             self.start_run();
                         }
                     }
                 }
                 true
+            }
+            KeyCode::Tab if key.modifiers == KeyModifiers::NONE => {
+                // `tab` descends into the read-only table pane when one exists, wherever the caret
+                // sits — a pane key, not a row action. With no table there is nothing to descend
+                // into, so it falls through as inert (the shell binds nothing behind `tab`).
+                if matches!(self.run, Run::Active { view: Some(_), .. }) {
+                    self.table.descended = true;
+                    true
+                } else {
+                    false
+                }
             }
             KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => {
                 // `space` activates a state control and is deliberately NOT bound on the chip.
@@ -1009,7 +1024,7 @@ fn summary(chat: &ChatMedia, outcome: &RunOutcome) -> RunAlert {
 /// the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at a new empty dir
 /// makes the resume sweep verify every `done` item at its OLD path (still present), so every item
 /// is skipped and nothing is written, with no screen saying why. The tell is a `done` row whose
-/// recorded `output_path` is not under [`ChatMedia::out_root`].
+/// recorded `output_path` is not under the chat write root ([`ChatMedia::out_root`]`/`[`CHAT_DIR`]).
 fn skipped_outputs_recorded_elsewhere(chat: &ChatMedia, skipped: usize) -> bool {
     if skipped == 0 {
         return false;
@@ -1024,12 +1039,19 @@ fn skipped_outputs_recorded_elsewhere(chat: &ChatMedia, skipped: usize) -> bool 
     // recorded file too — it exists, since the resume sweep only skips outputs it verified — and
     // decline to warn when either side cannot be resolved.
     let Ok(out_root) = canonical_out_root(&chat.out_root) else { return false };
+    // The chat write root is one level below `out_root` (`out_root/`[`CHAT_DIR`]). Comparing the
+    // recorded path against the out root alone reads an ANCESTOR out root as a match: a run into
+    // `/export` after a run into `/export/out` sees the recorded `/export/out/chat/…` as "under"
+    // `/export`, suppresses the warning, and writes nothing with no explanation. The write root is
+    // what a record this leg could have written actually lives under, so the prefix check starts
+    // there.
+    let chat_root = out_root.join(CHAT_DIR);
     view.manifest.items(ItemKind::ChatMedia).is_ok_and(|items| {
         items.into_iter().any(|item| {
             item.status == ItemStatus::Done
                 && item.output_path.as_ref().is_some_and(|path| {
                     let Ok(canonical) = path.canonicalize() else { return false };
-                    !canonical.starts_with(&out_root)
+                    !canonical.starts_with(&chat_root)
                 })
         })
     })

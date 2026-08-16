@@ -515,7 +515,7 @@ fn the_help_modal_derives_its_sections_from_the_active_screen() {
     assert_eq!(sections.len(), 2);
     assert_eq!(sections[0].rows, [("q", "back / quit"), ("?", "help"), ("a", "actions"), ("← →", "switch tab"), ("⌃c", "quit")]);
     assert_eq!(sections[1].title, "memories");
-    assert_eq!(sections[1].rows, [("↑ ↓", "move"), ("↵", "start / descend"), ("space", "toggle transcode")]);
+    assert_eq!(sections[1].rows, [("↑ ↓", "move"), ("↵", "start run"), ("space", "toggle transcode")]);
 }
 
 #[test]
