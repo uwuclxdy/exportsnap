@@ -19,14 +19,14 @@ const VERSION_CLEARANCE: usize = 3;
 /// The narrowest row that can still say which tab is active.
 ///
 /// Derived from the overflow form rather than picked: everything that form puts left of the
-/// active label — the brand lead, the `‹` marker, one [`TAB_GAP`] — plus the widest label with
-/// its `●` cue ([`label_text`]). At exactly this width only the trailing `   ›` run falls off the
-/// right edge, so the label itself is whole; a cell narrower and it starts losing characters.
+/// active label — the brand lead, the `‹` marker, one [`TAB_GAP`] — plus the widest label. At
+/// exactly this width only the trailing `   ›` run falls off the right edge, so the label itself
+/// is whole; a cell narrower and it starts losing characters.
 #[must_use]
 pub fn min_width() -> u16 {
     let lead: usize = lead_text().iter().map(String::as_str).map(cells).sum();
     let marker = format!("{}{TAB_GAP}", glyph::TAB_OVERFLOW_PREV);
-    let widest = Tab::ALL.into_iter().map(|tab| cells(&label_text(tab, true))).max().unwrap_or(0);
+    let widest = Tab::ALL.into_iter().map(|tab| cells(tab.label())).max().unwrap_or(0);
 
     // A label past `u16::MAX` cells can never fit, so saturating keeps the row banner-only.
     u16::try_from(lead + cells(&marker) + widest).unwrap_or(u16::MAX)
@@ -119,9 +119,6 @@ fn tab_spans(palette: &Palette, active: Tab, overlay: bool, activity: &[Option<T
             spans.push(Span::raw(TAB_GAP));
         }
         let is_active = tab == active;
-        if is_active {
-            spans.push(active_marker(palette));
-        }
         let jump = if overlay { tab.jump_index() } else { None };
         if let Some(digit) = jump {
             spans.extend(index_prefix(palette, digit));
@@ -132,9 +129,9 @@ fn tab_spans(palette: &Palette, active: Tab, overlay: bool, activity: &[Option<T
     spans
 }
 
-/// Overflow form (Tab bar → Overflow): only the active label renders — `●` cue included — flanked
-/// by markers for the tabs on either side. A marker disappears on the edge where no further tabs
-/// exist, but its cell stays blank so the active label holds its column as the user moves across.
+/// Overflow form (Tab bar → Overflow): only the active label renders, flanked by markers for the
+/// tabs on either side. A marker disappears on the edge where no further tabs exist, but its cell
+/// stays blank so the active label holds its column as the user moves across.
 fn overflow_spans(palette: &Palette, active: Tab) -> Vec<Span<'static>> {
     let marker = Style::new().fg(palette.text_faint);
     let prev = if Tab::ALL.first() == Some(&active) { ' ' } else { glyph::TAB_OVERFLOW_PREV };
@@ -143,24 +140,10 @@ fn overflow_spans(palette: &Palette, active: Tab) -> Vec<Span<'static>> {
     vec![
         Span::styled(prev.to_string(), marker),
         Span::raw(TAB_GAP),
-        active_marker(palette),
         Span::styled(active.label(), label_style(palette, true, None)),
         Span::raw(TAB_GAP),
         Span::styled(next.to_string(), marker),
     ]
-}
-
-/// The active tab's rendered label text: a leading `●` content cue that survives `NO_COLOR=1`,
-/// where the accent, bold and underline all drop (design.md: TUI audit rulings — NO_COLOR content
-/// cue). The panel title cannot carry the cue — memories and chat media both title their first
-/// panel `setup` — so the cue has to live in the tab bar itself.
-fn label_text(tab: Tab, active: bool) -> String {
-    if active { format!("{} {}", glyph::STATUS_DOT_ACTIVE, tab.label()) } else { tab.label().to_string() }
-}
-
-/// The active tab's content cue, styled as part of the active label.
-fn active_marker(palette: &Palette) -> Span<'static> {
-    Span::styled(format!("{} ", glyph::STATUS_DOT_ACTIVE), Style::new().fg(palette.accent).bold())
 }
 
 /// One jump index `[N]` (cloudy-tui: Tab bar → Jump-key overlay): brackets `TEXT_DIM`, digit
