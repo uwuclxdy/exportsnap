@@ -582,7 +582,7 @@ fn the_footer_names_the_modal_s_keys_while_a_modal_owns_input() {
     // gone — arrows are inert and `q` closes the modal without arming the quit.
     let mut app = App::new(Tier::Full);
     press(&mut app, KeyCode::Char('?'));
-    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::Help)));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::Help { .. })));
     let terminal = draw(&mut app, 40, 20);
     assert_eq!(row(terminal.backend().buffer(), 19).trim_end(), " ? close   esc cancel   q back");
 }

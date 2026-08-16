@@ -99,8 +99,9 @@ pub(crate) fn plain_hints(palette: &Palette, has_actions: bool, width: u16) -> L
 }
 
 /// The hint set while the active screen's table pane is descended: arrows move the caret, `←`,
-/// `esc` and `q` all ascend, and `→` is inert so it gets no hint. Identical on every screen, so
-/// the shell chooses it off `descended` rather than per tab.
+/// `esc` and `q` all ascend, and `→` is inert so it gets no hint. This is the generic descended
+/// set, chosen for every screen except the history tab, whose formats pane binds `space` and `↵`
+/// and so takes [`history_descended_hints`] instead.
 pub(crate) fn descended_hints(palette: &Palette, width: u16) -> Line<'static> {
     let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
     let left = glyph::KEY_LEFT.to_string();
@@ -110,7 +111,9 @@ pub(crate) fn descended_hints(palette: &Palette, width: u16) -> Line<'static> {
 /// The hint set while the history tab's formats pane is descended: arrows move the caret,
 /// `space` toggles the focused format, `↵` toggles a format or runs the export on the chip, and
 /// `←`/`esc`/`q` ascend. The generic descended set advertises neither of the two pane-specific
-/// keys, which is why this exists rather than the shell reusing [`descended_hints`] per tab.
+/// keys, which is why this exists rather than the shell reusing [`descended_hints`] per tab. The
+/// `↵` label names both what it does, since the key toggles on a format row and exports on the
+/// chip — a single `export` label would lie on the four checkbox rows.
 pub(crate) fn history_descended_hints(palette: &Palette, width: u16) -> Line<'static> {
     let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
     let left = glyph::KEY_LEFT.to_string();
@@ -118,7 +121,15 @@ pub(crate) fn history_descended_hints(palette: &Palette, width: u16) -> Line<'st
     hint_line(
         palette,
         &trim_hints(
-            &[(&up_down, "move"), ("space", "toggle"), (&enter, "export"), (&left, "back"), ("esc", "back"), ("?", "help"), ("q", "back")],
+            &[
+                (&up_down, "move"),
+                ("space", "toggle"),
+                (&enter, "toggle / export"),
+                (&left, "back"),
+                ("esc", "back"),
+                ("?", "help"),
+                ("q", "back"),
+            ],
             width,
         ),
     )

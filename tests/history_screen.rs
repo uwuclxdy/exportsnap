@@ -909,7 +909,7 @@ fn the_descended_hints_name_the_formats_panes_own_keys() {
     press(&mut app, KeyCode::Enter);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let footer = (0..120).map(|x| terminal.backend().buffer()[(x, 23)].symbol()).collect::<String>();
-    assert_eq!(footer.trim_end(), " ↑↓ move   space toggle   ↵ export   ← back   esc back   ? help   q back");
+    assert_eq!(footer.trim_end(), " ↑↓ move   space toggle   ↵ toggle / export   ← back   esc back   ? help   q back");
 }
 
 #[test]

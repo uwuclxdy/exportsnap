@@ -57,8 +57,8 @@ use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
     self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, OUTPUT_MIN, PanelStyle, ProgressColumns, ProgressRow, STATUS_CELLS,
-    action_chip, caret, cycle_options, disk_free_value, display_row, empty_state, form_label, overall_bar, panel, planning_spinner,
-    progress_header, progress_list, tint_to_edge, tooltip,
+    action_chip, caret, cycle_options, disk_free_value, display_row, empty_state_with_action, form_label, overall_bar, panel,
+    planning_spinner, progress_header, progress_list, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -141,7 +141,7 @@ impl StaticRow {
 /// The static rows dropped out of the walk (item 1): the caret now rests only on the three real
 /// controls, the overlay-mode cycle, the transcode toggle and the start chip. Enter on the start
 /// chip keeps the old static-row behaviour — descend into the table when one exists, start the run
-/// when it does not — so the empty state's "press ↵ to start" promise stays true through the chip.
+/// when it does not — so the empty state's "press ↵ on start run" promise stays true through the chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormRow {
     Overlay,
@@ -658,7 +658,7 @@ impl ChatMedia {
                     FormRow::Start => {
                         // The start chip carries the old static-row behaviour: descend into the
                         // table when one exists, start the run when it does not — the promise the
-                        // empty state's "press ↵ to start" line makes (item 1: enter-on-empty still
+                        // empty state's "press ↵ on start run" line makes (item 1: enter-on-empty still
                         // starts the run via the start chip). Starting a fresh run once a table
                         // exists is the action menu's `start run`, which `a` opens.
                         let has_table = matches!(&self.run, Run::Active { view: Some(_), .. });
@@ -850,7 +850,9 @@ fn render_idle(frame: &mut Frame, palette: &Palette, chat: &ChatMedia, inner: Re
         let text = RunError::NoExportId(chat.source.clone()).to_string();
         frame.render_widget(Paragraph::new(Line::styled(text, Style::new().fg(palette.text_dim))).wrap(Wrap { trim: true }), inner);
     } else {
-        empty_state(frame, palette, inner, "no run yet");
+        // The caret rests on the overlay cycle row on entry, so a bare enter cycles rather than
+        // starts. Name the start chip instead of promising a key that does something else.
+        empty_state_with_action(frame, palette, inner, "no run yet", glyph::KEY_ENTER, " on start run");
     }
 }
 

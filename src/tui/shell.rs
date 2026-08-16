@@ -60,9 +60,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // The hint set is the ACTIVE screen's, like the alert and the descended flag: two screens
     // can each hold one and there is one footer row, so `App` answers all three off the same tab
     // rather than the footer guessing. The history tab's top-level hints name its own keys
-    // (`t toggle all`, `space toggle`) and derive them off the picker's state; the descended set
-    // is universal, so it is chosen off `descended` rather than per tab. See `App`'s own docs
-    // for why the active screen wins.
+    // (`t toggle all`, `space toggle`) and derive them off the picker's state; its formats pane
+    // takes its own descended set because it binds `space` and `↵`, and every other screen shares
+    // the generic one. See `App`'s own docs for why the active screen wins.
     let hints = if let Some(modal) = app.modal() {
         // A modal owns every key but `ctrl+c`, so the hint set is the modal's own: `q back` and
         // `esc cancel` instead of the switch/quit pair, and the menu's arrow/enter keys. Chosen
@@ -70,7 +70,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // input, and its keys are what the footer must describe this frame.
         match modal {
             Modal::ActionMenu(_) => footer::action_menu_hints(&palette, footer_area.width),
-            Modal::Help => footer::help_hints(&palette, footer_area.width),
+            Modal::Help { .. } => footer::help_hints(&palette, footer_area.width),
         }
     } else if app.descended() {
         // The history formats pane binds keys the generic descended set does not advertise —
@@ -127,7 +127,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Some(modal) = app.modal() {
         match modal {
             Modal::ActionMenu(menu) => widgets::render_action_menu(frame, &palette, &menu.labels, &menu.hotkeys, menu.selected, area),
-            Modal::Help => widgets::render_help_modal(frame, &palette, &app.help_sections(), area),
+            Modal::Help { scroll } => widgets::render_help_modal(frame, &palette, &app.help_sections(), *scroll, area),
         }
     }
 }

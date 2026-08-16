@@ -314,16 +314,25 @@ pub(crate) fn status_pill(palette: &Palette, status: ItemStatus) -> Vec<Span<'st
 }
 
 /// The framed empty state (contract: Empty state): a hint line, then an action line naming the key
-/// that starts the run, its glyph in `ACCENT`.
+/// that starts the run. The action is the bare "press ↵ to start" — the shape for a screen whose
+/// run starts on a bare enter through its start chip.
 pub(crate) fn empty_state(frame: &mut Frame, palette: &Palette, inner: Rect, hint: &str) {
+    empty_state_with_action(frame, palette, inner, hint, glyph::KEY_ENTER, " to start");
+}
+
+/// [`empty_state`] with the action line spelled per screen: the literal `press `, then `key` in
+/// `ACCENT + bold`, then `verb` (cloudy-tui: Empty state — action line). A screen whose caret rests
+/// on a state control rather than the start chip passes the chip's own key, so the line never
+/// promises a bare enter that would do something else.
+pub(crate) fn empty_state_with_action(frame: &mut Frame, palette: &Palette, inner: Rect, hint: &str, key: char, verb: &str) {
     const INSET: u16 = 3;
 
     let action = Line::from(vec![
         Span::styled("press ", Style::new().fg(palette.text_dim)),
-        Span::styled(glyph::KEY_ENTER.to_string(), Style::new().fg(palette.accent).bold()),
-        Span::styled(" to start", Style::new().fg(palette.text_dim)),
+        Span::styled(key.to_string(), Style::new().fg(palette.accent).bold()),
+        Span::styled(verb, Style::new().fg(palette.text_dim)),
     ]);
-    let width = u16::try_from(cells(hint).max(16) + 2 * usize::from(INSET) + 2).unwrap_or(u16::MAX);
+    let width = u16::try_from(cells(hint).max(action.width()) + 2 * usize::from(INSET) + 2).unwrap_or(u16::MAX);
     let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -603,7 +612,7 @@ pub(crate) fn render_action_menu(
             let mut spans = vec![caret(palette, is_selected)];
             spans.push(Span::styled(
                 (*label).to_owned(),
-                if is_selected { Style::new().fg(palette.text).bold() } else { Style::new().fg(palette.text) },
+                if is_selected { Style::new().fg(palette.text).bold() } else { Style::new().fg(palette.text_dim) },
             ));
             spans.push(Span::raw(" ".repeat(max_label - cells(label) + 3)));
             spans.push(Span::styled(hotkeys.get(index).copied().flatten().map_or_else(|| " ".to_owned(), |c| c.to_string()), hotkey_style));
@@ -616,8 +625,10 @@ pub(crate) fn render_action_menu(
 
 /// The help modal (cloudy-tui: Help modal): a sectioned keymap reference. Section headers are
 /// `TEXT_DIM` UPPERCASE TRACKED, each row's hotkey leads in `ACCENT + bold` with its action in
-/// `TEXT` — the "read, not pick" shape that keeps this distinct from the action menu.
-pub(crate) fn render_help_modal(frame: &mut Frame, palette: &Palette, sections: &[HelpSection<'_>], area: Rect) {
+/// `TEXT` — the "read, not pick" shape that keeps this distinct from the action menu. `scroll` is
+/// the vertical offset, clamped by the caller to [`help_scroll_max`]; content taller than the
+/// shell's 80%-of-height cap scrolls rather than clipping.
+pub(crate) fn render_help_modal(frame: &mut Frame, palette: &Palette, sections: &[HelpSection<'_>], scroll: u16, area: Rect) {
     let header_style = Style::new().fg(palette.text_dim);
     let key_style = Style::new().fg(palette.accent).bold();
     let action_style = Style::new().fg(palette.text);
@@ -645,26 +656,53 @@ pub(crate) fn render_help_modal(frame: &mut Frame, palette: &Palette, sections: 
     if lines.is_empty() {
         return;
     }
+    let line_count = lines.len();
     let content_width = u16::try_from(max_width).unwrap_or(u16::MAX);
-    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let content_height = u16::try_from(line_count).unwrap_or(u16::MAX);
     let inner = modal_shell(frame, palette, "keys", content_width, content_height, area);
-    frame.render_widget(Paragraph::new(lines), inner);
+    let viewport = usize::from(inner.height);
+    // The caller clamps `scroll` against the stored terminal height, but a resize can land between
+    // a key press and this draw; re-clamp against the live inner rect so an offset past the end
+    // can never render a blank pane.
+    let offset = usize::from(scroll).min(line_count.saturating_sub(viewport)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((offset, 0)), inner);
+    list_scrollbar(frame, palette, line_count, usize::from(offset), viewport, inner.right(), inner);
+}
+
+/// The modal's height cap as a share of the terminal height (cloudy-tui: Modals → Sizing — content
+/// past 80% of the terminal height makes the modal scrollable).
+fn modal_height_cap(area_height: u16) -> u16 {
+    u16::try_from(u32::from(area_height) * 4 / 5).unwrap_or(u16::MAX)
+}
+
+/// The number of lines a help modal's sections render as: one header row plus its rows per section,
+/// and a blank separator between sections. [`render_help_modal`] and the app's scroll clamp both
+/// read this, so the viewport math cannot drift from what actually renders.
+pub(crate) fn help_line_count(sections: &[HelpSection<'_>]) -> usize {
+    sections.iter().map(|section| 1 + section.rows.len()).sum::<usize>() + sections.len().saturating_sub(1)
+}
+
+/// The help modal's maximum scroll offset: its content lines minus the viewport the shell gives at
+/// `area_height`. The shell caps the modal at 80% of the terminal height and reserves four rows of
+/// chrome (border plus vertical padding), so the viewport is that cap minus four; content that fits
+/// answers zero. The render has the live inner rect, the app's key handler has the stored terminal
+/// height — both arrive here, so the clamp cannot drift.
+pub(crate) fn help_scroll_max(lines: usize, area_height: u16) -> usize {
+    let viewport = usize::from(modal_height_cap(area_height)).saturating_sub(4);
+    lines.saturating_sub(viewport)
 }
 
 /// The shared modal shell (cloudy-tui: Modals): a rounded `ACCENT_2` border, an italic-only
 /// UPPERCASE title in `TEXT_DIM`, and the base `BG` interior — no backdrop, the screen behind is
 /// left untouched except the modal's own rect, which is cleared before the box draws. Sized to
 /// `content_width`/`content_height` plus the `Padding::new(2, 2, 1, 1)` and the border, capped at
-/// 60% of the terminal width, both dimensions clamped to `area` so a short terminal never gets a
-/// write past its edge.
-///
-/// Content taller than the clamped area clips at the bottom. Both menus here are a handful of rows
-/// at most, so scroll is a stated ceiling rather than built — the upgrade path is a `List` +
-/// `ListState` once a menu outgrows a screen.
+/// 60% of the terminal width and 80% of the terminal height (cloudy-tui: Modals → Sizing — content
+/// past 80% of the terminal height makes the modal scrollable). The caller scrolls its content
+/// inside the returned inner rect when it is shorter than the content.
 fn modal_shell(frame: &mut Frame, palette: &Palette, title: &str, content_width: u16, content_height: u16, area: Rect) -> Rect {
     let cap = u16::try_from(u32::from(area.width) * 3 / 5).unwrap_or(u16::MAX);
     let width = content_width.saturating_add(6).min(cap).min(area.width);
-    let height = content_height.saturating_add(4).min(area.height);
+    let height = content_height.saturating_add(4).min(modal_height_cap(area.height));
     let rect = area.centered(Constraint::Length(width), Constraint::Length(height));
     frame.render_widget(Clear, rect);
     let border = Style::new().fg(palette.accent_2);
@@ -984,6 +1022,7 @@ mod tests {
         assert!(buffer[(caret_x + 2, caret_y)].style().add_modifier.contains(Modifier::BOLD));
         assert_eq!(buffer[(caret_x, caret_y + 1)].symbol(), " ", "the unselected row's gutter is blank");
         assert!(!buffer[(caret_x + 2, caret_y + 1)].style().add_modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(caret_x + 2, caret_y + 1)].style().fg, Some(palette.text_dim), "an unselected label renders TEXT_DIM");
 
         // The hotkey rail is the rightmost content cell, TEXT_DIM and never bold.
         let hotkey_x =
@@ -1009,6 +1048,58 @@ mod tests {
     }
 
     #[test]
+    fn the_modal_caps_its_height_at_eighty_percent_of_the_terminal() {
+        let palette = Palette::new(Tier::Full);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let inner = std::cell::Cell::new(Rect::new(0, 0, 0, 0));
+        terminal.draw(|frame| inner.set(modal_shell(frame, &palette, "keys", 10, 100, frame.area()))).unwrap();
+        // 80% of 20 rows is 16; four rows of chrome (border + vertical padding) leave a 12-row interior.
+        assert_eq!(inner.get().height, 12, "content taller than the 80% cap scrolls inside the capped interior");
+    }
+
+    #[test]
+    fn the_help_modal_scrolls_content_past_the_eighty_percent_cap() {
+        let palette = Palette::new(Tier::Full);
+        // Five sections, one row each, is 14 lines — taller than the 7-row interior a 14-row terminal
+        // leaves the modal (80% of 14 is 11, minus 4 chrome).
+        let sections = [
+            HelpSection { title: "first", rows: vec![("q", "back / quit")] },
+            HelpSection { title: "second", rows: vec![("?", "help")] },
+            HelpSection { title: "third", rows: vec![("a", "actions")] },
+            HelpSection { title: "fourth", rows: vec![("t", "toggle")] },
+            HelpSection { title: "fifth", rows: vec![("s", "start")] },
+        ];
+        let lines = help_line_count(&sections);
+        assert_eq!(lines, 14);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal.draw(|frame| render_help_modal(frame, &palette, &sections, 0, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(contains(buffer, "FIRST"), "the top of the content renders at offset zero");
+        assert!(!contains(buffer, "FIFTH"), "the tail is scrolled out of view");
+        assert!(contains(buffer, "┃"), "the scrollbar thumb shows the overflow");
+
+        let max = help_scroll_max(lines, 14) as u16;
+        terminal.draw(|frame| render_help_modal(frame, &palette, &sections, max, frame.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(!contains(buffer, "FIRST"), "scrolling to the bottom hides the head");
+        assert!(contains(buffer, "FIFTH"), "scrolling to the bottom reveals the tail");
+    }
+
+    #[test]
+    fn the_empty_state_action_line_can_name_a_specific_control() {
+        let palette = Palette::new(Tier::Full);
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                empty_state_with_action(frame, &palette, Rect::new(0, 0, 60, 16), "no run yet", glyph::KEY_ENTER, " on start run")
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(contains(buffer, "press ↵ on start run"), "the action line names the chip rather than a bare enter");
+    }
+
+    #[test]
     fn the_help_modal_renders_uppercased_sections_with_accent_hotkeys() {
         let palette = Palette::new(Tier::Full);
         let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
@@ -1016,7 +1107,7 @@ mod tests {
             HelpSection { title: "global", rows: vec![("q", "back / quit"), ("?", "help")] },
             HelpSection { title: "memories", rows: vec![("↑ ↓", "move")] },
         ];
-        terminal.draw(|frame| render_help_modal(frame, &palette, &sections, frame.area())).unwrap();
+        terminal.draw(|frame| render_help_modal(frame, &palette, &sections, 0, frame.area())).unwrap();
         let buffer = terminal.backend().buffer();
 
         assert!(contains(buffer, "KEYS"), "the modal title");

@@ -781,7 +781,7 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     // The empty state names the key that starts the run, centered in the full-height progress
     // panel: 20 interior rows, a 4-row frame, 8 above and 8 below.
     assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
-    assert!(cell_run(buffer, 12).contains("press ↵ to start"), "{:?}", cell_run(buffer, 12));
+    assert!(cell_run(buffer, 12).contains("press ↵ on start run"), "{:?}", cell_run(buffer, 12));
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));
     assert!(!app.chat_media().descended());
 }
@@ -2062,10 +2062,10 @@ fn a_source_with_no_export_names_the_problem_instead_of_inviting_a_run() {
     let buffer = terminal.backend().buffer();
     let text = screen_text(buffer);
     // The empty state names the problem and the fix (the run's own `NoExportId` refusal), the way
-    // the history tab does — never the bare "press ↵ to start" (sweep: empty and error states).
+    // the history tab does — never the empty state's "press ↵ on start run" (sweep: empty and error states).
     assert!(text.contains("no mydata~ export part under"), "{text}");
     assert!(text.contains("export's parts"), "the fix clause renders: {text}");
-    assert!(!text.contains("press ↵ to start"), "a no-export source must not invite a run: {text}");
+    assert!(!text.contains("press ↵ on start run"), "a no-export source must not invite a run: {text}");
 }
 
 #[test]

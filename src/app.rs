@@ -164,7 +164,11 @@ impl RunDefaults {
 #[derive(Debug)]
 pub enum Modal {
     ActionMenu(ActionMenuState),
-    Help,
+    /// The help modal's vertical scroll offset: content taller than the 80%-of-terminal-height cap
+    /// scrolls instead of clipping, and this is the row the viewport starts at.
+    Help {
+        scroll: u16,
+    },
 }
 
 /// The action menu's captured state: the actions available when `a` was pressed, their
@@ -220,6 +224,9 @@ pub struct App {
     history: History,
     account: Account,
     settings: Settings,
+    /// The terminal height the last frame drew at — the help modal's scroll clamp needs it between
+    /// draws, since the key handler has no frame to read a viewport off.
+    terminal_height: u16,
 }
 
 impl App {
@@ -255,6 +262,7 @@ impl App {
             history: History::with_environment(PathBuf::new(), defaults.out_root),
             account: Account::with_environment(PathBuf::new()),
             settings: Settings::with_layers(SettingsLayers::defaults_for(tier)),
+            terminal_height: 0,
         }
     }
 
@@ -582,8 +590,8 @@ impl App {
     }
 
     /// Whether the ACTIVE screen's action menu would list anything (cloudy-tui: Action menu). The
-    /// hint bar and the help modal's `a` row both derive from this single answer, so the two can
-    /// never advertise a key that opens nothing.
+    /// hint bar's `a actions` group derives from this single answer, so it never advertises a key
+    /// that opens nothing; the help modal's `GLOBAL` section lists `a actions` unconditionally.
     #[must_use]
     pub fn has_actions(&self) -> bool {
         match self.active {
@@ -595,14 +603,11 @@ impl App {
     }
 
     /// The help modal's sections for this frame (cloudy-tui: Help modal): the `GLOBAL` universal
-    /// keys, then the active screen's own bound keys named after that screen. Rebuilt each frame,
-    /// so it tracks pane focus exactly like the hint bar.
+    /// keys (`q`/`?`/`a` unconditionally, per the spec), then the active screen's own bound keys
+    /// named after that screen. Rebuilt each frame, so it tracks pane focus exactly like the hint bar.
     #[must_use]
     pub fn help_sections(&self) -> Vec<HelpSection<'static>> {
-        let mut global: Vec<(&'static str, &'static str)> = vec![("q", "back / quit"), ("?", "help")];
-        if self.has_actions() {
-            global.push(("a", "actions"));
-        }
+        let mut global: Vec<(&'static str, &'static str)> = vec![("q", "back / quit"), ("?", "help"), ("a", "actions")];
         global.extend([("← →", "switch tab"), ("⌃c", "quit")]);
 
         let mut sections = vec![HelpSection { title: "global", rows: global }];
@@ -618,6 +623,14 @@ impl App {
             sections.push(HelpSection { title: self.active.label(), rows: screen });
         }
         sections
+    }
+
+    /// The help modal's maximum scroll offset this frame, in rows: its content lines minus the
+    /// viewport the modal shell gives at the last-drawn terminal height. [`crate::tui::widgets::help_scroll_max`]
+    /// holds the arithmetic, shared with the render so the two cannot drift.
+    fn help_max_scroll(&self) -> u16 {
+        let lines = widgets::help_line_count(&self.help_sections());
+        u16::try_from(widgets::help_scroll_max(lines, self.terminal_height)).unwrap_or(u16::MAX)
     }
 
     /// Draws, waits for an event, applies it, ticks, repeats.
@@ -650,6 +663,9 @@ impl App {
 
     fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while self.running {
+            // The help modal's scroll clamp reads the terminal height between draws; `size` is the
+            // same figure the next draw will lay out against.
+            self.terminal_height = terminal.size()?.height;
             {
                 let app = &mut *self;
                 terminal.draw(|frame| shell::render(frame, app))?;
@@ -812,7 +828,7 @@ impl App {
         let editing_input = self.editing_text();
         if !editing_input {
             if matches!(key.code, KeyCode::Char('?')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-                self.modal = Some(Modal::Help);
+                self.modal = Some(Modal::Help { scroll: 0 });
                 return;
             }
             if matches!(key.code, KeyCode::Char('a' | 'A')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
@@ -902,6 +918,9 @@ impl App {
             Pick(&'static str),
         }
 
+        // The help modal's scroll clamp is read before the modal is borrowed mutably, so the arm
+        // can adjust the offset without a second borrow of `self`.
+        let help_max = self.help_max_scroll();
         let outcome = match &mut self.modal {
             Some(Modal::ActionMenu(menu)) => match key.code {
                 KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
@@ -928,7 +947,15 @@ impl App {
                 }
                 _ => Outcome::Keep,
             },
-            Some(Modal::Help) => match key.code {
+            Some(Modal::Help { scroll }) => match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+                    // Clamp against the viewport the next draw will use, so scrolling past the
+                    // bottom cannot leave the offset stuck beyond the real maximum — the render
+                    // re-clamps for display, but the state must not grow past it or `↑` would need
+                    // a press per stale cell before the view moved again.
+                    *scroll = if key.code == KeyCode::Up { (*scroll).saturating_sub(1) } else { (*scroll).saturating_add(1).min(help_max) };
+                    Outcome::Keep
+                }
                 KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Char('?')
                     if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() =>
                 {

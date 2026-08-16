@@ -412,7 +412,7 @@ fn a_latched_hold_self_heals_on_the_next_press_release_pair() {
 fn question_mark_opens_the_help_modal_and_q_closes_it() {
     let mut app = app();
     press(&mut app, KeyCode::Char('?'));
-    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::Help)));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::Help { .. })));
     press(&mut app, KeyCode::Char('q'));
     assert!(app.modal().is_none());
     assert!(!app.is_quit_armed(), "q closes the modal, never arms the quit");
@@ -502,17 +502,18 @@ fn enter_picks_the_selected_action_too() {
 #[test]
 fn the_help_modal_derives_its_sections_from_the_active_screen() {
     let mut app = app();
-    // Overview has no actions and no screen keys: just GLOBAL, without the `a` row.
+    // Overview has no screen keys: just GLOBAL, which lists `q`/`?`/`a` unconditionally (the spec's
+    // GLOBAL section is not gated on the screen having actions).
     let sections = app.help_sections();
     assert_eq!(sections.len(), 1);
     assert_eq!(sections[0].title, "global");
-    assert_eq!(sections[0].rows, [("q", "back / quit"), ("?", "help"), ("← →", "switch tab"), ("⌃c", "quit")]);
+    assert_eq!(sections[0].rows, [("q", "back / quit"), ("?", "help"), ("a", "actions"), ("← →", "switch tab"), ("⌃c", "quit")]);
 
-    // Memories has the run action and its own keys: GLOBAL grows `a`, then the screen section.
+    // Memories has its own keys: GLOBAL stays fixed and the screen section follows it.
     jump(&mut app, '2');
     let sections = app.help_sections();
     assert_eq!(sections.len(), 2);
-    assert!(sections[0].rows.contains(&("a", "actions")), "the menu has an action to name");
+    assert_eq!(sections[0].rows, [("q", "back / quit"), ("?", "help"), ("a", "actions"), ("← →", "switch tab"), ("⌃c", "quit")]);
     assert_eq!(sections[1].title, "memories");
     assert_eq!(sections[1].rows, [("↑ ↓", "move"), ("↵", "start / descend"), ("space", "toggle transcode")]);
 }
