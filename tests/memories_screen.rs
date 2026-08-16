@@ -1422,8 +1422,8 @@ fn descending_drops_the_caret_but_keeps_the_toggle_tint() {
 #[test]
 fn the_disk_free_row_fits_its_wide_value_at_the_form_width_floor() {
     let dir = export_tree("disk-wide", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
-    // 1024 GiB free of 2048 GiB: "1024.0 GiB" + bar + " 50%" is the widest the row gets, and
-    // it must fit the 40-cell side-by-side panel without clipping the trailing percent.
+    // 1024 GiB free of 2048 GiB: "1024.0 GiB" + bar + " 50% used" is the widest the row gets, and
+    // it must fit the 40-cell side-by-side panel without clipping the trailing used percent.
     // 1024 GiB prints as "1.0 TiB", so the WIDEST value is the one just under a unit boundary:
     // 511.9 GiB free of 1024.0 GiB reads "511.9 GiB" — 50% used, one decimal, a 9-cell value.
     let mut app = App::new(Tier::Full).with_source_environment(
@@ -1440,13 +1440,13 @@ fn the_disk_free_row_fits_its_wide_value_at_the_form_width_floor() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let disk_row = cell_run(terminal.backend().buffer(), 4);
-    assert!(disk_row.contains("50%"), "{disk_row}");
+    assert!(disk_row.contains("50% used"), "{disk_row}");
     assert!(disk_row.contains("511.9 GiB"), "{disk_row}");
-    // The whole row survives at the pinned side-by-side width: the percent renders whole with
+    // The whole row survives at the pinned side-by-side width: the used percent renders whole with
     // at least one cell of slack before the setup panel's border — a clipped "%" would sit
     // flush against it.
     let panel_gap = disk_row.split("│").nth(1).unwrap().trim_end();
-    assert!(panel_gap.ends_with("50%"), "{disk_row}");
+    assert!(panel_gap.ends_with("50% used"), "{disk_row}");
 }
 
 #[test]

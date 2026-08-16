@@ -247,8 +247,10 @@ pub(crate) fn disk_free_value(palette: &Palette, environment: &Environment, budg
     // 60.5 rounds to 61 and reports 39% used, where subtracting first gives 39.5 and reports 40%.
     let free_percent = (free as f64 / total as f64 * 100.0).round().clamp(0.0, 100.0) as u8;
     let used = 100 - free_percent;
+    // The byte figure reads as free from the row label ("disk free"); the percent needs its own
+    // "used" label so the two shares cannot read as one number (audit GAP).
     let free_text = binary_bytes(free);
-    let percent = format!("{used}%");
+    let percent = format!("{used}% used");
     // One space either side of the bar; the bar shrinks first.
     let bar_cells = budget.saturating_sub(cells(&free_text) + cells(&percent) + 3).min(DISK_BAR_CELLS);
     let fill = usize::from(used) * bar_cells / 100;
@@ -795,7 +797,8 @@ mod tests {
 
     #[test]
     fn the_disk_bar_shows_the_used_share_of_the_disk() {
-        // 3 of 5 GiB free is 40% used: the usage bar fills 3 of its 9 cells.
+        // 3 of 5 GiB free is 40% used: the usage bar fills 2 of its 5 cells (the elastic bar
+        // shrinks to make room for the " used" label at this budget).
         let environment = Environment {
             ffmpeg: None,
             vlc: None,
@@ -804,7 +807,7 @@ mod tests {
         };
         let value = disk_free_value(&Palette::new(Tier::Full), &environment, 23);
         let text: String = value.iter().map(|span| span.content.as_ref()).collect();
-        assert_eq!(text, "3.0 GiB ███░░░░░░ 40%");
+        assert_eq!(text, "3.0 GiB ██░░░ 40% used");
     }
 
     /// `Environment`'s fields are public, so a free figure larger than the total is a value a caller
@@ -821,7 +824,7 @@ mod tests {
         let impossible = Environment { ffmpeg: None, vlc: None, available_space: Some(9_000), total_space: Some(1_000) };
         let value = disk_free_value(&palette, &impossible, 23);
         let text: String = value.iter().map(|span| span.content.as_ref()).collect();
-        assert!(text.ends_with("0%"), "more free than total reads as nothing used rather than panicking: {text}");
+        assert!(text.ends_with("0% used"), "more free than total reads as nothing used rather than panicking: {text}");
 
         // The ordering witness, and it only witnesses anything at an EXACTLY representable `.5`
         // share. `100 - round(x)` and `round(100 - x)` agree everywhere else, so a share of
@@ -831,7 +834,7 @@ mod tests {
         let share = |free: u64, total: u64| {
             let environment = Environment { ffmpeg: None, vlc: None, available_space: Some(free), total_space: Some(total) };
             let text: String = disk_free_value(&palette, &environment, 23).iter().map(|span| span.content.as_ref()).collect();
-            text.rsplit(' ').next().unwrap().to_owned()
+            text.rsplit(' ').nth(1).unwrap().to_owned()
         };
         assert_eq!(share(5, 8), "37%", "the free share rounds up before the subtraction, so used is 37 and not 38");
         assert_eq!(share(3, 8), "62%", "and the same in the other direction: 62, not 63");

@@ -979,7 +979,7 @@ mod tests {
         let value = disk_free_value(&Palette::new(crate::tui::theme::Tier::Full), &environment, budget);
         let width: usize = value.iter().map(Span::width).sum();
         assert!(width <= budget, "row is {width} cells, over the {budget}-cell budget");
-        assert!(value.last().unwrap().content.as_ref().ends_with('%'), "the percent survives");
+        assert!(value.last().unwrap().content.as_ref().ends_with("used"), "the used percent survives");
     }
 
     #[test]
