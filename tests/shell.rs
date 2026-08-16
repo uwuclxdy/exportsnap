@@ -600,6 +600,26 @@ fn the_footer_names_the_modal_s_keys_while_a_modal_owns_input() {
 }
 
 #[test]
+fn the_help_hint_advertises_scroll_keys_only_while_the_modal_scrolls() {
+    // The memories screen's help modal holds 11 content lines (GLOBAL 5 + memories 3, two section
+    // headers, one separator): at 40x20 its 12-row viewport fits them, so the hint reads
+    // close/cancel/back alone; at 40x14 the 7-row viewport does not, and the compact `↑↓` run
+    // joins the hint (cloudy-tui: Hint bar → density allowance for the compact run, modals keep
+    // the spaced form in their own copy).
+    let mut fits = App::new(Tier::Full);
+    on_tab_in(&mut fits, Tab::Memories);
+    press(&mut fits, KeyCode::Char('?'));
+    let terminal = draw(&mut fits, 40, 20);
+    assert_eq!(row(terminal.backend().buffer(), 19).trim_end(), " ? close   esc cancel   q back");
+
+    let mut scrolls = App::new(Tier::Full);
+    on_tab_in(&mut scrolls, Tab::Memories);
+    press(&mut scrolls, KeyCode::Char('?'));
+    let terminal = draw(&mut scrolls, 40, 14);
+    assert_eq!(row(terminal.backend().buffer(), 13).trim_end(), " ↑↓ move   ? close   esc cancel   q back");
+}
+
+#[test]
 fn the_footer_alert_replaces_the_hint_bar_in_place_while_armed() {
     let mut app = App::new(Tier::Full);
     press(&mut app, KeyCode::Char('q'));

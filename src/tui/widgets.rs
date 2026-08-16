@@ -694,6 +694,15 @@ pub(crate) fn help_scroll_max(lines: usize, area_height: u16) -> usize {
     lines.saturating_sub(viewport)
 }
 
+/// Whether a help modal built from `sections` scrolls at `area_height`: its content lines exceed
+/// the viewport the modal shell leaves at that height (cloudy-tui: Modals → Sizing — content past
+/// 80% of the terminal height makes the modal scrollable). The footer hint bar advertises the
+/// scroll keys off this single answer, so the hint and the render cannot disagree about whether
+/// `↑`/`↓` do anything this frame.
+pub(crate) fn help_scrollable(sections: &[HelpSection<'_>], area_height: u16) -> bool {
+    help_scroll_max(help_line_count(sections), area_height) > 0
+}
+
 /// The shared modal shell (cloudy-tui: Modals): a rounded `ACCENT_2` border, an italic-only
 /// UPPERCASE title in `TEXT_DIM`, and the base `BG` interior — no backdrop, the screen behind is
 /// left untouched except the modal's own rect, which is cleared before the box draws. Sized to
@@ -1087,6 +1096,23 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert!(!contains(buffer, "FIRST"), "scrolling to the bottom hides the head");
         assert!(contains(buffer, "FIFTH"), "scrolling to the bottom reveals the tail");
+    }
+
+    #[test]
+    fn the_help_scrollable_predicate_turns_at_the_viewport_boundary() {
+        // The same 14-line content: at a 14-row terminal the viewport is 7 (80% of 14 is 11, minus
+        // 4 chrome), so it scrolls; at 30 rows the viewport is 20 and it fits. The footer hint bar
+        // advertises the scroll keys off this single answer.
+        let sections = [
+            HelpSection { title: "first", rows: vec![("q", "back / quit")] },
+            HelpSection { title: "second", rows: vec![("?", "help")] },
+            HelpSection { title: "third", rows: vec![("a", "actions")] },
+            HelpSection { title: "fourth", rows: vec![("t", "toggle")] },
+            HelpSection { title: "fifth", rows: vec![("s", "start")] },
+        ];
+        assert_eq!(help_line_count(&sections), 14);
+        assert!(help_scrollable(&sections, 14), "14 lines over a 7-row viewport scroll");
+        assert!(!help_scrollable(&sections, 30), "the same 14 lines fit a 20-row viewport");
     }
 
     #[test]

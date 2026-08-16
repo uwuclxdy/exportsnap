@@ -70,7 +70,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // input, and its keys are what the footer must describe this frame.
         match modal {
             Modal::ActionMenu(_) => footer::action_menu_hints(&palette, footer_area.width),
-            Modal::Help { .. } => footer::help_hints(&palette, footer_area.width),
+            Modal::Help { .. } => {
+                footer::help_hints(&palette, widgets::help_scrollable(&app.help_sections(), area.height), footer_area.width)
+            }
         }
     } else if app.descended() {
         // The history formats pane binds keys the generic descended set does not advertise —

@@ -145,11 +145,22 @@ pub(crate) fn action_menu_hints(palette: &Palette, width: u16) -> Line<'static> 
     hint_line(palette, &trim_hints(&[(&up_down, "move"), (&enter, "pick"), ("esc", "cancel"), ("q", "back")], width))
 }
 
-/// The hint set while the help modal owns input: `?`, `esc` and `q` all close it. No universal
-/// `a actions` / `? help` pair and no switch/quit group — the modal owns every key this frame, so
-/// the labels name what those keys actually do now.
-pub(crate) fn help_hints(palette: &Palette, width: u16) -> Line<'static> {
-    hint_line(palette, &trim_hints(&[("?", "close"), ("esc", "cancel"), ("q", "back")], width))
+/// The hint set while the help modal owns input: `?`, `esc` and `q` all close it, and the compact
+/// `↑↓` run scrolls it — but only while the content is taller than the viewport, so the hint never
+/// advertises a scroll key that does nothing this frame (cloudy-tui: a hint advertises only keys
+/// that do something; Hint bar → density allowance for the compact run). No universal `a actions`
+/// / `? help` pair and no switch/quit group — the modal owns every key this frame, so the labels
+/// name what those keys actually do now.
+pub(crate) fn help_hints(palette: &Palette, scrollable: bool, width: u16) -> Line<'static> {
+    let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
+    let mut groups: Vec<(&str, &str)> = Vec::new();
+    if scrollable {
+        groups.push((up_down.as_str(), "move"));
+    }
+    groups.push(("?", "close"));
+    groups.push(("esc", "cancel"));
+    groups.push(("q", "back"));
+    hint_line(palette, &trim_hints(&groups, width))
 }
 
 /// The history tab's top-level hint set: the shell's switch and quit groups, plus the picker's
