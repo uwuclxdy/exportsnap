@@ -551,16 +551,20 @@ fn value_spans(palette: &Palette, value: &Value<'_>, budget: usize, now: Option<
     vec![span]
 }
 
-/// The contract's age rule (cloudy-tui Time formatting): relative under 30 days — the largest
-/// whole unit with a count of at least one — and the absolute ISO date at 30 days and past. A
-/// stamp the calendar rejects has no elapsed time and a future stamp has a nonsense negative
-/// age; both render the absolute date. `now` is the caller's clock, so the tests pin both arms.
+/// The contract's age rule (cloudy-tui Time formatting): `now` under a minute, relative under 30
+/// days — the largest whole unit with a count of at least one — and the absolute ISO date at 30
+/// days and past. A stamp the calendar rejects has no elapsed time and a future stamp has a
+/// nonsense negative age; both render the absolute date. `now` is the caller's clock, so the
+/// tests pin both arms.
 fn stamp_text(stamp: Timestamp, now: Timestamp) -> String {
     let Some(age) = age_seconds(stamp, now) else { return iso_date(stamp) };
     if age < 0 {
         return iso_date(stamp);
     }
     let minutes = age / 60;
+    if minutes == 0 {
+        return "now".to_owned();
+    }
     if minutes < 60 {
         return format!("{minutes}m ago");
     }
@@ -705,8 +709,8 @@ mod tests {
     fn the_age_rule_renders_relative_under_thirty_days_and_iso_at_thirty() {
         let now = Timestamp::parse(crate::export::model::Field::Date, "2026-08-13 12:00:00 UTC").unwrap();
         let stamp = |s: &str| Timestamp::parse(crate::export::model::Field::Date, s).unwrap();
-        // A minute's floor: under a minute is "0m ago", not an ISO date.
-        assert_eq!(stamp_text(stamp("2026-08-13 11:59:01 UTC"), now), "0m ago");
+        // Sub-minute age renders `now`, not a zero-minute relative form or an ISO date.
+        assert_eq!(stamp_text(stamp("2026-08-13 11:59:01 UTC"), now), "now");
         assert_eq!(stamp_text(stamp("2026-08-13 11:55:00 UTC"), now), "5m ago");
         assert_eq!(stamp_text(stamp("2026-08-13 10:00:00 UTC"), now), "2h ago");
         assert_eq!(stamp_text(stamp("2026-08-10 12:00:00 UTC"), now), "3d ago");
