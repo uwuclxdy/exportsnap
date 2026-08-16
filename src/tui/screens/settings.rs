@@ -4,11 +4,12 @@
 //! # The layers
 //!
 //! Every row's effective value is derived at render time from the raw layers — flag, file,
-//! detection, default (decision 66) — never copied per branch. That is what lets the
-//! provenance clause say where a value CAME from: the flag and the file are handed in as the
-//! binary's startup values, detection is re-answered per row off the probe capture, and the
-//! two defaults are the runs' own (the tier sniff's `Compatible`, the out root's source
-//! derivation, transcode on, overlay both).
+//! detection, default (decision 66) — never copied per branch. That is what lets the value's
+//! color say whether it is SET: the flag and the file are handed in as the binary's startup
+//! values, detection is re-answered per row off the probe capture, and the two defaults are
+//! the runs' own (the tier sniff's `Compatible`, the out root's source derivation, transcode
+//! on, overlay both). A set value reads `ACCENT`; an empty or default value reads the faint
+//! placeholder tier.
 //!
 //! The file layer is the one the form WRITES. Every commit rounds through
 //! [`crate::config::write`] and replaces `layers.config` in place on success, so the rows keep
@@ -21,8 +22,8 @@
 //! guards and the footer hint set are the only outside readers. `enter` opens a path row for
 //! editing (`✎` + the native cursor) and acts on the three state rows; `esc` or moving to
 //! another row exits an edit, discarding the draft (cloudy-tui: Text input — edit off by
-//! default, `enter` toggles it, `esc` exits). A flag-pinned row refuses the edit exactly
-//! like a pinned state row refuses its press: the ` · flag` clause is the one announcement.
+//! default, `enter` toggles it, `esc` exits). A flag-pinned row is a Disabled row: inert and
+//! rendered wholly `TEXT_FAINT`, with a `└ reason` tooltip naming the pin on focus.
 
 use std::path::{Path, PathBuf};
 
@@ -39,16 +40,15 @@ use crate::export::local_fix::default_out_root;
 use crate::tui::format::{cells, head_ellipsis, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, Tier, glyph};
-use crate::tui::widgets::{self, CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycle_options, form_label, panel, tint_to_edge};
+use crate::tui::widgets::{self, CARET_GUTTER, LABEL_GAP, PanelStyle, caret, cycle_options, form_label, panel, tint_to_edge, tooltip};
 
 // ---- layout budgets ----
 
-/// The narrow floor of a text row's value slot: the fewest cells it may occupy before the clause
-/// gap. The ffmpeg path row is the widest text row — the longest label with the widest clause —
-/// and it must fit the 53-cell interior a 57-column terminal leaves (`57 - CHROME_COLUMNS`): the
-/// caret's 2, the label's 11, the label gap's 2 and the `   · detection` clause's 14 leave 24.
-/// A wider panel raises the slot's ceiling so a longer path shows whole (see [`value_budget`]);
-/// this only stops it shrinking below the 57-column case.
+/// The narrow floor of a text row's value slot: the fewest cells it may occupy. The ffmpeg path
+/// row is the widest text row — the longest label at 11 cells — and its value slot takes what the
+/// panel leaves after the caret's 2, the label's 11 and the label gap's 2. A wider panel raises
+/// the slot's ceiling so a longer path shows whole (see [`value_budget`]); this only stops it
+/// shrinking below the floor.
 const VALUE_CELLS: usize = 24;
 
 /// The overlay cycle's width — every mode's word, the 2-space gaps, and the two brackets a
@@ -71,28 +71,19 @@ const fn cycle_cells() -> usize {
     total
 }
 
-/// Cells between the value slot and the provenance clause. The contract pins cycle options
-/// at exactly 2-space gaps and its trailing informational chip (the stepper's `recommended
-/// N`) sits at 3+, so the clause takes 3 — one more than an option gap — to keep
-/// `   · file` from reading as a fourth option.
-const TAG_GAP: usize = 3;
-
 /// The placeholder an empty field reads as: the ffmpeg row's honest answer when neither the file
 /// nor the probe found the tool. Rendered in the `TEXT_FAINT` placeholder tier, never the `ACCENT`
 /// a real value takes (cloudy-tui: Input row — an empty field shows a faint placeholder).
 const NOT_FOUND: &str = "not found";
 
 /// The form panel's interior cells at its widest row, derived per row rather than summed from
-/// the widest label, value and clause: no row carries all three at once, and the sum
-/// overestimates by two — which would blank the form at 57 columns. The ffmpeg path row
-/// (widest label with the widest clause) and the focused overlay cycle (widest value) both
-/// bind at 53.
+/// the widest label and value: no row carries both at once. The focused overlay cycle (widest
+/// value) is what binds it.
 const FORM_INTERIOR: usize = widest_row_cells();
 
 /// The narrowest width the polish pass verified: 57 columns minus the panel's chrome. The
 /// widest row must fit its interior or the whole-or-not-at-all gate blanks the form at exactly
-/// the width that has to stay readable; `the_form_renders_at_57_columns_with_the_clause_gap`
-/// pins the rows themselves.
+/// the width that has to stay readable.
 const _: () = assert!(FORM_INTERIOR <= 57 - widgets::CHROME_COLUMNS as usize);
 
 const fn widest_row_cells() -> usize {
@@ -100,7 +91,7 @@ const fn widest_row_cells() -> usize {
     let mut index = 0;
     while index < FormRow::ALL.len() {
         let row = FormRow::ALL[index];
-        let width = CARET_GUTTER + row.label().len() + LABEL_GAP + row_value_cells(row) + row_clause_cells(row);
+        let width = CARET_GUTTER + row.label().len() + LABEL_GAP + row_value_cells(row);
         if width > widest {
             widest = width;
         }
@@ -121,17 +112,6 @@ const fn row_value_cells(row: FormRow) -> usize {
         FormRow::Transcode => 4,
         FormRow::Overlay => cycle_cells(),
     }
-}
-
-/// The widest clause a row can carry — the gap, the `·` and the word — except the ffmpeg row
-/// with nothing at all, which renders no clause rather than inventing one.
-const fn row_clause_cells(row: FormRow) -> usize {
-    let word = match row {
-        FormRow::OutputDir => "default",
-        FormRow::Theme | FormRow::Ffmpeg => "detection",
-        FormRow::Transcode | FormRow::Overlay => "default",
-    };
-    TAG_GAP + 2 + word.len()
 }
 
 /// The form scrolls with the focus below the height where all five rows fit (see `render`),
@@ -172,31 +152,6 @@ impl FormRow {
 
     fn index(self) -> usize {
         Self::ALL.iter().position(|row| *row == self).unwrap_or(0)
-    }
-}
-
-/// Which raw layer a row's effective value comes from, derived from the layers rather than
-/// copied per branch — a flag that wins reports `Flag` whether or not the file also holds a
-/// value, because decision 66's precedence IS the derivation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Provenance {
-    Flag,
-    File,
-    Detection,
-    Default,
-}
-
-impl Provenance {
-    /// The lowercase word the row's clause spells. Every row carries the ` · ` clause except
-    /// the ffmpeg row with nothing at all, which renders no clause rather than inventing a
-    /// word for "nothing".
-    fn word(self) -> &'static str {
-        match self {
-            Self::Flag => "flag",
-            Self::File => "file",
-            Self::Detection => "detection",
-            Self::Default => "default",
-        }
     }
 }
 
@@ -360,11 +315,11 @@ impl Settings {
     ///
     /// A flag-pinned row refuses to open at all — the state rows' policy (commit_cycle's
     /// guard): an editor over the flag's value would let a commit gain the file a line the
-    /// row never shows, since it keeps reading ` · flag`, which is the silent write the
-    /// polish pass closes. The clause names the pin; the press is inert.
+    /// row never shows, which is the silent write the polish pass closes. The row is a Disabled
+    /// row — inert, and its `└ reason` tooltip names the pin; the press is inert.
     fn begin_edit(&mut self, row: FormRow) {
         debug_assert!(matches!(row, FormRow::OutputDir | FormRow::Ffmpeg), "{row:?}");
-        if self.provenance(row) == Some(Provenance::Flag) {
+        if self.pin_reason(row).is_some() {
             return;
         }
         let draft = match row {
@@ -415,7 +370,7 @@ impl Settings {
     /// session on a pinned row, so a live session on one cannot exist — the guard still
     /// refuses the write itself, so no route gains the file a line from a pinned row's commit.
     fn commit_input(&mut self, row: FormRow, draft: String) {
-        if self.provenance(row) == Some(Provenance::Flag) {
+        if self.pin_reason(row).is_some() {
             return;
         }
         let mut config = self.layers.config.clone();
@@ -430,9 +385,9 @@ impl Settings {
     /// Cycles the focused state row, writing the next value after the EFFECTIVE one. A row the
     /// flag pins writes nothing: the press would write the flag's own successor over the same
     /// constant, churning the file under a value the row never shows — so the guard below
-    /// makes it inert, and the row's ` · flag` clause names the pin.
+    /// makes it inert, and the row is a Disabled row whose `└ reason` tooltip names the pin.
     fn commit_cycle(&mut self, row: FormRow) {
-        if self.provenance(row) == Some(Provenance::Flag) {
+        if self.pin_reason(row).is_some() {
             return;
         }
         let mut config = self.layers.config.clone();
@@ -507,51 +462,28 @@ impl Settings {
         self.layers.config.overlay_mode.unwrap_or_default()
     }
 
-    /// The row's provenance clause, derived from the raw layers at render time so a commit
-    /// shows its effect immediately: the file layer moves and the clause re-derives with it.
-    fn provenance(&self, row: FormRow) -> Option<Provenance> {
+    /// Why the row's value is pinned by a CLI flag, `None` when it is not — the Disabled-row
+    /// tooltip's reason and the inert-row guards both read this one answer, so the two cannot
+    /// disagree (cloudy-tui: Disabled row — the `└ reason` tooltip renders only on focus).
+    fn pin_reason(&self, row: FormRow) -> Option<&'static str> {
         match row {
-            FormRow::OutputDir => {
-                if self.layers.cli_out.is_some() {
-                    Some(Provenance::Flag)
-                } else if self.layers.config.out_dir.is_some() {
-                    Some(Provenance::File)
-                } else {
-                    Some(Provenance::Default)
-                }
-            }
-            FormRow::Theme => {
-                if self.layers.cli_tier.is_some() {
-                    Some(Provenance::Flag)
-                } else if self.layers.config.theme.is_some() {
-                    Some(Provenance::File)
-                } else {
-                    Some(Provenance::Detection)
-                }
-            }
-            FormRow::Ffmpeg => {
-                if self.layers.config.ffmpeg_path.is_some() {
-                    Some(Provenance::File)
-                } else if self.layers.detected_ffmpeg.is_some() {
-                    Some(Provenance::Detection)
-                } else {
-                    None
-                }
-            }
-            FormRow::Transcode => {
-                if self.layers.config.transcode.is_some() {
-                    Some(Provenance::File)
-                } else {
-                    Some(Provenance::Default)
-                }
-            }
-            FormRow::Overlay => {
-                if self.layers.config.overlay_mode.is_some() {
-                    Some(Provenance::File)
-                } else {
-                    Some(Provenance::Default)
-                }
-            }
+            FormRow::OutputDir => self.layers.cli_out.is_some().then_some("set by --out flag"),
+            FormRow::Theme => self.layers.cli_tier.is_some().then_some("set by --theme flag"),
+            FormRow::Ffmpeg | FormRow::Transcode | FormRow::Overlay => None,
+        }
+    }
+
+    /// Whether the row's effective value is explicitly set — a flag or the file named it — or a
+    /// fallback (a default, detection, or nothing). Replaces the provenance clause: a set value
+    /// reads `ACCENT`, a fallback reads the faint placeholder tier (the value's color carries the
+    /// one distinction the clause used to spell).
+    fn set_value(&self, row: FormRow) -> bool {
+        match row {
+            FormRow::OutputDir => self.layers.cli_out.is_some() || self.layers.config.out_dir.is_some(),
+            FormRow::Theme => self.layers.cli_tier.is_some() || self.layers.config.theme.is_some(),
+            FormRow::Ffmpeg => self.layers.config.ffmpeg_path.is_some(),
+            FormRow::Transcode => self.layers.config.transcode.is_some(),
+            FormRow::Overlay => self.layers.config.overlay_mode.is_some(),
         }
     }
 }
@@ -605,9 +537,9 @@ fn option_path(draft: &str) -> Option<PathBuf> {
 /// The draft's visible window, in display cells: `start` is the first visible char and
 /// `caret_cells` the caret's display-cell offset within the window. The model counts the
 /// caret in chars ([`EditSession::caret`]); a wide char (CJK, emoji) is 2 cells, so a char
-/// count would place the native cursor mid-char and could push the provenance clause past
-/// the slot's edge into the panel padding (cloudy-tui: the model tracks a character column,
-/// the render converts to display cells before placing the native cursor).
+/// count would place the native cursor mid-char and could push the value past the slot's edge
+/// into the panel padding (cloudy-tui: the model tracks a character column, the render
+/// converts to display cells before placing the native cursor).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DraftWindow {
     /// Char index the window starts at.
@@ -747,25 +679,26 @@ pub fn render(frame: &mut Frame, palette: &Palette, settings: &Settings, area: R
     if usize::from(inner.width) < FORM_INTERIOR {
         return;
     }
-    // The form scrolls with the focus once the rows outgrow the panel's interior, so the
-    // caret row stays on screen below the shell's compact height: the view starts at an
-    // offset that keeps the focused row last, and only slides once the focus walks past the
-    // visible span (cloudy-tui: Text input — the cursor marks the caret, which must sit on a
-    // row the panel actually draws).
-    let visible_rows = usize::from(inner.height).min(FormRow::ALL.len());
+    // The form scrolls with the focus once the rows (plus a pinned Disabled row's tooltip)
+    // outgrow the panel's interior: the view keeps the focused row's block — the row, and its
+    // `└ reason` tooltip when it is pinned — visible, sliding only once the focus walks past
+    // the span (cloudy-tui: Text input — the cursor marks the caret, which must sit on a row
+    // the panel actually draws).
+    let rows = form_panel(palette, settings, usize::from(inner.width));
+    let visible_rows = usize::from(inner.height).min(rows.len());
     if visible_rows == 0 {
         return;
     }
-    let offset = (settings.form_focus as isize - (visible_rows as isize - 1))
-        .max(0)
-        .min(FormRow::ALL.len() as isize - visible_rows as isize) as usize;
-    let rows = form_panel(palette, settings, usize::from(inner.width)).into_iter().skip(offset).take(visible_rows).collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(rows), inner);
+    let tooltip = settings.pin_reason(FormRow::ALL[settings.form_focus]).is_some();
+    let block_end = settings.form_focus + usize::from(tooltip);
+    let offset = (block_end as isize - (visible_rows as isize - 1)).max(0).min(rows.len() as isize - visible_rows as isize) as usize;
+    let visible = rows.into_iter().skip(offset).take(visible_rows).collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible), inner);
 
     // The native cursor sits at the caret while a text input is being edited (cloudy-tui:
     // Text input — the terminal's own cursor marks the position). Nothing sets one otherwise.
     if let Some(session) = &settings.editing {
-        let budget = value_budget(session.row, settings.provenance(session.row), usize::from(inner.width));
+        let budget = value_budget(session.row, usize::from(inner.width));
         let window = draft_window(&session.draft, session.caret, budget);
         let value_x = inner.x + (CARET_GUTTER + cells(session.row.label()) + LABEL_GAP + window.caret_cells) as u16;
         // The offset never reaches past the caret row: it clamps at the focus, and while a
@@ -778,11 +711,31 @@ pub fn render(frame: &mut Frame, palette: &Palette, settings: &Settings, area: R
 }
 
 fn form_panel(palette: &Palette, settings: &Settings, width: usize) -> Vec<Line<'static>> {
-    FormRow::ALL.into_iter().map(|row| form_row(palette, settings, row, width)).collect()
+    let mut rows = Vec::with_capacity(FormRow::ALL.len() + 1);
+    for row in FormRow::ALL {
+        rows.extend(form_row(palette, settings, row, width));
+    }
+    rows
 }
 
-fn form_row(palette: &Palette, settings: &Settings, row: FormRow, width: usize) -> Line<'static> {
+fn form_row(palette: &Palette, settings: &Settings, row: FormRow, width: usize) -> Vec<Line<'static>> {
     let focused = settings.form_focus == row.index();
+    if let Some(reason) = settings.pin_reason(row) {
+        let line = disabled_row(palette, settings, row, focused, width);
+        return if focused { vec![line, tooltip(palette, reason)] } else { vec![line] };
+    }
+    vec![plain_row(palette, settings, row, focused, width)]
+}
+
+/// The value slot a text row gets at `width`: the interior cells left after the caret, the label
+/// and the gap, floored at [`VALUE_CELLS`].
+fn value_budget(row: FormRow, width: usize) -> usize {
+    width.saturating_sub(CARET_GUTTER + cells(row.label()) + LABEL_GAP).max(VALUE_CELLS)
+}
+
+/// One ordinary (non-pinned) row: the text rows build their own value, the cycle and toggle rows
+/// hand pre-built spans.
+fn plain_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool, width: usize) -> Line<'static> {
     match row {
         FormRow::OutputDir => {
             input_row(palette, settings, row, focused, Some(settings.effective_out_root().to_string_lossy().into_owned()), width)
@@ -793,39 +746,71 @@ fn form_row(palette: &Palette, settings: &Settings, row: FormRow, width: usize) 
         FormRow::Theme => {
             let words = Tier::ALL.map(Tier::as_name);
             let selected = Tier::ALL.iter().position(|tier| *tier == settings.effective_tier()).unwrap_or(0);
-            state_row(palette, settings, row, focused, cycle_options(palette, &words, selected, focused), width)
+            state_row(palette, row, focused, cycle_options(palette, &words, selected, focused), width)
         }
         FormRow::Overlay => {
             let words = OverlayMode::ALL.map(OverlayMode::as_word);
             let selected = OverlayMode::ALL.iter().position(|mode| *mode == settings.effective_overlay()).unwrap_or(0);
-            state_row(palette, settings, row, focused, cycle_options(palette, &words, selected, focused), width)
+            state_row(palette, row, focused, cycle_options(palette, &words, selected, focused), width)
         }
-        FormRow::Transcode => state_row(palette, settings, row, focused, palette.toggle(settings.effective_transcode()), width),
+        FormRow::Transcode => state_row(palette, row, focused, palette.toggle(settings.effective_transcode()), width),
     }
 }
 
-/// The value slot a text row gets at `width`: the interior cells left after the caret, the label,
-/// the gap and the row's actual provenance clause, floored at [`VALUE_CELLS`] so the 57-column
-/// form keeps its widest row whole. A row with no clause (ffmpeg with nothing detected) gets all
-/// of the remaining width for its value.
-fn value_budget(row: FormRow, provenance: Option<Provenance>, width: usize) -> usize {
-    let clause = provenance.map_or(0, |provenance| TAG_GAP + 2 + provenance.word().len());
-    width.saturating_sub(CARET_GUTTER + cells(row.label()) + LABEL_GAP + clause).max(VALUE_CELLS)
+/// A flag-pinned row (contract: Disabled row): wholly `TEXT_FAINT`, focusable-but-inert, and the
+/// caret still lands. The `└ reason` tooltip is the caller's, appended only while focused.
+fn disabled_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool, width: usize) -> Line<'static> {
+    let faint = Style::new().fg(palette.text_faint);
+    let value: Vec<Span<'static>> = match row {
+        FormRow::OutputDir => {
+            let value = settings.effective_out_root().to_string_lossy().into_owned();
+            vec![Span::styled(head_ellipsis(&value, value_budget(row, width)), faint)]
+        }
+        FormRow::Theme => {
+            let words = Tier::ALL.map(Tier::as_name);
+            let selected = Tier::ALL.iter().position(|tier| *tier == settings.effective_tier()).unwrap_or(0);
+            disabled_cycle(palette, &words, selected)
+        }
+        // No flag layer: these three are never pinned, so `disabled_row` never reaches them.
+        FormRow::Ffmpeg | FormRow::Transcode | FormRow::Overlay => Vec::new(),
+    };
+    let mut spans = vec![caret(palette, focused), Span::styled(row.label().to_owned(), faint), Span::raw("  ")];
+    spans.extend(value);
+    let line = Line::from(spans);
+    if focused { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
 }
 
-/// One path row. Blurred, the effective value reads in `ACCENT` — an actionable affordance,
-/// the chat-media form's path treatment; focused, `TEXT`. An empty field — `None`, the ffmpeg
-/// row with nothing found — reads the faint [`NOT_FOUND`] placeholder instead, since it is an
-/// absence, not a value. A live edit swaps in the draft window with the `✎` glyph for the
-/// caret; an empty draft shows the effective value as an ellipsised, `…`-marked placeholder
-/// naming what committing empty would apply, a draft in `TEXT` beside it. The value is ragged
-/// like a state row's: it takes its natural width up to [`value_budget`] and the provenance
-/// clause trails it at its 3-cell gap, never padded flush against the panel edge.
+/// The cycle control on a pinned (Disabled) row: every word `TEXT_FAINT`, the selected word always
+/// bracketed. A disabled row carries no color to mark its selection — the whole row is faint — so
+/// the bracket is the content cue that keeps the effective tier readable when the row is blurred
+/// and under `NO_COLOR`, where an attribute dies (design.md: anything that must stay legible
+/// without color carries a content cue, not an attribute).
+fn disabled_cycle(palette: &Palette, words: &[&'static str], selected: usize) -> Vec<Span<'static>> {
+    let faint = Style::new().fg(palette.text_faint);
+    let mut spans = Vec::with_capacity(words.len() * 2);
+    for (index, word) in words.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let shown = if index == selected { format!("[{word}]") } else { (*word).to_owned() };
+        spans.push(Span::styled(shown, faint));
+    }
+    spans
+}
+
+/// One path row. The effective value reads `ACCENT` when it is set — a flag or the file named it —
+/// and the faint placeholder tier otherwise (an empty or default value), so the value's color, not
+/// a clause, says where it came from. An empty field — `None`, the ffmpeg row with nothing found —
+/// reads the faint [`NOT_FOUND`] placeholder. A live edit swaps in the draft window with the `✎`
+/// glyph for the caret; an empty draft shows the effective value as an ellipsised, `…`-marked
+/// placeholder naming what committing empty would apply, a draft in `TEXT` beside it. The value is
+/// ragged like a state row's: it takes its natural width up to [`value_budget`], never padded flush
+/// against the panel edge.
 fn input_row(
     palette: &Palette, settings: &Settings, row: FormRow, focused: bool, effective: Option<String>, width: usize,
 ) -> Line<'static> {
     let editing = settings.editing.as_ref().filter(|session| session.row == row);
-    let budget = value_budget(row, settings.provenance(row), width);
+    let budget = value_budget(row, width);
     // The edit glyph replaces the caret while the field is being edited (cloudy-tui: Text
     // input — `✎` plus the native cursor; the caret returns when the edit exits).
     let caret_span = if editing.is_some() {
@@ -852,47 +837,24 @@ fn input_row(
         } else {
             Span::styled(window, Style::new().fg(palette.text))
         }
+    } else if settings.set_value(row) {
+        Span::styled(head_ellipsis(effective.as_deref().unwrap_or(NOT_FOUND), budget), Style::new().fg(palette.accent))
     } else {
-        match &effective {
-            // A real value reads ACCENT blurred / TEXT focused; the empty field's placeholder
-            // stays faint whatever the focus, because it is an absence rather than a value.
-            Some(value) => Span::styled(head_ellipsis(value, budget), Style::new().fg(if focused { palette.text } else { palette.accent })),
-            None => Span::styled(head_ellipsis(NOT_FOUND, budget), Style::new().fg(palette.text_faint)),
-        }
+        Span::styled(head_ellipsis(effective.as_deref().unwrap_or(NOT_FOUND), budget), Style::new().fg(palette.text_faint))
     };
     spans.push(value_span);
-    spans.extend(provenance_tag(palette, settings.provenance(row)));
     let line = Line::from(spans);
     if focused { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
 }
 
-/// One state row (cycle or toggle): the caret, the promoted label, the value spans and the
-/// provenance clause, tinted when selected. The value comes ready-made — the cycle builds it
-/// through [`cycle_options`], the toggle through [`Palette::toggle`] — so the two controls
-/// share one row grammar.
-fn state_row(
-    palette: &Palette, settings: &Settings, row: FormRow, focused: bool, value: Vec<Span<'static>>, width: usize,
-) -> Line<'static> {
+/// One state row (cycle or toggle): the caret, the promoted label and the value spans, tinted when
+/// selected. The value comes ready-made — the cycle builds it through [`cycle_options`], the toggle
+/// through [`Palette::toggle`] — so the two controls share one row grammar.
+fn state_row(palette: &Palette, row: FormRow, focused: bool, value: Vec<Span<'static>>, width: usize) -> Line<'static> {
     let mut spans = vec![caret(palette, focused), form_label(palette, row.label(), focused), Span::raw("  ")];
     spans.extend(value);
-    spans.extend(provenance_tag(palette, settings.provenance(row)));
     let line = Line::from(spans);
     if focused { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
-}
-
-/// The `   · word` clause naming the row's provenance, all `TEXT_FAINT` in one span. The
-/// [`TAG_GAP`] run before the `·` keeps the clause from reading as a fourth cycle option —
-/// one cell more than the options' own 2-space gaps, at the stepper chip's 3+ spacing. `None`
-/// renders nothing — no bare word in a key slot, and no invented word for "nothing" (the
-/// separator is [`glyph::CLAUSE_SEPARATOR`], never a literal).
-fn provenance_tag(palette: &Palette, provenance: Option<Provenance>) -> Vec<Span<'static>> {
-    match provenance {
-        Some(provenance) => {
-            let clause = format!("{}{} {}", " ".repeat(TAG_GAP), glyph::CLAUSE_SEPARATOR, provenance.word());
-            vec![Span::styled(clause, Style::new().fg(palette.text_faint))]
-        }
-        None => Vec::new(),
-    }
 }
 
 /// The toast, drawn over the finished frame (cloudy-tui: Toast — renders last). Top-right,
@@ -956,12 +918,11 @@ mod tests {
 
     #[test]
     fn the_value_budget_grows_with_the_panel_and_floors_at_value_cells() {
-        // At the 57-column interior (53) the ffmpeg row — the widest label with the widest
-        // clause — gets exactly the 24-cell floor. A wide panel hands a row its full remaining
-        // width, and a row with no clause keeps all of it.
-        assert_eq!(value_budget(FormRow::Ffmpeg, Some(Provenance::Detection), 53), VALUE_CELLS);
-        assert_eq!(value_budget(FormRow::OutputDir, Some(Provenance::Default), 106), 80);
-        assert_eq!(value_budget(FormRow::Ffmpeg, None, 76), 76 - CARET_GUTTER - cells("ffmpeg path") - LABEL_GAP);
+        // The budget is what the panel leaves after the caret, label and gap, floored at the
+        // 24-cell value slot — the clause used to eat part of it, and now it does not.
+        assert_eq!(value_budget(FormRow::Ffmpeg, 53), 38, "53 - (2 + 11 + 2)");
+        assert_eq!(value_budget(FormRow::OutputDir, 106), 92, "106 - (2 + 10 + 2)");
+        assert_eq!(value_budget(FormRow::Ffmpeg, 0), VALUE_CELLS, "the floor holds even at zero width");
     }
 
     #[test]
@@ -991,8 +952,8 @@ mod tests {
     fn a_wide_char_straddling_the_cut_stays_whole() {
         // The caret's slot offset is display cells and the window is bounded in cells too:
         // a char count would place the native cursor mid-char and let a window of wide chars
-        // push the provenance clause past the slot's edge (cloudy-tui: the model tracks a
-        // character column, the render converts to display cells before placing the cursor).
+        // push the value past the slot's edge (cloudy-tui: the model tracks a character
+        // column, the render converts to display cells before placing the cursor).
         assert_eq!(draft_window(&"中".repeat(5), 5, 4), DraftWindow { start: 4, caret_cells: 2 });
         assert_eq!(
             draft_window_text(&"中".repeat(5), DraftWindow { start: 4, caret_cells: 2 }, 4),
@@ -1056,7 +1017,7 @@ mod tests {
         // The write-level half of the pin, exercised directly: `begin_edit` refuses to open a
         // session on a flag-pinned row, so `commit_input` can only meet one through a direct
         // call — and must still refuse the write, so no route gains the file a line from a
-        // pinned row's commit while the row keeps reading ` · flag`.
+        // pinned row's commit while the row renders as a Disabled row.
         let dir = tempfile::TempDir::new().unwrap();
         let mut settings = Settings::with_layers(SettingsLayers {
             config_dir: Some(dir.path().to_path_buf()),
@@ -1067,7 +1028,7 @@ mod tests {
         settings.commit_input(FormRow::OutputDir, "/evil".to_owned());
 
         assert_eq!(crate::config::load(dir.path()).unwrap().out_dir, None, "the pinned row's commit gains the file nothing");
-        assert_eq!(settings.provenance(FormRow::OutputDir), Some(Provenance::Flag), "the clause still names the pin");
+        assert_eq!(settings.pin_reason(FormRow::OutputDir), Some("set by --out flag"), "the pin still reads");
     }
 
     #[test]

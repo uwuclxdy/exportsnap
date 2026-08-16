@@ -155,8 +155,8 @@ fn walking_off_a_descended_pane_panics_instead_of_spinning() {
 fn renders_header_body_panel_and_hint_bar() {
     // Driven on `settings` rather than `overview`, `memories`, `chat media`, `history` or
     // `account`: those five own their own screens now, and the settings form is the sixth. At
-    // 52 cells the panel interior is 48, under the form's 53-cell budget, so the
-    // whole-or-not-at-all gate keeps the interior blank and this grid is the shell's pin.
+    // 52 cells the panel interior is 48, above the form's 41-cell budget (the provenance-clause
+    // removal dropped it from 53), so the form's first row renders and this grid is the shell's pin.
     let terminal = draw(&mut on_tab(Tab::Settings), 52, 6);
     assert_eq!(
         grid(terminal.backend().buffer()),
@@ -164,7 +164,7 @@ fn renders_header_body_panel_and_hint_bar() {
             " exportsnap  •  ‹   settings                        ",
             " ! terminal too small · enlarge for full layout     ",
             "╭─ SETTINGS ───────────────────────────────────────╮",
-            "│                                                  │",
+            "│ ❯ output dir  exportsnap-out                     │",
             "╰──────────────────────────────────────────────────╯",
             " ←→ switch   ? help   q quit                        ",
         ]

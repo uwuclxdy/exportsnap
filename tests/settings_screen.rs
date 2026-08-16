@@ -1,6 +1,6 @@
-//! The settings screen (task §6): per-row value and provenance render pins, the write-back
-//! contract — `config::write` is the one path, and a restart reads the file state a commit
-//! wrote — and the DANGER toast a failed write raises, visible rather than silent.
+//! The settings screen (task §6): per-row value render pins, the write-back contract —
+//! `config::write` is the one path, and a restart reads the file state a commit wrote — and
+//! the DANGER toast a failed write raises, visible rather than silent.
 //!
 //! The screen is driven DIRECTLY through `Settings::with_layers` with hand-built layers, never
 //! through `App::start`: the startup probe would overwrite `detected_ffmpeg` with the real
@@ -9,10 +9,10 @@
 //! jump, the tick aging, the hint set, and the shell's toast-on-any-tab.
 //!
 //! Expected rows are derived from the form's own budgets (tests/chat_media_screen.rs is the
-//! twin form): the caret gutter 2, the labels' own lengths, the 24-cell value slot, the
-//! `   · word` clause at its 3-cell gap, and the 76-cell interior at width 80. Provenance
-//! claims follow decision 66's precedence (flag > config > detection > default), never the
-//! effective value.
+//! twin form): the caret gutter 2, the labels' own lengths, the 24-cell value slot, and the
+//! 76-cell interior at width 80. A set value reads ACCENT and an empty/default value the faint
+//! placeholder tier; a flag-pinned row is a Disabled row (wholly faint, `└ reason` tooltip on
+//! focus).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -147,7 +147,7 @@ fn the_panel_fills_the_body_at_the_designed_sizes() {
 // ---- the rows (direct render, deterministic layers) ----
 
 #[test]
-fn the_form_renders_every_row_with_value_and_provenance() {
+fn the_form_renders_every_row_with_a_plain_value() {
     let dir = TempDir::new().unwrap();
     let config = Config {
         out_dir: Some(PathBuf::from("/file/out")),
@@ -162,36 +162,31 @@ fn the_form_renders_every_row_with_value_and_provenance() {
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
     assert_eq!(row(buffer, 0), format!("╭─ SETTINGS {}╮", "─".repeat(67)));
-    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /file/out   · file", 44));
-    assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible   · file", 42));
-    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg   · detection", 31));
-    assert_eq!(row(buffer, 4), panel_row("  transcode  ─●   · default", 49));
-    assert_eq!(row(buffer, 5), panel_row("  overlay mode  merged  both  originals   · default", 25));
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /file/out", 53));
+    assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible", 51));
+    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg", 45));
+    assert_eq!(row(buffer, 4), panel_row("  transcode  ─●", 61));
+    assert_eq!(row(buffer, 5), panel_row("  overlay mode  merged  both  originals", 37));
 
     let palette = Palette::new(Tier::Full);
-    // The focused row: the accent caret, the value in TEXT, the clause faint, the tint to the
-    // panel's interior edge. The value is ragged, so the clause trails it at its 3-cell gap and
-    // the tint fills the space to the right of the clause.
+    // The focused row: the accent caret, the value in ACCENT (a set value), the tint to the
+    // panel's interior edge. No clause trails the value anymore.
     assert_eq!(buffer[(2, 1)].symbol(), "❯");
     assert_eq!(buffer[(2, 1)].style().fg, Some(palette.accent));
     assert!(buffer[(2, 1)].style().add_modifier.contains(Modifier::BOLD));
-    assert_eq!(buffer[(16, 1)].style().fg, Some(palette.text));
-    assert_eq!(buffer[(28, 1)].symbol(), "·");
-    assert_eq!(buffer[(28, 1)].style().fg, Some(palette.text_faint));
+    assert_eq!(buffer[(16, 1)].style().fg, Some(palette.accent), "a set value reads ACCENT");
     assert_eq!(buffer[(77, 1)].style().bg, Some(palette.bg_hover));
     // The theme cycle: the effective tier is the selected word in accent, the other faint.
     assert_eq!(buffer[(11, 2)].style().fg, Some(palette.accent));
     assert_eq!(buffer[(18, 2)].style().fg, Some(palette.text_faint));
+    // The detected ffmpeg path is a fallback, so it reads the faint placeholder tier.
+    assert_eq!(buffer[(17, 3)].style().fg, Some(palette.text_faint));
 }
 
 #[test]
-fn the_form_renders_at_57_columns_with_the_clause_gap() {
-    // The polish pass's narrow width: 57 columns leave a 53-cell interior, and the rows must
-    // render there. The clause follows its value at a 3-cell gap — the contract pins cycle
-    // options at exactly 2-space gaps and its trailing informational chip (the stepper's
-    // `recommended N`) sits at 3+, so the clause takes 3, one more than an option gap — never
-    // the 1 cell that let ` · file` read as a fourth cycle option. The widest rows (the
-    // ffmpeg path row's clause, the overlay cycle's words) bind the budget exactly.
+fn the_form_renders_at_57_columns_without_a_clause() {
+    // The polish pass's narrow width: 57 columns leave a 53-cell interior, and the rows render
+    // there with no clause trailing the value.
     let dir = TempDir::new().unwrap();
     let config = Config {
         out_dir: Some(PathBuf::from("/file/out")),
@@ -206,19 +201,18 @@ fn the_form_renders_at_57_columns_with_the_clause_gap() {
     let terminal = draw_screen(&settings, 57, 8);
     let buffer = terminal.backend().buffer();
     assert_eq!(row(buffer, 0), format!("╭─ SETTINGS {}╮", "─".repeat(44)));
-    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /file/out   · file", 21));
-    assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible   · file", 19));
-    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg   · detection", 8));
-    assert_eq!(row(buffer, 4), panel_row("  transcode  ─●   · default", 26));
-    assert_eq!(row(buffer, 5), panel_row("  overlay mode  merged  both  originals   · default", 2));
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /file/out", 30));
+    assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible", 28));
+    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg", 22));
+    assert_eq!(row(buffer, 4), panel_row("  transcode  ─●", 38));
+    assert_eq!(row(buffer, 5), panel_row("  overlay mode  merged  both  originals", 14));
 }
 
 #[test]
 fn a_long_path_value_grows_with_the_panel_and_ellipsises_at_the_narrow_floor() {
     let dir = TempDir::new().unwrap();
     let path = PathBuf::from("/".to_owned() + &"f".repeat(42));
-    // A detected (not file-configured) ffmpeg carries the widest ` · detection` clause, which is
-    // what binds the 24-cell narrow floor.
+    // A detected (not file-configured) ffmpeg path: the value reads the faint placeholder tier.
     let mut settings = Settings::with_layers(SettingsLayers { detected_ffmpeg: Some(path.clone()), ..layers(Some(dir.path())) });
     settings.set_source(PathBuf::from("/export"));
     let whole = path.to_string_lossy().into_owned();
@@ -229,10 +223,10 @@ fn a_long_path_value_grows_with_the_panel_and_ellipsises_at_the_narrow_floor() {
     assert!(wide.contains(&whole), "the wide ffmpeg row shows the whole path: {wide}");
     assert!(!wide.contains('…'), "the wide ffmpeg row does not ellipsise: {wide}");
 
-    // Narrow (57 wide): the same path still head-ellipsises to the 24-cell floor.
+    // Narrow (57 wide): the 43-char path still head-ellipsises into the 38-cell value slot.
     let terminal = draw_screen(&settings, 57, 8);
     let narrow = row(terminal.backend().buffer(), 3);
-    assert!(narrow.contains('…'), "the 57-column ffmpeg row still truncates to the 24-cell floor: {narrow}");
+    assert!(narrow.contains('…'), "the 57-column ffmpeg row still truncates into the value slot: {narrow}");
     assert!(!narrow.contains(&whole), "the 57-column ffmpeg row does not show the whole path: {narrow}");
 }
 
@@ -253,23 +247,22 @@ fn an_empty_draft_ellipsises_the_effective_value_and_marks_it_as_placeholder() {
 
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    // The 32-cell default fits the grown 50-cell budget whole, so no head-ellipsis fires; the
-    // trailing marker still names it a placeholder, and the clause trails it at the 3-cell gap.
+    // The 32-cell default fits the grown 62-cell budget whole, so no head-ellipsis fires; the
+    // trailing marker still names it a placeholder.
     assert_eq!(
         row(buffer, 1),
-        panel_row("✎ output dir  /export/long/tail/exportsnap-out…   · default", 17),
+        panel_row("✎ output dir  /export/long/tail/exportsnap-out…", 29),
         "the ghost shows the whole default and its marker stays inside the slot"
     );
     assert_eq!(buffer[(48, 1)].symbol(), "…", "the marker ends the shown default");
-    assert_eq!(buffer[(52, 1)].symbol(), "·", "the clause trails its value at the 3-cell gap");
 }
 
 #[test]
-fn a_flag_overridden_row_shows_the_flag_value_and_reads_as_overridden() {
+fn a_flag_pinned_row_renders_as_a_disabled_row_with_a_tooltip() {
     let dir = TempDir::new().unwrap();
     // The file ALSO holds values: the flag wins on both rows, and the theme row shows the
-    // EFFECTIVE tier (compatible) even though the file says full — the clause is what names
-    // the override.
+    // EFFECTIVE tier (compatible) even though the file says full. A pinned row is a Disabled row —
+    // wholly faint, focusable-but-inert, with a `└ reason` tooltip on focus.
     let config = Config { out_dir: Some(PathBuf::from("/file/out")), theme: Some(Tier::Full), ..Config::default() };
     let mut settings = Settings::with_layers(SettingsLayers {
         cli_out: Some(PathBuf::from("/flag/out")),
@@ -281,16 +274,53 @@ fn a_flag_overridden_row_shows_the_flag_value_and_reads_as_overridden() {
 
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /flag/out   · flag", 44));
-    assert_eq!(row(buffer, 2), panel_row("  theme  full  compatible   · flag", 42));
-    assert_eq!(
-        buffer[(18, 2)].style().fg,
-        Some(Palette::new(Tier::Full).accent),
-        "the effective tier, not the file's, is the selected cycle word"
-    );
-    // The untouched rows keep their own values and clauses.
-    assert_eq!(row(buffer, 3), panel_row("  ffmpeg path  /detected/ffmpeg   · detection", 31));
-    assert_eq!(row(buffer, 4), panel_row("  transcode  ─●   · default", 49));
+    let palette = Palette::new(Tier::Full);
+
+    // The focused output dir row is pinned: wholly faint, its `└ reason` tooltip right below it.
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /flag/out", 53));
+    assert_eq!(buffer[(4, 1)].style().fg, Some(palette.text_faint), "the pinned label reads faint");
+    assert_eq!(buffer[(16, 1)].style().fg, Some(palette.text_faint), "the pinned value reads faint");
+    assert_eq!(row(buffer, 2), panel_row("  └ set by --out flag", 55));
+    assert_eq!(buffer[(4, 2)].style().fg, Some(palette.line), "the tooltip leader is LINE");
+    assert_eq!(buffer[(6, 2)].style().fg, Some(palette.text_faint), "the tooltip reason is faint");
+
+    // The theme row is pinned too, but blurred: no tooltip, no caret, and the effective tier is
+    // the bracketed word — a content cue, since a wholly faint row has no color to carry the pick.
+    assert_eq!(row(buffer, 3), panel_row("  theme  full  [compatible]", 49));
+    assert_eq!(buffer[(17, 3)].symbol(), "[", "the selected word opens the bracket content cue");
+    assert_eq!(buffer[(28, 3)].symbol(), "]", "the selected word closes the bracket content cue");
+    assert_eq!(buffer[(4, 3)].style().fg, Some(palette.text_faint), "the pinned label reads faint");
+    assert_eq!(buffer[(18, 3)].style().fg, Some(palette.text_faint), "the selected word is faint, not ACCENT");
+
+    // The untouched rows keep their own values.
+    assert_eq!(row(buffer, 4), panel_row("  ffmpeg path  /detected/ffmpeg", 45));
+    assert_eq!(row(buffer, 5), panel_row("  transcode  ─●", 61));
+    assert_eq!(row(buffer, 6), panel_row("  overlay mode  merged  both  originals", 37));
+}
+
+#[test]
+fn a_flag_pinned_output_path_grows_with_the_panel_like_an_unpinned_one() {
+    // The pinned output-dir row is a Disabled row, but its VALUE is still a path that reads
+    // better whole: it must take the grown value slot like the unpinned rows do, not clip to
+    // the 24-cell floor at every width. The bug clipped it to VALUE_CELLS while the same path
+    // set via the config file grew with the panel.
+    let dir = TempDir::new().unwrap();
+    let path = PathBuf::from("/".to_owned() + &"f".repeat(42)); // 43 cells, past the 24-cell floor
+    let mut settings = Settings::with_layers(SettingsLayers { cli_out: Some(path.clone()), ..layers(Some(dir.path())) });
+    settings.set_source(PathBuf::from("/export"));
+    let whole = path.to_string_lossy().into_owned();
+
+    // Wide: the 43-char pinned path renders whole in the grown slot, not clipped to 24.
+    let terminal = draw_screen(&settings, 110, 8);
+    let wide = row(terminal.backend().buffer(), 1);
+    assert!(wide.contains(&whole), "the wide pinned row shows the whole path: {wide}");
+    assert!(!wide.contains('…'), "the wide pinned row does not ellipsise: {wide}");
+
+    // Narrow (57 wide): the 43-char path still head-ellipsises into the grown value slot.
+    let terminal = draw_screen(&settings, 57, 8);
+    let narrow = row(terminal.backend().buffer(), 1);
+    assert!(narrow.contains('…'), "the 57-column pinned row still truncates: {narrow}");
+    assert!(!narrow.contains(&whole), "the 57-column pinned row does not show the whole path: {narrow}");
 }
 
 #[test]
@@ -313,12 +343,13 @@ fn the_ffmpeg_row_with_nothing_reports_not_found_as_a_faint_placeholder() {
 fn the_form_stays_blank_below_the_interior_budget() {
     let dir = TempDir::new().unwrap();
     let settings = settings_in(&dir);
-    // 52 wide: the interior is 48 cells, under the 53-cell widest-row budget, so the
-    // whole-or-not-at-all gate keeps every row blank rather than clipping a value.
-    let terminal = draw_screen(&settings, 52, 8);
+    // 44 wide: the interior is 40 cells, under the 41-cell widest-row budget (the focused
+    // overlay cycle), so the whole-or-not-at-all gate keeps every row blank rather than
+    // clipping a value.
+    let terminal = draw_screen(&settings, 44, 8);
     let buffer = terminal.backend().buffer();
     for y in 1..7 {
-        assert_eq!(row(buffer, y), format!("│{}│", padded("", 50)), "row {y}");
+        assert_eq!(row(buffer, y), format!("│{}│", padded("", 42)), "row {y}");
     }
 }
 
@@ -337,12 +368,12 @@ fn a_commit_writes_the_file_and_a_restart_reads_it_back() {
     settings.handle_key(key(KeyCode::Enter));
 
     // §6 restart-verify: the file holds the commit, and a fresh screen over the loaded config
-    // renders the value it wrote, with the clause re-derived to ` · file`.
+    // renders the value it wrote as a set value (ACCENT).
     let config = config::load(dir.path()).unwrap();
     assert_eq!(config.out_dir.as_deref(), Some(Path::new("/new")));
     let mut restarted = Settings::with_layers(SettingsLayers { config, ..layers(Some(dir.path())) });
     restarted.set_source(PathBuf::from("/export"));
-    let expected = panel_row("❯ output dir  /new   · file", 49);
+    let expected = panel_row("❯ output dir  /new", 58);
     assert_eq!(row(render_80(&restarted).backend().buffer(), 1), expected);
 }
 
@@ -368,7 +399,7 @@ fn an_empty_commit_drops_the_key_and_the_row_shows_the_default() {
     // The value joined the way the row itself derives it (`default_out_root`), so the platform's
     // separator reaches the comparison — on windows the row spells `/export\exportsnap-out`.
     let shown = format!("❯ output dir  {}", Path::new("/export").join("exportsnap-out").to_string_lossy());
-    let expected = panel_row(&format!("{}   · default", shown), 28);
+    let expected = panel_row(&shown, 40);
     assert_eq!(row(render_80(&restarted).backend().buffer(), 1), expected, "the row falls back to the source-derived default");
 }
 
@@ -385,7 +416,7 @@ fn a_cycle_commit_writes_the_next_value_through_the_file() {
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(18, 2)].style().fg, Some(Palette::new(Tier::Full).accent));
-    assert_eq!(row(buffer, 2), panel_row("❯ theme  full  [compatible]   · file", 40));
+    assert_eq!(row(buffer, 2), panel_row("❯ theme  full  [compatible]", 49));
 
     for _ in 0..3 {
         settings.handle_key(key(KeyCode::Down)); // ffmpeg, transcode, overlay
@@ -401,9 +432,9 @@ fn a_flag_pinned_state_row_writes_nothing_on_press() {
     // The flag pins the effective tier to `full`, while the file layer holds `full` too: a
     // press writing the effective successor (`full` -> `compatible`) would flip the file to
     // `compatible`. It must leave the file untouched, and raise no toast for a write that
-    // never happened — the row's ` · flag` clause is the only announcement. The file layer
-    // is written first and the screen's layer holds the same config: the restart-reads-back
-    // contract the commit tests pin.
+    // never happened — the pinned row's Disabled treatment (wholly faint + tooltip) is the
+    // only announcement. The file layer is written first and the screen's layer holds the
+    // same config: the restart-reads-back contract the commit tests pin.
     let file_config = Config { theme: Some(Tier::Full), ..Config::default() };
     config::write(dir.path(), &file_config).unwrap();
     let mut settings =
@@ -415,7 +446,10 @@ fn a_flag_pinned_state_row_writes_nothing_on_press() {
     assert_eq!(config::load(dir.path()).unwrap().theme, Some(Tier::Full), "the press writes nothing past the flag's pin");
     assert!(!settings.toast_live(), "an inert press raises no toast");
     let terminal = render_80(&settings);
-    assert_eq!(row(terminal.backend().buffer(), 2), panel_row("❯ theme  [full]  compatible   · flag", 40));
+    let buffer = terminal.backend().buffer();
+    // The pinned theme row is a Disabled row: wholly faint, its `└ reason` tooltip below it.
+    assert_eq!(row(buffer, 2), panel_row("❯ theme  [full]  compatible", 49));
+    assert_eq!(row(buffer, 3), panel_row("  └ set by --theme flag", 53));
 }
 
 #[test]
@@ -428,10 +462,10 @@ fn the_transcode_toggle_flips_the_file_layer() {
     }
     settings.handle_key(key(KeyCode::Enter));
     assert_eq!(config::load(dir.path()).unwrap().transcode, Some(false));
-    // The row flips to the off knob and the clause moves to ` · file` the same frame.
+    // The row flips to the off knob the same frame.
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    assert_eq!(row(buffer, 4), panel_row("❯ transcode  ○─   · file", 52));
+    assert_eq!(row(buffer, 4), panel_row("❯ transcode  ○─", 61));
     // `space` mirrors `enter` on the state rows: another press writes the flip back.
     settings.handle_key(key(KeyCode::Char(' ')));
     assert_eq!(config::load(dir.path()).unwrap().transcode, Some(true));
@@ -444,7 +478,7 @@ fn a_flag_pinned_text_row_refuses_the_edit_and_writes_nothing() {
     // policy the row refuses to open an editor — the file's value stays out of reach while
     // the pin holds, and no commit can rewrite it. The old behavior let an editor open
     // (seeded from the file layer) and a commit silently rewrote the file under a row that
-    // kept reading ` · flag` — one screen running two policies for the same pin.
+    // kept showing the flag's value — one screen running two policies for the same pin.
     let file_config = Config { out_dir: Some(PathBuf::from("/file/out")), ..Config::default() };
     config::write(dir.path(), &file_config).unwrap();
     let mut settings = Settings::with_layers(SettingsLayers {
@@ -463,12 +497,13 @@ fn a_flag_pinned_text_row_refuses_the_edit_and_writes_nothing() {
     );
     assert!(!settings.toast_live(), "an inert press raises no toast");
 
-    // The row still shows the flag's value with the ` · flag` clause — the pin's one
-    // announcement — and the caret, never the edit glyph.
+    // The row is a Disabled row: the caret lands, the edit glyph never does, and the `└ reason`
+    // tooltip names the pin.
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    assert!(row(buffer, 1).starts_with("│ ❯ output dir  /flag/out"), "no ✎: the editor never opened");
-    assert!(row(buffer, 1).contains("· flag"));
+    assert_eq!(row(buffer, 1), panel_row("❯ output dir  /flag/out", 53));
+    assert_eq!(row(buffer, 2), panel_row("  └ set by --out flag", 55));
+    assert!(!row(buffer, 1).contains("✎"), "no ✎: the editor never opened");
 }
 
 #[test]
@@ -533,12 +568,12 @@ fn the_form_scrolls_with_the_focus_at_nine_rows_high() {
 }
 
 #[test]
-fn a_wide_char_draft_places_the_cursor_and_tag_in_display_cells() {
+fn a_wide_char_draft_places_the_cursor_in_display_cells() {
     // The caret is a char index, but the native cursor and the draft window are display
-    // cells: a 2-cell char moves the cursor one cell further than a char count would, and a
-    // window bounded in cells keeps the provenance clause inside the panel (cloudy-tui: the
-    // model tracks a character column, the render converts to display cells before placing
-    // the native cursor). At 80 wide the output-dir slot is the grown 50-cell budget.
+    // cells: a 2-cell char moves the cursor one cell further than a char count would
+    // (cloudy-tui: the model tracks a character column, the render converts to display cells
+    // before placing the native cursor). At 80 wide the output-dir slot is the grown 62-cell
+    // budget. The mid-draft caret case is covered by the `draft_window` unit test.
     let dir = TempDir::new().unwrap();
     let mut settings = settings_in(&dir);
     settings.handle_key(key(KeyCode::Enter));
@@ -553,44 +588,20 @@ fn a_wide_char_draft_places_the_cursor_and_tag_in_display_cells() {
     );
     // `row` reads each cell's symbol, and a wide char's continuation cell is an empty " ",
     // so the expected row spells the slot "中 A".
-    assert_eq!(row(buffer, 1), panel_row("✎ output dir  中 A   · default", 47));
+    assert_eq!(row(buffer, 1), panel_row("✎ output dir  中 A", 59));
 
-    // 26 wide chars (52 cells) overflow the 50-cell budget, so the window slides to keep the
-    // caret visible, holding at most the budget's cells, and the clause trails the window
-    // instead of being pushed past the panel edge.
+    // 32 wide chars (64 cells) overflow the 62-cell budget, so the window slides to keep the
+    // caret visible, holding at most the budget's cells rather than spilling past the panel edge.
     let mut settings = settings_in(&dir);
     settings.handle_key(key(KeyCode::Enter));
-    for _ in 0..26 {
+    for _ in 0..32 {
         settings.handle_key(key(KeyCode::Char('中')));
     }
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
-    assert_eq!(terminal.backend().cursor_position(), Position::new(64, 1), "the caret stays at the last cell of the slid window");
-    assert_eq!(buffer[(67, 1)].symbol(), "·", "the provenance clause stays inside the interior");
-    // The window holds 24 wide chars, not 26 — a char-bounded window would spill past the
-    // clause.
-    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}   · default", "中 ".repeat(24)), 2));
-
-    // A mid-draft caret is where the window's cell cap binds: 40 wide chars (80 cells) after
-    // the cut would spill past the budget, so the window must hold 25 wide chars — the budget,
-    // full — and the clause trails it.
-    let mut settings = settings_in(&dir);
-    settings.handle_key(key(KeyCode::Enter));
-    for _ in 0..40 {
-        settings.handle_key(key(KeyCode::Char('中')));
-    }
-    for _ in 0..13 {
-        settings.handle_key(key(KeyCode::Left));
-    }
-    let terminal = render_80(&settings);
-    let buffer = terminal.backend().buffer();
-    assert_eq!(
-        terminal.backend().cursor_position(),
-        Position::new(64, 1),
-        "the caret keeps its display-cell offset within the mid-draft window"
-    );
-    assert_eq!(buffer[(69, 1)].symbol(), "·", "the clause stays put with wide chars still in the draft");
-    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}   · default", "中 ".repeat(25)), 0));
+    assert_eq!(terminal.backend().cursor_position(), Position::new(76, 1), "the caret stays at the last cell of the slid window");
+    // The window holds 30 wide chars, not 32 — a char-bounded window would spill past the slot.
+    assert_eq!(row(buffer, 1), panel_row(&format!("✎ output dir  {}", "中 ".repeat(30)), 2));
 }
 
 // ---- the DANGER toast ----
