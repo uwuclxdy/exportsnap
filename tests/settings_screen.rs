@@ -248,10 +248,12 @@ fn an_empty_draft_ellipsises_the_effective_value_and_marks_it_as_placeholder() {
     let terminal = render_80(&settings);
     let buffer = terminal.backend().buffer();
     // The 32-cell default fits the grown 62-cell budget whole, so no head-ellipsis fires; the
-    // trailing marker still names it a placeholder.
+    // trailing marker still names it a placeholder. The default joins through `Path::join`,
+    // never a `/` literal, so the platform separator reaches the pin (windows renders a `\`).
+    let default = Path::new("/export/long/tail").join("exportsnap-out");
     assert_eq!(
         row(buffer, 1),
-        panel_row("✎ output dir  /export/long/tail/exportsnap-out…", 29),
+        panel_row(&format!("✎ output dir  {}…", default.to_string_lossy()), 29),
         "the ghost shows the whole default and its marker stays inside the slot"
     );
     assert_eq!(buffer[(48, 1)].symbol(), "…", "the marker ends the shown default");

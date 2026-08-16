@@ -914,9 +914,10 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
         PlanCounts { unmatched_overlays: 224, excluded: 44, history: HistoryOutcome::Joined, ..PlanCounts::default() },
     );
 
-    // Wide enough that the 19-char output name below still renders whole in the output column:
+    // Wide enough that the 19-char output name renders whole in the output column on a dev box:
     // the chat leg has no place name, so the location column stays at its floor and the surplus
-    // reaches the output column rather than padding a blank.
+    // reaches the output column rather than padding a blank. The runner legs' long temp paths
+    // narrow the table instead, so the output pin below accepts the ellipsized form too.
     let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -929,7 +930,10 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
     assert!(cell_run(buffer, 4).contains("IDENTITY"), "{:?}", cell_run(buffer, 4));
     assert!(cell_run(buffer, 4).contains("STATUS"));
     assert!(cell_run(buffer, 5).contains("[ pending ]"), "{:?}", cell_run(buffer, 5));
-    assert!(cell_run(buffer, 5).contains("20210304_143005.jpg"), "{:?}", cell_run(buffer, 5));
+    // The output column shows the planned name either way: whole, or middle-ellipsized with both
+    // ends surviving (the split policy is pinned in format.rs).
+    let row5 = cell_run(buffer, 5);
+    assert!(row5.contains("20210304_143005.jpg") || (row5.contains("20…") && row5.contains("…jpg")), "{row5:?}");
 
     // A real manifest write flips the pill and advances the bar.
     let output = dir.path().join("out/chat/x/20210304_143005.jpg");
@@ -2095,8 +2099,11 @@ fn a_source_with_no_export_names_the_problem_instead_of_inviting_a_run() {
         environment(),
     );
     on_tab(&mut app, Tab::ChatMedia);
-    // Wide enough that the problem-and-fix copy stays on one line even where the gate's symlinked
-    // TMPDIR lengthens the tempdir path that the message names.
+    // Wide enough that the statement half always fits one line; a long temp path pushes the copy
+    // past it and the wrap point moves with the path length, so the fix clause is pinned by its
+    // head and tail words in order — the panel border sits between the wrapped rows and every
+    // clause word is shorter than the interior floor, so only the words themselves are stable.
+    // The clause's exact wording is pinned by the footer alert's own test (shell.rs).
     let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -2104,7 +2111,8 @@ fn a_source_with_no_export_names_the_problem_instead_of_inviting_a_run() {
     // The empty state names the problem and the fix (the run's own `NoExportId` refusal), the way
     // the history tab does — never the empty state's "press ↵ to start" (sweep: empty and error states).
     assert!(text.contains("no mydata~ export part under"), "{text}");
-    assert!(text.contains("export's parts"), "the fix clause renders: {text}");
+    let clause = text.find("point").unwrap_or_else(|| panic!("the fix clause renders: {text}"));
+    assert!(text[clause..].contains("parts"), "the fix clause ends whole: {text}");
     assert!(!text.contains("press ↵ to start"), "a no-export source must not invite a run: {text}");
 }
 
