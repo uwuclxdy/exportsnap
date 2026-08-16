@@ -89,6 +89,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             // tab) and `q` types a letter, so the plain set would advertise keys that do
             // something else this frame — the edit set replaces it.
             Tab::Settings if app.settings().is_editing() => footer::settings_edit_hints(&palette, footer_area.width),
+            // The overview's source-path input edits with the same keys: while it is open, `←→`,
+            // `?` and `q` all do something else, so the edit set replaces the plain one there too.
+            Tab::Overview if app.overview().is_editing() => overview::edit_hints(&palette, footer_area.width),
             _ => footer::plain_hints(&palette, app.has_actions(), footer_area.width),
         }
     };

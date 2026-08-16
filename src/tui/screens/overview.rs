@@ -273,6 +273,14 @@ impl Overview {
     }
 }
 
+/// The hint set while the source-path input is being edited: arrows move the caret, `↵` commits
+/// the draft, `esc` cancels it (cloudy-tui: a hint advertises only keys that do something). The
+/// edit grammar is the same one the settings form's text inputs use, so this delegates to the
+/// footer's existing edit set rather than re-spelling the three groups.
+pub(crate) fn edit_hints(palette: &Palette, width: u16) -> Line<'static> {
+    crate::tui::footer::settings_edit_hints(palette, width)
+}
+
 /// What the source dir holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Parts {

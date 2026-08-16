@@ -529,6 +529,27 @@ fn the_hotkey_opens_the_source_path_input() {
 }
 
 #[test]
+fn the_footer_advertises_the_edit_keys_while_the_path_input_is_open() {
+    let dir = scratch("overview-input-hints");
+    fs::write(dir.join("holiday-photos.zip"), b"").unwrap();
+
+    let mut overview = Overview::load_with(&dir, environment());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    assert!(matches!(overview.handle_key(key(KeyCode::Char('s'))), OverviewKey::Handled));
+
+    let mut app = App::new(Tier::Full).with_overview(overview);
+    let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // While the input is editing, arrows move the caret, ↵ commits and esc cancels — not the
+    // switch/help/quit set the plain footer advertises (all of which do something else mid-edit).
+    assert_eq!(row(buffer, TALL - 1).trim_end(), " ←→ move   ↵ commit   esc cancel");
+    assert!(!row(buffer, TALL - 1).contains("quit"), "the plain quit hint must yield to the edit set");
+    assert!(!row(buffer, TALL - 1).contains("switch"), "arrows switch tabs only when no input is editing");
+}
+
+#[test]
 fn a_committed_path_reprobes_the_source_through_the_startup_composition() {
     // The overview's `enter` commit routes through `App::handle_event` — the loop's own entry — to
     // `App::reprobe_source`, which re-reads the source the same way startup does, so typing a dir
