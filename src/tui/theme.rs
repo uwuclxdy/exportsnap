@@ -96,14 +96,15 @@ pub fn detect_from_env(cli: Option<Tier>, config: Option<Tier>) -> Tier {
 /// the single source of truth; this only selects between them.
 ///
 /// `bg` / `bg_raised` / `bg_sunken` are the surface roles DNA rule 3 leaves unpainted on the
-/// `compatible` tier. Paint the base one through [`Palette::surface`] and the raised one through
-/// [`Palette::surface_raised`], which already resolve that; the bare fields are the color values,
-/// not a licence to fill with them.
+/// `compatible` tier. Paint them through [`surface`](Palette::surface),
+/// [`surface_raised`](Palette::surface_raised) and [`surface_sunken`](Palette::surface_sunken),
+/// which already resolve that; the fields are private so widget code cannot read the bare color
+/// values as a licence to fill with them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    pub bg: Color,
-    pub bg_raised: Color,
-    pub bg_sunken: Color,
+    bg: Color,
+    bg_raised: Color,
+    bg_sunken: Color,
     pub bg_hover: Color,
     pub line: Color,
     pub line_strong: Color,
@@ -126,9 +127,8 @@ impl Palette {
     /// on `compatible`, `BG` / `BG_RAISED` / `BG_SUNKEN` inherit the terminal's own
     /// background and elevation falls to borders + color).
     ///
-    /// Distinct from the [`Palette::bg`] field, which is the color value itself and stays
-    /// usable on both tiers — the compact banner paints it as a *foreground* over a semantic
-    /// wash, which is a legible-text choice, not a surface fill.
+    /// Distinct from [`contrast_text`](Palette::contrast_text), which is the same `bg` color used
+    /// as a *foreground* over a semantic wash — a legible-text choice, not a surface fill.
     #[must_use]
     pub const fn surface(&self) -> Option<Color> {
         match self.tier {
@@ -139,17 +139,36 @@ impl Palette {
 
     /// The raised-card surface fill, or `None` on a tier that paints no surface fills (DNA rule 3:
     /// on `compatible`, `BG_RAISED` inherits the terminal's own background and elevation falls to
-    /// borders + color).
-    ///
-    /// Distinct from the [`Palette::bg_raised`] field, which is the color value itself — the action
-    /// chip's rest and disabled fill is a surface fill, so it paints through this accessor rather
-    /// than reading the field.
+    /// borders + color). The action chip's rest and disabled fill is a surface fill, so it paints
+    /// through this accessor.
     #[must_use]
     pub const fn surface_raised(&self) -> Option<Color> {
         match self.tier {
             Tier::Full => Some(self.bg_raised),
             Tier::Compatible => None,
         }
+    }
+
+    /// The sunken surface fill, or `None` on a tier that paints no surface fills (DNA rule 3: on
+    /// `compatible`, `BG_SUNKEN` inherits the terminal's own background and elevation falls to
+    /// borders + color). The toast's glass blend is the one painted use of `BG_SUNKEN`, and it
+    /// goes through [`Palette::toast_bg`] — this accessor is the plain fill, for symmetry with
+    /// [`Palette::surface`] and [`Palette::surface_raised`].
+    #[must_use]
+    pub const fn surface_sunken(&self) -> Option<Color> {
+        match self.tier {
+            Tier::Full => Some(self.bg_sunken),
+            Tier::Compatible => None,
+        }
+    }
+
+    /// The `BG` color used as a legible *foreground* over a bright semantic fill — the inverse
+    /// block's `fg = BG` and the banner's dark-on-semantic text. A text color, not a surface
+    /// fill, so it stays the resolved `bg` value on both tiers (the compatible tier keeps the
+    /// fixed `Indexed(235)` grey).
+    #[must_use]
+    pub const fn contrast_text(self) -> Color {
+        self.bg
     }
 
     /// The toast glass blend for a cell this frame will sit over — the tier-resolution

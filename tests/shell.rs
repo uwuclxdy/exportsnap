@@ -359,7 +359,7 @@ fn the_header_banner_tints_its_whole_row() {
     for x in 0..29 {
         let style = buffer[(x, 0)].style();
         assert_eq!(style.bg, Some(palette.warning), "column {x}");
-        assert_eq!(style.fg, Some(palette.bg), "column {x}");
+        assert_eq!(style.fg, Some(palette.contrast_text()), "column {x}");
     }
 }
 
@@ -674,7 +674,7 @@ fn the_compact_banner_tints_the_whole_row() {
     for x in 0..60 {
         let style = buffer[(x, 1)].style();
         assert_eq!(style.bg, Some(palette.warning), "column {x}");
-        assert_eq!(style.fg, Some(palette.bg), "column {x}");
+        assert_eq!(style.fg, Some(palette.contrast_text()), "column {x}");
     }
 }
 

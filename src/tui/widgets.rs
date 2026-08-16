@@ -271,7 +271,7 @@ pub(crate) fn action_chip(palette: &Palette, label: &str, enabled: bool, focused
     let (fg, bg, bold) = if !enabled {
         (palette.text_faint, palette.surface_raised(), false)
     } else if focused {
-        (palette.bg, Some(palette.accent), true)
+        (palette.contrast_text(), Some(palette.accent), true)
     } else {
         (palette.accent, palette.surface_raised(), true)
     };
@@ -895,7 +895,7 @@ mod tests {
         let full = Palette::new(Tier::Full);
         let compatible = Palette::new(Tier::Compatible);
 
-        assert_eq!(action_chip(&full, "start", true, false).style.bg, Some(full.bg_raised), "full rest fill");
+        assert_eq!(action_chip(&full, "start", true, false).style.bg, full.surface_raised(), "full rest fill");
         assert_eq!(action_chip(&compatible, "start", true, false).style.bg, None, "compatible rest paints none");
         assert_eq!(action_chip(&compatible, "start", false, false).style.bg, None, "compatible disabled paints none");
         assert_eq!(action_chip(&compatible, "start", true, true).style.bg, Some(compatible.accent), "focused inverse block is unchanged");

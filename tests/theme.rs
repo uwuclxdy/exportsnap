@@ -123,9 +123,9 @@ fn theme_names_map_to_tiers_and_anything_else_is_rejected() {
 #[test]
 fn palette_resolves_every_role_from_the_full_tier_module() {
     let palette = Palette::new(Tier::Full);
-    assert_eq!(palette.bg, Color::Rgb(30, 30, 46));
-    assert_eq!(palette.bg_raised, Color::Rgb(24, 24, 37));
-    assert_eq!(palette.bg_sunken, Color::Rgb(17, 17, 27));
+    assert_eq!(palette.surface(), Some(Color::Rgb(30, 30, 46)));
+    assert_eq!(palette.surface_raised(), Some(Color::Rgb(24, 24, 37)));
+    assert_eq!(palette.surface_sunken(), Some(Color::Rgb(17, 17, 27)));
     assert_eq!(palette.bg_hover, Color::Rgb(40, 40, 56));
     assert_eq!(palette.line, Color::Rgb(49, 50, 68));
     assert_eq!(palette.line_strong, Color::Rgb(69, 71, 90));
@@ -143,9 +143,9 @@ fn palette_resolves_every_role_from_the_full_tier_module() {
 #[test]
 fn palette_resolves_every_role_from_the_compatible_tier_module() {
     let palette = Palette::new(Tier::Compatible);
-    assert_eq!(palette.bg, Color::Indexed(235));
-    assert_eq!(palette.bg_raised, Color::Indexed(234));
-    assert_eq!(palette.bg_sunken, Color::Indexed(233));
+    assert_eq!(palette.surface(), None);
+    assert_eq!(palette.surface_raised(), None);
+    assert_eq!(palette.surface_sunken(), None);
     assert_eq!(palette.bg_hover, Color::Indexed(236));
     assert_eq!(palette.line, Color::Indexed(238));
     assert_eq!(palette.line_strong, Color::Indexed(240));
@@ -166,6 +166,22 @@ fn the_raised_surface_is_painted_only_on_the_full_tier() {
     // the chip falls back to no background; on full it answers the BG_RAISED value.
     assert_eq!(Palette::new(Tier::Full).surface_raised(), Some(Color::Rgb(24, 24, 37)));
     assert_eq!(Palette::new(Tier::Compatible).surface_raised(), None);
+}
+
+#[test]
+fn the_sunken_surface_is_painted_only_on_the_full_tier() {
+    // DNA rule 3: on compatible the sunken fill is unpainted, so the accessor answers None; on
+    // full it answers the BG_SUNKEN value.
+    assert_eq!(Palette::new(Tier::Full).surface_sunken(), Some(Color::Rgb(17, 17, 27)));
+    assert_eq!(Palette::new(Tier::Compatible).surface_sunken(), None);
+}
+
+#[test]
+fn the_contrast_text_is_the_bg_value_on_both_tiers() {
+    // `bg` is the inverse block's `fg = BG` and the banner's dark-on-semantic text — a text
+    // color, not a surface fill — so it stays the resolved value on both tiers.
+    assert_eq!(Palette::new(Tier::Full).contrast_text(), Color::Rgb(30, 30, 46));
+    assert_eq!(Palette::new(Tier::Compatible).contrast_text(), Color::Indexed(235));
 }
 
 // ---- glyph degradation per tier (skill: Capability tiers table) ----

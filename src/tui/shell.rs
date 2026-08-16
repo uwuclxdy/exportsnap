@@ -150,7 +150,7 @@ fn compact_banner(palette: &Palette, width: u16) -> Line<'static> {
     // The style rides the `Line`, not the span: `Line::render_with_alignment` paints it across
     // the whole row before drawing any span, so the trailing cells carry the wash with no
     // width-sized padding string built per frame.
-    Line::from(Span::raw(truncate_prose(&text, width as usize))).style(Style::new().fg(palette.bg).bg(palette.warning))
+    Line::from(Span::raw(truncate_prose(&text, width as usize))).style(Style::new().fg(palette.contrast_text()).bg(palette.warning))
 }
 
 #[cfg(test)]
