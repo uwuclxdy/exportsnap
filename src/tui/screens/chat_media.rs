@@ -56,8 +56,8 @@ use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
     self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, OUTPUT_MIN, PanelStyle, ProgressColumns, ProgressRow, STATUS_CELLS,
-    action_chip, caret, cycle_options, disk_free_value, display_row, empty_state_with_action, form_label, overall_bar, panel,
-    planning_spinner, progress_header, progress_list, tint_to_edge, tooltip,
+    action_chip, caret, cycle_options, disk_free_value, display_row, empty_state, form_label, overall_bar, panel, planning_spinner,
+    progress_header, progress_list, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
@@ -140,7 +140,7 @@ impl StaticRow {
 /// The static rows dropped out of the walk (item 1): the caret now rests only on the three real
 /// controls, the overlay-mode cycle, the transcode toggle and the start chip. Enter on the start
 /// chip starts the run when enabled and is inert when disabled, per the contract's Action chip
-/// rule — the empty state's "press ↵ on start run" promise stays true through the chip. The table
+/// rule — the empty state's "press ↵ to start" promise stays true through the chip. The table
 /// pane is reached with `tab`, a pane key rather than a row action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormRow {
@@ -361,6 +361,10 @@ impl ChatMedia {
     /// `out_dir` must not revert a per-run override the user set on this form.
     pub(crate) fn apply_run_defaults(&mut self, out_root: PathBuf, ffmpeg: Option<PathBuf>, transcode: bool, overlay: OverlayMode) {
         self.out_root = out_root.clone();
+        // One-way ratchet on both controls: once the user flips the toggle or cycles the overlay
+        // this session, later settings commits are ignored for the rest of the session (intended
+        // per-run-override semantics). Do not "fix" this into re-tracking the config — a settings
+        // commit must not move a control out from under the user's explicit override.
         if !self.transcode_overridden {
             self.transcode = transcode;
         }
@@ -756,7 +760,7 @@ impl ChatMedia {
 pub fn render(frame: &mut Frame, palette: &Palette, chat: &mut ChatMedia, area: Rect) {
     let tooltip_row = !chat.start_enabled() && row_focused(chat, FormRow::Start.index());
     let form_height =
-        u16::try_from(StaticRow::ALL.len() + FormRow::ALL.len() + usize::from(tooltip_row)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
+        u16::try_from(StaticRow::ALL.len() + FormRow::ALL.len() + 1 + usize::from(tooltip_row)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
 
     // The side-by-side form panel grows from its narrow floor to fit the longest raw path, capped
     // so the progress table keeps its interior floor. The gate itself stays on the floor width, so
@@ -809,10 +813,13 @@ fn render_form(frame: &mut Frame, palette: &Palette, chat: &ChatMedia, area: Rec
 /// The form's rows, one `Line` per row plus the disabled-chip tooltip. `width` is the panel's
 /// interior width, which the selected rows' tint pads out to.
 fn form_panel(palette: &Palette, chat: &ChatMedia, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::with_capacity(StaticRow::ALL.len() + FormRow::ALL.len() + 1);
+    let mut rows = Vec::with_capacity(StaticRow::ALL.len() + FormRow::ALL.len() + 2);
     for row in StaticRow::ALL {
         rows.push(static_form_row(palette, chat, row, width));
     }
+    // A blank row separates the read-only block from the focusable controls, so the static rows
+    // read apart from the form. It is a spacer only: the caret walk stays over the form rows.
+    rows.push(Line::default());
     for (index, row) in FormRow::ALL.into_iter().enumerate() {
         rows.push(form_row(palette, chat, row, index, width));
     }
@@ -915,9 +922,7 @@ fn render_idle(frame: &mut Frame, palette: &Palette, chat: &ChatMedia, inner: Re
         let text = RunError::NoExportId(chat.source.clone()).to_string();
         frame.render_widget(Paragraph::new(Line::styled(text, Style::new().fg(palette.text_dim))).wrap(Wrap { trim: true }), inner);
     } else {
-        // The caret rests on the overlay cycle row on entry, so a bare enter cycles rather than
-        // starts. Name the start chip instead of promising a key that does something else.
-        empty_state_with_action(frame, palette, inner, "no run yet", glyph::KEY_ENTER, " on start run");
+        empty_state(frame, palette, inner, "no run yet");
     }
 }
 
@@ -1114,10 +1119,10 @@ fn skipped_outputs_recorded_elsewhere(chat: &ChatMedia, skipped: usize) -> bool 
 }
 
 /// The form's rows must fit the body a panel is guaranteed at the compact floor, the same invariant
-/// the overview's and the memories screen's panels rest on. The strict `<` reserves the disabled
-/// chip's tooltip row on top of the six visible rows (`a + 1 <= b` spelled `a < b`, the clippy-fix
-/// form).
-const _: () = assert!(StaticRow::ALL.len() + FormRow::ALL.len() < GUARANTEED_INTERIOR_ROWS as usize);
+/// the overview's and the memories screen's panels rest on. The strict `<` reserves the spacer row
+/// and the disabled chip's tooltip row on top of the six visible rows (`a + 2 <= b` spelled
+/// `a + 1 < b`, the clippy-fix form).
+const _: () = assert!(StaticRow::ALL.len() + FormRow::ALL.len() + 1 < GUARANTEED_INTERIOR_ROWS as usize);
 
 #[cfg(test)]
 mod tests {

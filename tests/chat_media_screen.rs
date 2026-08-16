@@ -781,14 +781,14 @@ fn the_idle_chat_media_tab_renders_the_form_and_the_empty_state() {
     );
     assert!(cell_run(buffer, 4).contains("3.0 GiB"));
     assert!(cell_run(buffer, 4).contains("40%"));
-    assert!(cell_run(buffer, 5).contains("❯ overlay mode"), "the caret starts on the first real control: {:?}", cell_run(buffer, 5));
-    assert!(cell_run(buffer, 6).contains("transcode"));
-    assert!(cell_run(buffer, 7).contains("start run"));
+    assert!(cell_run(buffer, 6).contains("❯ overlay mode"), "the caret starts on the first real control: {:?}", cell_run(buffer, 6));
+    assert!(cell_run(buffer, 7).contains("transcode"));
+    assert!(cell_run(buffer, 8).contains("start run"));
 
     // The empty state names the key that starts the run, centered in the full-height progress
     // panel: 20 interior rows, a 4-row frame, 8 above and 8 below.
     assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
-    assert!(cell_run(buffer, 12).contains("press ↵ on start run"), "{:?}", cell_run(buffer, 12));
+    assert!(cell_run(buffer, 12).contains("press ↵ to start"), "{:?}", cell_run(buffer, 12));
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));
     assert!(!app.chat_media().descended());
 }
@@ -804,11 +804,11 @@ fn the_progress_panel_fills_the_body_below_the_form_at_the_designed_sizes() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
-        // The form opens on the body's first row and closes after its eight rows, top-aligned.
+        // The form opens on the body's first row and closes after its nine rows, top-aligned.
         assert_eq!(buffer[(0, 1)].symbol(), "╭", "the form panel opens on the body's first row");
-        assert_eq!(buffer[(0, 8)].symbol(), "╰", "the form keeps its Length rows at the top");
+        assert_eq!(buffer[(0, 9)].symbol(), "╰", "the form keeps its Length rows at the top");
         // The progress panel opens right below the form and fills down to the body's last row.
-        assert_eq!(buffer[(0, 9)].symbol(), "╭", "the progress panel opens on the row below the form");
+        assert_eq!(buffer[(0, 10)].symbol(), "╭", "the progress panel opens on the row below the form");
         assert_eq!(buffer[(0, height - 2)].symbol(), "╰", "the progress panel's bottom border sits on the body's last row");
     }
 }
@@ -824,13 +824,13 @@ fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
     // bracketed, and only the default.
     assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Both);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    let focused = cell_run(terminal.backend().buffer(), 5);
+    let focused = cell_run(terminal.backend().buffer(), 6);
     assert!(focused.contains("overlay mode  merged  [both]  originals"), "{focused}");
 
     // Blurred (the caret moves to the toggle): every option is a bare word, no brackets anywhere.
     press(&mut app, KeyCode::Down);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    let blurred = cell_run(terminal.backend().buffer(), 5);
+    let blurred = cell_run(terminal.backend().buffer(), 6);
     assert!(blurred.contains("overlay mode  merged  both  originals"), "{blurred}");
     assert!(!blurred.contains('['), "a blurred cycle row carries its selection by color alone: {blurred}");
 
@@ -842,9 +842,9 @@ fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
     assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Originals);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     assert!(
-        cell_run(terminal.backend().buffer(), 5).contains("merged  both  [originals]"),
+        cell_run(terminal.backend().buffer(), 6).contains("merged  both  [originals]"),
         "{:?}",
-        cell_run(terminal.backend().buffer(), 5)
+        cell_run(terminal.backend().buffer(), 6)
     );
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.chat_media().overlay_mode(), OverlayMode::Merged, "enter mirrors space on a cycle row");
@@ -861,7 +861,7 @@ fn the_overlay_cycle_brackets_its_selection_only_while_the_row_is_focused() {
     // label BLURRED, where the promoted and flattened treatments agree. Same wiring guard and same
     // reason as the memories twin; the tier axis stays pinned once, on the widget.
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    assert_run_fg(terminal.backend().buffer(), 6, "transcode", Palette::new(Tier::Full).text, "focus-promoted toggle label");
+    assert_run_fg(terminal.backend().buffer(), 7, "transcode", Palette::new(Tier::Full).text, "focus-promoted toggle label");
 
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Char(' '));
@@ -1262,16 +1262,16 @@ fn the_cycle_rows_brackets_and_selection_colours_survive_the_compatible_tier() {
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        assert!(cell_run(buffer, 5).contains("overlay mode  merged  [both]  originals"), "{tier:?}: {:?}", cell_run(buffer, 5));
+        assert!(cell_run(buffer, 6).contains("overlay mode  merged  [both]  originals"), "{tier:?}: {:?}", cell_run(buffer, 6));
         assert_eq!(
-            buffer[(column_of(buffer, 5, "[both]"), 5)].style().bg,
+            buffer[(column_of(buffer, 6, "[both]"), 6)].style().bg,
             Some(Palette::new(tier).bg_hover),
             "{tier:?}: the brackets are on a row that is really focused"
         );
 
-        assert_run_fg(buffer, 5, "[both]", accent, &format!("{tier:?} selected option"));
-        assert_run_fg(buffer, 5, "merged", faint, &format!("{tier:?} unselected option"));
-        assert_run_fg(buffer, 5, "originals", faint, &format!("{tier:?} unselected option"));
+        assert_run_fg(buffer, 6, "[both]", accent, &format!("{tier:?} selected option"));
+        assert_run_fg(buffer, 6, "merged", faint, &format!("{tier:?} unselected option"));
+        assert_run_fg(buffer, 6, "originals", faint, &format!("{tier:?} unselected option"));
     }
 }
 
@@ -1334,7 +1334,7 @@ fn the_counts_line_cuts_visibly_when_it_outgrows_the_row() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    let line = cell_run(buffer, 10);
+    let line = cell_run(buffer, 11);
     // The row's leading cells are the panel border and padding; the qualifier's leading position
     // inside the line is pinned by `an_unreadable_dir_puts_the_lower_bound_qualifier_before_every_count`.
     assert!(line.contains(QUALIFIER), "{line}");
@@ -1375,7 +1375,7 @@ fn the_counts_line_marks_the_cut_even_when_the_row_is_full() {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
-        let line = cell_run(buffer, 10);
+        let line = cell_run(buffer, 11);
         assert!(line.contains(QUALIFIER), "{width}: {line}");
         assert!(line.contains("2 overlays unmatched"), "{width}: {line}");
         // The border and any spare cell between the marker and the border strip away; the
@@ -1418,7 +1418,7 @@ fn the_stacked_and_form_only_arms_render_on_both_tiers() {
         assert!(row(buffer, 1).starts_with("╭─ SETUP ─"), "{tier:?}: {:?}", row(buffer, 1));
         assert!(!row(buffer, 1).contains("PROGRESS"), "{tier:?}: the arm is stacked, not side by side: {:?}", row(buffer, 1));
         assert!(screen_text(buffer).contains("PROGRESS"), "{tier:?}: the table panel sits below the form, not nowhere");
-        assert_run_fg(buffer, 5, "overlay mode", palette.text, &format!("{tier:?} focus-promoted label"));
+        assert_run_fg(buffer, 6, "overlay mode", palette.text, &format!("{tier:?} focus-promoted label"));
 
         // Form-only: narrower than one form panel's own floor, so the table is dropped outright.
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
@@ -1888,14 +1888,14 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
     // The focused overlay row (the first focusable row, now that the static rows are out of the
     // walk) carries the tint out to column 52 — the padding boundary.
     for x in 2..53 {
-        assert_eq!(buffer[(x, 5)].style().bg, Some(palette.bg_hover), "focused row column {x}");
+        assert_eq!(buffer[(x, 6)].style().bg, Some(palette.bg_hover), "focused row column {x}");
     }
     // The padding columns stay on the base surface, and neither a static row above nor the toggle
     // row below carries the tint.
-    assert_ne!(buffer[(1, 5)].style().bg, Some(palette.bg_hover));
-    assert_ne!(buffer[(53, 5)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(1, 6)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(53, 6)].style().bg, Some(palette.bg_hover));
     assert_ne!(buffer[(2, 2)].style().bg, Some(palette.bg_hover), "the static source row takes no tint");
-    assert_ne!(buffer[(2, 6)].style().bg, Some(palette.bg_hover), "the toggle row is unfocused");
+    assert_ne!(buffer[(2, 7)].style().bg, Some(palette.bg_hover), "the toggle row is unfocused");
 }
 
 #[test]
@@ -2102,10 +2102,10 @@ fn a_source_with_no_export_names_the_problem_instead_of_inviting_a_run() {
     let buffer = terminal.backend().buffer();
     let text = screen_text(buffer);
     // The empty state names the problem and the fix (the run's own `NoExportId` refusal), the way
-    // the history tab does — never the empty state's "press ↵ on start run" (sweep: empty and error states).
+    // the history tab does — never the empty state's "press ↵ to start" (sweep: empty and error states).
     assert!(text.contains("no mydata~ export part under"), "{text}");
     assert!(text.contains("export's parts"), "the fix clause renders: {text}");
-    assert!(!text.contains("press ↵ on start run"), "a no-export source must not invite a run: {text}");
+    assert!(!text.contains("press ↵ to start"), "a no-export source must not invite a run: {text}");
 }
 
 #[test]

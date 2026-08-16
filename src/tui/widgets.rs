@@ -315,24 +315,17 @@ pub(crate) fn status_pill(palette: &Palette, status: ItemStatus) -> Vec<Span<'st
     spans
 }
 
-/// The framed empty state (contract: Empty state): a hint line, then an action line naming the key
-/// that starts the run. The action is the bare "press ↵ to start" — the shape for a screen whose
-/// run starts on a bare enter through its start chip.
+/// The framed empty state (contract: Empty state): a hint line, then the action line naming the key
+/// that starts the run. The action is the bare "press ↵ to start" — the copy the ruling unified
+/// across both run screens. The start chip's own enter starts the run, so the line names the chip's
+/// key rather than what a bare enter does on the caret's current row.
 pub(crate) fn empty_state(frame: &mut Frame, palette: &Palette, inner: Rect, hint: &str) {
-    empty_state_with_action(frame, palette, inner, hint, glyph::KEY_ENTER, " to start");
-}
-
-/// [`empty_state`] with the action line spelled per screen: the literal `press `, then `key` in
-/// `ACCENT + bold`, then `verb` (cloudy-tui: Empty state — action line). A screen whose caret rests
-/// on a state control rather than the start chip passes the chip's own key, so the line never
-/// promises a bare enter that would do something else.
-pub(crate) fn empty_state_with_action(frame: &mut Frame, palette: &Palette, inner: Rect, hint: &str, key: char, verb: &str) {
     const INSET: u16 = 3;
 
     let action = Line::from(vec![
         Span::styled("press ", Style::new().fg(palette.text_dim)),
-        Span::styled(key.to_string(), Style::new().fg(palette.accent).bold()),
-        Span::styled(verb, Style::new().fg(palette.text_dim)),
+        Span::styled(glyph::KEY_ENTER.to_string(), Style::new().fg(palette.accent).bold()),
+        Span::styled(" to start", Style::new().fg(palette.text_dim)),
     ]);
     let width = u16::try_from(cells(hint).max(action.width()) + 2 * usize::from(INSET) + 2).unwrap_or(u16::MAX);
     let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
@@ -1113,19 +1106,6 @@ mod tests {
         assert_eq!(help_line_count(&sections), 14);
         assert!(help_scrollable(&sections, 14), "14 lines over a 7-row viewport scroll");
         assert!(!help_scrollable(&sections, 30), "the same 14 lines fit a 20-row viewport");
-    }
-
-    #[test]
-    fn the_empty_state_action_line_can_name_a_specific_control() {
-        let palette = Palette::new(Tier::Full);
-        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
-        terminal
-            .draw(|frame| {
-                empty_state_with_action(frame, &palette, Rect::new(0, 0, 60, 16), "no run yet", glyph::KEY_ENTER, " on start run")
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        assert!(contains(buffer, "press ↵ on start run"), "the action line names the chip rather than a bare enter");
     }
 
     #[test]

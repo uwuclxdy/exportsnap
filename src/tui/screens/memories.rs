@@ -305,6 +305,10 @@ impl Memories {
     /// revert a per-run override the user set on this form.
     pub(crate) fn apply_run_defaults(&mut self, out_root: PathBuf, ffmpeg: Option<PathBuf>, transcode: bool) {
         self.out_root = out_root.clone();
+        // One-way ratchet: once the user flips the toggle this session, later settings commits are
+        // ignored for the rest of the session (intended per-run-override semantics). Do not "fix"
+        // this into re-tracking the config — a settings commit must not move a control out from
+        // under the user's explicit override.
         if !self.transcode_overridden {
             self.transcode = transcode;
         }
@@ -698,7 +702,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, memories: &mut Memories, are
     // the focused-row tint, which only exists once the layout has run.
     let tooltip = !memories.start_enabled() && row_focused(memories, FormRow::Start.index());
     let form_height =
-        u16::try_from(StaticRow::ALL.len() + FormRow::ALL.len() + usize::from(tooltip)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
+        u16::try_from(StaticRow::ALL.len() + FormRow::ALL.len() + 1 + usize::from(tooltip)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
 
     // The side-by-side form panel grows from its narrow floor to fit the longest raw path, capped
     // so the progress table keeps its interior floor. The gate itself stays on the floor width, so
@@ -752,10 +756,13 @@ fn render_form(frame: &mut Frame, palette: &Palette, memories: &Memories, area: 
 /// The form's rows, one `Line` per row plus the disabled-chip tooltip. `width` is the panel's
 /// interior width, which the selected rows' tint pads out to.
 fn form_panel(palette: &Palette, memories: &Memories, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::with_capacity(StaticRow::ALL.len() + FormRow::ALL.len() + 1);
+    let mut rows = Vec::with_capacity(StaticRow::ALL.len() + FormRow::ALL.len() + 2);
     for row in StaticRow::ALL {
         rows.push(static_form_row(palette, memories, row, width));
     }
+    // A blank row separates the read-only block from the focusable controls, so the static rows
+    // read apart from the form. It is a spacer only: the caret walk stays over the form rows.
+    rows.push(Line::default());
     for (index, row) in FormRow::ALL.into_iter().enumerate() {
         rows.push(form_row(palette, memories, row, index, width));
     }
@@ -944,9 +951,10 @@ fn skipped_outputs_recorded_elsewhere(memories: &Memories, skipped: usize) -> bo
 }
 
 /// The form's rows must fit the body a panel is guaranteed at the compact floor, the same
-/// invariant the overview's panels rest on. The strict `<` reserves the disabled chip's tooltip
-/// row on top of the five visible rows (`a + 1 <= b` spelled `a < b`, the clippy-fix form).
-const _: () = assert!(StaticRow::ALL.len() + FormRow::ALL.len() < GUARANTEED_INTERIOR_ROWS as usize);
+/// invariant the overview's panels rest on. The strict `<` reserves the spacer row and the
+/// disabled chip's tooltip row on top of the five visible rows (`a + 2 <= b` spelled `a + 1 < b`,
+/// the clippy-fix form).
+const _: () = assert!(StaticRow::ALL.len() + FormRow::ALL.len() + 1 < GUARANTEED_INTERIOR_ROWS as usize);
 
 #[cfg(test)]
 mod tests {

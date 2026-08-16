@@ -506,8 +506,8 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     assert_eq!(value_col(&source_row), value_col(&output_row), "static values stack in one column:\n{source_row}\n{output_row}");
     assert!(cell_run(buffer, 4).contains("3.0 GiB"));
     assert!(cell_run(buffer, 4).contains("40%"));
-    assert!(cell_run(buffer, 5).contains("❯ transcode"), "the caret starts on the first real control: {:?}", cell_run(buffer, 5));
-    assert!(cell_run(buffer, 6).contains("start run"));
+    assert!(cell_run(buffer, 6).contains("❯ transcode"), "the caret starts on the first real control: {:?}", cell_run(buffer, 6));
+    assert!(cell_run(buffer, 7).contains("start run"));
     // The empty state names the key that starts the run, centered in the full-height progress
     // panel: 20 interior rows, a 4-row frame, 8 above and 8 below.
     assert!(cell_run(buffer, 11).contains("no run yet"), "{:?}", cell_run(buffer, 11));
@@ -522,8 +522,8 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     // after the panel's border, its padding cell and the caret gutter.
     let palette = Palette::new(Tier::Full);
     for x in 4..13 {
-        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text), "focus-promoted toggle label, cell ({x}, 5)");
-        assert!(buffer[(x, 5)].style().add_modifier.contains(Modifier::BOLD), "focus-promoted toggle label, cell ({x}, 5)");
+        assert_eq!(buffer[(x, 6)].style().fg, Some(palette.text), "focus-promoted toggle label, cell ({x}, 6)");
+        assert!(buffer[(x, 6)].style().add_modifier.contains(Modifier::BOLD), "focus-promoted toggle label, cell ({x}, 6)");
     }
 
     assert_eq!(app.active(), exportsnap::app::Tab::Memories);
@@ -537,7 +537,7 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     for x in 4..13 {
-        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text_dim), "blurred toggle label, cell ({x}, 5)");
+        assert_eq!(buffer[(x, 6)].style().fg, Some(palette.text_dim), "blurred toggle label, cell ({x}, 6)");
     }
 }
 
@@ -552,11 +552,11 @@ fn the_progress_panel_fills_the_body_below_the_form_at_the_designed_sizes() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
-        // The form opens on the body's first row and closes after its seven rows, top-aligned.
+        // The form opens on the body's first row and closes after its eight rows, top-aligned.
         assert_eq!(buffer[(0, 1)].symbol(), "╭", "the form panel opens on the body's first row");
-        assert_eq!(buffer[(0, 7)].symbol(), "╰", "the form keeps its Length rows at the top");
+        assert_eq!(buffer[(0, 8)].symbol(), "╰", "the form keeps its Length rows at the top");
         // The progress panel opens right below the form and fills down to the body's last row.
-        assert_eq!(buffer[(0, 8)].symbol(), "╭", "the progress panel opens on the row below the form");
+        assert_eq!(buffer[(0, 9)].symbol(), "╭", "the progress panel opens on the row below the form");
         assert_eq!(buffer[(0, height - 2)].symbol(), "╰", "the progress panel's bottom border sits on the body's last row");
     }
 }
@@ -1245,14 +1245,14 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
     // panel). The focused toggle row (the first focusable row, now that the static rows are out of
     // the walk) carries the tint out to column 47 — the padding boundary.
     for x in 2..48 {
-        assert_eq!(buffer[(x, 5)].style().bg, Some(palette.bg_hover), "focused row column {x}");
+        assert_eq!(buffer[(x, 6)].style().bg, Some(palette.bg_hover), "focused row column {x}");
     }
     // The padding columns stay on the base surface, and neither a static row above nor the start
     // chip row below carries the tint.
-    assert_ne!(buffer[(1, 5)].style().bg, Some(palette.bg_hover));
-    assert_ne!(buffer[(48, 5)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(1, 6)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(48, 6)].style().bg, Some(palette.bg_hover));
     assert_ne!(buffer[(2, 2)].style().bg, Some(palette.bg_hover), "the static source row takes no tint");
-    assert_ne!(buffer[(2, 6)].style().bg, Some(palette.bg_hover), "the start chip row is unfocused");
+    assert_ne!(buffer[(2, 7)].style().bg, Some(palette.bg_hover), "the start chip row is unfocused");
 }
 
 #[test]
@@ -1406,8 +1406,8 @@ fn descending_drops_the_caret_but_keeps_the_toggle_tint() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(2, 5)].style().bg, Some(palette.bg_hover));
-    assert_eq!(buffer[(2, 5)].symbol(), "❯");
+    assert_eq!(buffer[(2, 6)].style().bg, Some(palette.bg_hover));
+    assert_eq!(buffer[(2, 6)].symbol(), "❯");
 
     // Descend via `tab`: the caret drops, but the blurred pane preserves the last-selected row's
     // `BG_HOVER` tint (cloudy-tui: blurred panes preserve the last-selected row's tint). `tab` is a
@@ -1415,8 +1415,8 @@ fn descending_drops_the_caret_but_keeps_the_toggle_tint() {
     descend_into_table(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    assert_ne!(buffer[(2, 5)].symbol(), "❯", "the caret drops when the pane blurs");
-    assert_eq!(buffer[(2, 5)].style().bg, Some(palette.bg_hover), "the blurred pane keeps the last-selected row's tint");
+    assert_ne!(buffer[(2, 6)].symbol(), "❯", "the caret drops when the pane blurs");
+    assert_eq!(buffer[(2, 6)].style().bg, Some(palette.bg_hover), "the blurred pane keeps the last-selected row's tint");
 }
 
 #[test]
