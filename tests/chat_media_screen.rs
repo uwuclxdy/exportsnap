@@ -930,10 +930,16 @@ fn a_planned_run_renders_the_counts_line_the_bar_the_header_and_one_row_per_item
     assert!(cell_run(buffer, 4).contains("IDENTITY"), "{:?}", cell_run(buffer, 4));
     assert!(cell_run(buffer, 4).contains("STATUS"));
     assert!(cell_run(buffer, 5).contains("[ pending ]"), "{:?}", cell_run(buffer, 5));
-    // The output column shows the planned name either way: whole, or middle-ellipsized with both
-    // ends surviving (the split policy is pinned in format.rs).
+    // The output column shows the planned name either way: whole, or middle-ellipsized. The cut
+    // keeps the head's first two cells and the tail's last three at every renderable budget
+    // (the split policy is pinned in format.rs), and the output column is the row's last text,
+    // so its cut is the row's last ellipsis.
     let row5 = cell_run(buffer, 5);
-    assert!(row5.contains("20210304_143005.jpg") || (row5.contains("20…") && row5.contains("…jpg")), "{row5:?}");
+    if !row5.contains("20210304_143005.jpg") {
+        let cut = row5.rfind('…').expect("the name truncates with a visible cut");
+        assert!(row5[..cut].contains("20"), "the head survives: {row5}");
+        assert!(row5[cut..].contains("jpg"), "the tail survives: {row5}");
+    }
 
     // A real manifest write flips the pill and advances the bar.
     let output = dir.path().join("out/chat/x/20210304_143005.jpg");

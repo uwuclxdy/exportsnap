@@ -603,9 +603,15 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
     let first = cell_run(buffer, 4);
     assert!(first.contains(&uuid(1)[..8]), "{first}");
     assert!(first.contains("[ pending ]"), "{first}");
-    // The output column shows the planned name either way: whole, or middle-ellipsized with both
-    // ends surviving (the split policy is pinned in format.rs).
-    assert!(first.contains("20210115_133005.jpg") || (first.contains("20…") && first.contains("…jpg")), "{first}");
+    // The output column shows the planned name either way: whole, or middle-ellipsized. The cut
+    // keeps the head's first two cells and the tail's last three at every renderable budget
+    // (the split policy is pinned in format.rs), and the output column is the row's last text,
+    // so its cut is the row's last ellipsis.
+    if !first.contains("20210115_133005.jpg") {
+        let cut = first.rfind('…').expect("the name truncates with a visible cut");
+        assert!(first[..cut].contains("20"), "the head survives: {first}");
+        assert!(first[cut..].contains("jpg"), "the tail survives: {first}");
+    }
     let second = cell_run(buffer, 5);
     assert!(second.contains("[ pending ]"), "{second}");
 
