@@ -27,10 +27,13 @@ pub struct RunAlert {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertKind {
-    /// A run that finished with no failures.
+    /// A run that finished with no failures and nothing left to notice.
     Info,
-    /// A run that failed somewhere, or could not start.
+    /// A run that finished but left something to notice — a resume whose outputs landed under a
+    /// different out dir — worth a look, not a failure.
     Warning,
+    /// A run that failed somewhere, or could not start.
+    Danger,
 }
 
 /// What a finished run does to its tab's label while the user is on another tab (cloudy-tui:
@@ -40,13 +43,15 @@ pub enum AlertKind {
 pub enum TabActivity {
     /// A run that finished cleanly: the inactive label takes SUCCESS.
     Success,
+    /// A run that finished but left something to notice: the inactive label takes WARNING.
+    Warning,
     /// A run that failed somewhere, or could not start: the inactive label takes DANGER.
     Danger,
 }
 
 impl RunAlert {
     /// The alert a finished run raises: a clean completion is `INFO`, anything with a failure is
-    /// `WARNING`.
+    /// `DANGER`.
     ///
     /// Zero counts are hidden (Patterns → Counts and plurals): a clean resume reads "5 skipped",
     /// never "0 fixed". A run that fixed, failed, skipped, deferred and excluded nothing at all had
@@ -70,7 +75,7 @@ impl RunAlert {
         } else {
             format!("run finished {} {}", glyph::CLAUSE_SEPARATOR, clauses.join(&format!(" {} ", glyph::CLAUSE_SEPARATOR)))
         };
-        Self { kind: if report.failed.is_empty() { AlertKind::Info } else { AlertKind::Warning }, message }
+        Self { kind: if report.failed.is_empty() { AlertKind::Info } else { AlertKind::Danger }, message }
     }
 
     /// The alert the history run raises: "run finished · N conversations · M documents", plus the
@@ -106,20 +111,20 @@ impl RunAlert {
     /// [`crate::export::history_run::RunError`], whose `Display` is written to be read here.
     #[must_use]
     pub fn failure(error: &impl std::fmt::Display) -> Self {
-        Self { kind: AlertKind::Warning, message: error.to_string() }
+        Self { kind: AlertKind::Danger, message: error.to_string() }
     }
 
     /// The tab-activity state this alert raises on a background tab (cloudy-tui: Tab bar → Tab
-    /// activity). The two-way map is the two kinds the alert already keeps: a clean run is
-    /// [`TabActivity::Success`], anything else — a failure, a run that could not start, a resume
-    /// whose outputs land under a different root — is [`TabActivity::Danger`]. The contract's
-    /// `WARNING` "needs attention" tier is a possible refinement, not a thing this channel
-    /// distinguishes yet.
+    /// activity). The three-way map mirrors the three kinds the alert already keeps: a clean run
+    /// is [`TabActivity::Success`], a run that finished but left something to notice is
+    /// [`TabActivity::Warning`], and a genuine failure — a run that failed somewhere, or could not
+    /// start — is [`TabActivity::Danger`].
     #[must_use]
     pub const fn activity(&self) -> TabActivity {
         match self.kind {
             AlertKind::Info => TabActivity::Success,
-            AlertKind::Warning => TabActivity::Danger,
+            AlertKind::Warning => TabActivity::Warning,
+            AlertKind::Danger => TabActivity::Danger,
         }
     }
 }

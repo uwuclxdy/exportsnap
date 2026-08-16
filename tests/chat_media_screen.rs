@@ -1173,7 +1173,7 @@ fn a_manifest_that_goes_unreadable_mid_run_raises_its_own_failure() {
     app.tick();
 
     let alert = app.chat_media().alert().expect("a poll that cannot read the manifest ends the run");
-    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert_eq!(alert.kind, AlertKind::Danger, "{}", alert.message);
     assert!(alert.message.contains("manifest"), "{}", alert.message);
     assert!(!app.chat_media().run_in_flight(), "the failed poll ends the run rather than wedging it");
 }
@@ -1486,7 +1486,7 @@ fn a_failing_chat_item_keeps_its_conversation_out_of_the_alert() {
     // failure message carrying the conversation key. Without this the test would pass on a run that
     // simply succeeded.
     let alert = app.chat_media().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert_eq!(alert.kind, AlertKind::Danger, "{}", alert.message);
 
     // …and the guard holds: the count reaches the footer, the reason does not.
     assert!(alert.message.contains("1 failed"), "{}", alert.message);
@@ -1547,7 +1547,7 @@ fn a_worker_slower_than_the_old_iteration_budget_still_lands_its_alert() {
 
     wait_for_alert(&mut app);
     let alert = app.chat_media().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert_eq!(alert.kind, AlertKind::Danger, "{}", alert.message);
 }
 
 /// The screen-driven run honours the cycle row: switching to `originals` before pressing start means
@@ -1816,7 +1816,7 @@ fn a_worker_that_panics_still_yields_a_panic_alert_and_no_stuck_spinner() {
 
     wait_for_alert(&mut app);
     let alert = app.chat_media().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 
     // The empty state is read at its side-by-side position, so the frame must clear the arm's
@@ -1864,7 +1864,7 @@ fn a_channel_that_goes_dead_without_a_finished_event_reports_a_panic() {
     app.tick();
 
     let alert = app.chat_media().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 }
 

@@ -736,7 +736,7 @@ fn a_channel_that_goes_dead_without_a_finished_event_reports_a_panic() {
     app.tick();
 
     let alert = app.history().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 }
 
@@ -750,7 +750,7 @@ fn a_worker_that_panics_still_yields_a_panic_alert() {
     // on the panic alert rather than spinning forever.
     wait_for_alert(&mut app);
     let alert = app.history().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
     assert!(!app.history().run_in_flight(), "the run is over even though it failed");
 }

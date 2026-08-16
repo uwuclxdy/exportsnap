@@ -180,6 +180,7 @@ fn label_style(palette: &Palette, active: bool, activity: Option<TabActivity>) -
     } else {
         match activity {
             Some(TabActivity::Success) => Style::new().fg(palette.success),
+            Some(TabActivity::Warning) => Style::new().fg(palette.warning),
             Some(TabActivity::Danger) => Style::new().fg(palette.danger),
             None => Style::new().fg(palette.text_dim),
         }

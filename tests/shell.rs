@@ -242,6 +242,27 @@ fn an_inactive_tab_with_activity_takes_the_activity_color_and_the_active_ignores
 }
 
 #[test]
+fn an_inactive_tab_with_warning_activity_takes_the_warning_color() {
+    use exportsnap::tui::alert::TabActivity;
+    let palette = Palette::new(Tier::Full);
+    let mut activity = [None; Tab::ALL.len()];
+    activity[2] = Some(TabActivity::Warning);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(header::render(&palette, Tab::Overview, "9.9.9", 120, false, &activity), frame.area());
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // "chat media" is the third tab, the same column the success-activity pin above reads.
+    let chat = INACTIVE_SECOND_COLUMN + 8 + 3;
+    assert_eq!(buffer[(chat, 0)].style().fg, Some(palette.warning), "warning activity takes the warning color");
+    assert!(!buffer[(chat, 0)].style().add_modifier.contains(Modifier::UNDERLINED), "no underline rule beneath an activity label");
+}
+
+#[test]
 fn the_underline_moves_with_the_active_tab() {
     // Overview is now inactive (bare word, 8 cells), so the active memories tab's `●` starts
     // 3 past it and its underlined word two cells after that.

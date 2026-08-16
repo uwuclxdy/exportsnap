@@ -879,7 +879,7 @@ fn a_manifest_that_goes_unreadable_mid_run_raises_its_own_failure() {
     app.tick();
 
     let alert = app.memories().alert().expect("a poll that cannot read the manifest ends the run");
-    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert_eq!(alert.kind, AlertKind::Danger, "{}", alert.message);
     assert!(alert.message.contains("manifest"), "{}", alert.message);
     assert!(!app.memories().run_in_flight(), "the failed poll ends the run rather than wedging it");
 }
@@ -913,7 +913,7 @@ fn a_manifest_error_on_the_finishing_tick_leaves_the_runs_own_verdict_standing()
 }
 
 #[test]
-fn a_failed_run_raises_a_warning_alert_that_x_dismisses() {
+fn a_failed_run_raises_a_failure_alert_that_x_dismisses() {
     let dir = export_tree("alert-x", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let (sender, receiver) = mpsc::channel();
@@ -922,7 +922,7 @@ fn a_failed_run_raises_a_warning_alert_that_x_dismisses() {
     app.tick();
 
     let alert = app.memories().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("memories_history.json"), "{}", alert.message);
 
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -1122,7 +1122,7 @@ fn a_worker_slower_than_the_old_iteration_budget_still_lands_its_alert() {
 
     wait_for_alert(&mut app);
     let alert = app.memories().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert_eq!(alert.kind, AlertKind::Danger, "{}", alert.message);
 }
 
 #[test]
@@ -1169,7 +1169,7 @@ fn a_channel_that_goes_dead_without_a_finished_event_reports_a_panic() {
     app.tick();
 
     let alert = app.memories().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 }
 
@@ -1183,7 +1183,7 @@ fn a_worker_that_panics_still_yields_a_panic_alert_and_no_stuck_spinner() {
     // on the panic alert rather than spinning forever.
     wait_for_alert(&mut app);
     let alert = app.memories().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 
     // No stuck spinner: the progress panel shows the empty state, not the plan phase. The frame
@@ -1215,7 +1215,7 @@ fn a_worker_that_panics_after_planning_keeps_the_table_and_reports_the_panic() {
     );
     wait_for_alert(&mut app);
     let alert = app.memories().alert().unwrap();
-    assert_eq!(alert.kind, AlertKind::Warning);
+    assert_eq!(alert.kind, AlertKind::Danger);
     assert!(alert.message.contains("unexpectedly"), "{}", alert.message);
 
     // The planned table is still there — the panic alert replaces the spinner, not the rows.
@@ -1877,7 +1877,7 @@ fn a_place_name_token_reaches_no_output_path_error_or_manifest_field() {
     let alert = app.memories().alert().unwrap();
     let alert_kind = alert.kind;
     let alert_message = alert.message.clone();
-    assert_eq!(alert_kind, AlertKind::Warning, "the occupied path must fail one item: {alert_message}");
+    assert_eq!(alert_kind, AlertKind::Danger, "the occupied path must fail one item: {alert_message}");
     assert!(alert_message.contains("1 failed"), "the failing item must be the one the alert counts: {alert_message}");
 
     // The control, and it is what makes the sweeps below mean something: the token really is in

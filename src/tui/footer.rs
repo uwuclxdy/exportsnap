@@ -177,8 +177,9 @@ fn quit_alert(palette: &Palette) -> Line<'static> {
     ])
 }
 
-/// The run-completion alert: ` i ` for a clean run, ` ! ` for one with failures, message in
-/// `TEXT_DIM`, exactly like the quit prompt a glyph-only line on the base surface.
+/// The run-completion alert: ` i ` for a clean run, ` ! ` for one that needs attention
+/// (`WARNING`) or failed (`DANGER`), message in `TEXT_DIM`, exactly like the quit prompt a
+/// glyph-only line on the base surface.
 ///
 /// The message is fit into the row: a `Line` past the row clips at the terminal edge with no
 /// marker, which is a cut the reader cannot tell from the message ending there.
@@ -186,6 +187,7 @@ fn completion_alert(palette: &Palette, alert: &RunAlert, width: u16) -> Line<'st
     let (marker, color) = match alert.kind {
         AlertKind::Info => (glyph::ALERT_MARKER_INFO, palette.info),
         AlertKind::Warning => (glyph::ALERT_MARKER, palette.warning),
+        AlertKind::Danger => (glyph::ALERT_MARKER, palette.danger),
     };
     // The marker's own three cells — space, glyph, space; the message gets every remaining
     // cell, no right inset.
