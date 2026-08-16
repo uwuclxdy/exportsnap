@@ -1768,6 +1768,9 @@ fn the_alt_jump_ascends_the_pane_it_leaves_on_either_screen() {
     let _ = sender;
 
     on_tab(&mut app, Tab::Memories);
+    // The memories descend moved onto the start chip when its static rows dropped out of the walk,
+    // so one ↓ reaches it from the default toggle caret.
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     assert!(app.memories().descended());
     app.handle_event(&Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT)));

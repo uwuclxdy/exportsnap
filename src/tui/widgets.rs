@@ -130,6 +130,18 @@ pub(crate) fn static_row(
     if selected { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
 }
 
+/// A non-focusable key:value display row (contract: Static key:value rows, the column-aligned
+/// form): the key is `TEXT_DIM + bold` at all times (the static-key anchor, not a focus cue),
+/// padded to `column` so its value stacks under the group's widest label, no colon, no caret, no
+/// selection tint. The run screens' informational rows (source, output dir, disk free) render this
+/// now that they are display-only (ruling: static informational rows are non-focusable); a
+/// focusable row keeps [`static_row`]'s ragged grammar instead.
+pub(crate) fn display_row(palette: &Palette, label: &str, column: usize, value: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![Span::styled(format!("{label:<column$}"), Style::new().fg(palette.text_dim).bold())];
+    spans.extend(value);
+    Line::from(spans)
+}
+
 /// The value budget a form's path row gets at `width`: the interior cells left after the caret,
 /// the label and the gap, floored at `floor` so the narrow side-by-side form keeps its tight value
 /// column (the two run screens' `PATH_CELLS`). In the full-width arms the row uses whatever the

@@ -20,11 +20,13 @@
 //!
 //! # Focus
 //!
-//! The form's caret walks all five rows (the three static rows are focusable-but-inert, per the
-//! contract's Disabled-row grammar). Enter on a static row descends into the table pane, which is
+//! The form's caret walks the two real controls — the transcode toggle and the start chip — while
+//! the three informational rows (source, output dir, disk free) render as non-focusable,
+//! column-aligned key:value rows. Enter on the start chip descends into the table pane, which is
 //! read-only but focusable for scrolling; with no table yet (no run planned) there is nothing to
 //! descend into, so enter starts the run instead — the promise the empty state's action line
-//! makes. esc or `←` ascends, `→` is inert while descended. The selection caret renders only in
+//! makes. Starting a fresh run once a table exists goes through the action menu's `start run`.
+//! esc or `←` ascends, `→` is inert while descended. The selection caret renders only in
 //! the focused pane; the selected form row keeps its tint while the form is blurred. While a run
 //! is live the table follows its tail until the user scrolls up.
 
@@ -37,59 +39,80 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::{ListState, Paragraph, Wrap};
 
 use crate::export::env::Environment;
-use crate::export::local_fix::VideoOptions;
+use crate::export::local_fix::{VideoOptions, canonical_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::memories_run::{self, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
-use crate::tui::alert::RunAlert;
+use crate::export::zip::discover_parts;
+use crate::tui::alert::{AlertKind, RunAlert};
 use crate::tui::format::{cells, head_ellipsis, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
-use crate::tui::theme::Palette;
+use crate::tui::theme::{Palette, glyph};
 use crate::tui::widgets::{
     self, CARET_GUTTER, IDENTITY_CELLS, LABEL_GAP, LOCATION_CELLS, OUTPUT_MIN, PanelStyle, ProgressColumns, ProgressRow, STATUS_CELLS,
-    action_chip, caret, disk_free_value, empty_state, form_label, overall_bar, panel, path_budget, planning_spinner, progress_header,
-    progress_list, static_row, tint_to_edge, tooltip,
+    action_chip, caret, disk_free_value, display_row, empty_state, form_label, overall_bar, panel, planning_spinner, progress_header,
+    progress_list, tint_to_edge, tooltip,
 };
 
 // ---- layout budgets ----
 
-/// Cells a path value is head-ellipsised to. The form's value column is this wide, so the source
-/// and the output dir rows hold their width whatever the machine's actual paths are.
+/// Cells a path value is head-ellipsised to. The static rows' value column is this wide, so the
+/// source and the output dir rows hold their width whatever the machine's actual paths are.
 const PATH_CELLS: usize = 22;
-/// The widest form label, which sets where the ragged rows' widest value lands.
-const WIDEST_FORM_LABEL: usize = 10;
+/// The widest static row's label (`output dir`), which sets the column the static values stack at.
+const WIDEST_STATIC_LABEL: usize = 10;
+/// The static rows' label column: the widest label plus the ≥ 2-space gap (contract: Static
+/// key:value rows pad each label to the group's widest label width + ≥ 2 spaces).
+const STATIC_LABEL_COLUMN: usize = WIDEST_STATIC_LABEL + LABEL_GAP;
 
-/// The form panel's interior cells at the widest ragged row (`output dir` + gap + value).
-const FORM_INTERIOR: usize = CARET_GUTTER + WIDEST_FORM_LABEL + LABEL_GAP + PATH_CELLS;
+/// The form panel's interior cells at the widest static row (label column + value).
+const FORM_INTERIOR: usize = STATIC_LABEL_COLUMN + PATH_CELLS;
 /// The table's interior cells when every column is at its narrowest.
 const TABLE_INTERIOR_MIN: usize = CARET_GUTTER + IDENTITY_CELLS + 2 + LOCATION_CELLS + 2 + STATUS_CELLS + 2 + OUTPUT_MIN;
 /// The table's fixed rows on top of the list: overall bar, header, and the panel's two borders.
 const TABLE_FLOOR_ROWS: u16 = 2 + 1 + 1 + widgets::BORDER_ROWS;
 
-/// The form's rows, in caret order.
-///
-/// The first three are informational: focus may land on them, but no key does anything there.
-/// Enter on one descends into the table, which is the whole reason the caret can rest on them at
-/// all. The last two are the interactive rows (contract: Toggle row; Action chip row).
+/// The form's static informational rows, rendered above the focusable rows as column-aligned
+/// key:value rows (contract: Static key:value rows — the ruling that makes them non-focusable).
+/// They are display-only: no caret, no selection tint, no key binding, and no enter-descend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormRow {
+enum StaticRow {
     Source,
     Output,
     DiskFree,
-    Transcode,
-    Start,
 }
 
-impl FormRow {
-    const ALL: [Self; 5] = [Self::Source, Self::Output, Self::DiskFree, Self::Transcode, Self::Start];
+impl StaticRow {
+    const ALL: [Self; 3] = [Self::Source, Self::Output, Self::DiskFree];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Source => "source",
             Self::Output => "output dir",
             Self::DiskFree => "disk free",
+        }
+    }
+}
+
+/// The form's focusable rows, in caret order.
+///
+/// The static rows dropped out of the walk (item 1): the caret now rests only on the two real
+/// controls, the transcode toggle and the start chip. Enter on the start chip keeps the old
+/// static-row behaviour — descend into the table when one exists, start the run when it does not —
+/// so the empty state's "press ↵ to start" promise stays true through the chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormRow {
+    Transcode,
+    Start,
+}
+
+impl FormRow {
+    const ALL: [Self; 2] = [Self::Transcode, Self::Start];
+
+    const fn label(self) -> &'static str {
+        match self {
             Self::Transcode => "transcode",
             Self::Start => "start run",
         }
@@ -100,8 +123,8 @@ impl FormRow {
     /// The disabled-chip tooltip is gated on the start chip holding focus, and writing that as
     /// `ALL.len() - 1` says "the last row" instead — the two agree only while [`Self::Start`] is
     /// last. A `len - 1` index's discriminating growth is APPENDING, which is how a form-row list
-    /// grows, so a sixth row after `Start` would silently take the tooltip with nothing red.
-    /// `the_tooltip_is_bound_to_the_start_chip_by_identity` pins the binding on both screens.
+    /// grows, so a third row after `Start` would silently take the tooltip with nothing red.
+    /// `the_tooltip_is_bound_to_the_start_chip_by_identity` pins the binding.
     fn index(self) -> usize {
         Self::ALL.iter().position(|row| *row == self).unwrap_or(0)
     }
@@ -119,6 +142,22 @@ fn row_focused(memories: &Memories, index: usize) -> bool {
     !memories.table.descended && memories.form_focus == index
 }
 
+/// Whether the source dir holds a Snapchat export, probed eagerly at build time so the empty state
+/// can name the problem before any run starts (sweep: empty and error states).
+///
+/// Only the "no export at all" case is distinguished: anything deeper — no `json/`, no
+/// `memories_history.json`, no media — is the run's own error to report, since answering it here
+/// would duplicate the pipeline's load for every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceState {
+    /// No `mydata~*` part was found under the source: the run would refuse with
+    /// [`RunError::NoExportId`], so the empty state says so instead of inviting a run.
+    NoExport,
+    /// An export is present, or the source could not be listed (which the run's own error path
+    /// diagnoses). The ordinary empty state applies.
+    Ready,
+}
+
 // ---- the screen state ----
 
 /// The memories tab's state.
@@ -128,6 +167,8 @@ pub struct Memories {
     out_root: PathBuf,
     environment: Environment,
     transcode: bool,
+    /// What the eager source probe found; drives the empty state's problem-and-fix copy.
+    source_state: SourceState,
     run: Run,
     receiver: Option<Receiver<RunEvent>>,
     /// Where runs started from the screen keep their manifest. `None` resolves the platform's
@@ -193,11 +234,19 @@ impl Memories {
     /// reaching for the real filesystem.
     #[must_use]
     pub fn with_environment(source: PathBuf, out_root: PathBuf, environment: Environment, transcode: bool) -> Self {
+        // The empty state's no-export copy needs to know whether the source holds an export before
+        // any run starts. `discover_parts` is the same cheap listing the overview runs; a deeper
+        // probe (json, media) is left to the run, whose error path owns that diagnosis.
+        let source_state = match discover_parts(&source) {
+            Ok(groups) if groups.is_empty() => SourceState::NoExport,
+            _ => SourceState::Ready,
+        };
         Self {
             source,
             out_root,
             environment,
             transcode,
+            source_state,
             run: Run::Idle,
             receiver: None,
             manifest_dir_override: None,
@@ -432,16 +481,24 @@ impl Memories {
             }
         };
         let rows = snapshot.rows;
-        let statuses = vec![ItemStatus::Pending; rows.len()];
+        let len = rows.len();
+        let statuses = vec![ItemStatus::Pending; len];
         if let Run::Active { view, .. } = &mut self.run {
             *view = Some(Box::new(RunView { rows, statuses, manifest, follow_tail: true }));
+        }
+        // Pin the tail at plan time, not only in the poll. A run small enough to plan and finish in
+        // one tick never gets a poll while `follow_tail` is still true — `finish` clears the flag on
+        // the same pump — so the tail-pin here is what makes that run end with the tail selected
+        // like every normally-completed run, and the first `↓` from it land on row one (todo §18).
+        if len > 0 {
+            self.table.list.select(Some(len - 1));
         }
     }
 
     /// The final event, or a failure this screen discovered on its own side (a manifest it could
     /// not read, a worker that died silently).
     fn finish(&mut self, outcome: RunOutcome) {
-        self.alert = Some(summary(&outcome));
+        self.alert = Some(summary(self, &outcome));
         if let Run::Active { view, worker } = &mut self.run {
             if let Some(view) = view {
                 view.follow_tail = false;
@@ -552,21 +609,17 @@ impl Memories {
             }
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                 match FormRow::ALL[self.form_focus] {
-                    FormRow::Source | FormRow::Output | FormRow::DiskFree => {
-                        // A static row has no row action, so its enter descends into the table.
-                        // With no table yet (no run planned) there is nothing to descend into,
-                        // and the empty state's "press ↵ to start" promise is what the key does
-                        // instead.
+                    FormRow::Transcode => self.transcode = !self.transcode,
+                    FormRow::Start => {
+                        // The start chip carries the old static-row behaviour: descend into the
+                        // table when one exists, start the run when it does not — the promise the
+                        // empty state's "press ↵ to start" line makes (item 1: enter-on-empty still
+                        // starts the run via the start chip). Starting a fresh run once a table
+                        // exists is the action menu's `start run`, which `a` opens.
                         let has_table = matches!(&self.run, Run::Active { view: Some(_), .. });
                         if has_table {
                             self.table.descended = true;
                         } else if self.start_enabled() {
-                            self.start_run();
-                        }
-                    }
-                    FormRow::Transcode => self.transcode = !self.transcode,
-                    FormRow::Start => {
-                        if self.start_enabled() {
                             self.start_run();
                         }
                     }
@@ -593,7 +646,8 @@ pub fn render(frame: &mut Frame, palette: &Palette, memories: &mut Memories, are
     // height is known before its rows are built — the rows need the panel's interior width for
     // the focused-row tint, which only exists once the layout has run.
     let tooltip = !memories.start_enabled() && row_focused(memories, FormRow::Start.index());
-    let form_height = u16::try_from(FormRow::ALL.len() + usize::from(tooltip)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
+    let form_height =
+        u16::try_from(StaticRow::ALL.len() + FormRow::ALL.len() + usize::from(tooltip)).unwrap_or(u16::MAX) + widgets::BORDER_ROWS;
 
     // The side-by-side form panel grows from its narrow floor to fit the longest raw path, capped
     // so the progress table keeps its interior floor. The gate itself stays on the floor width, so
@@ -604,7 +658,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, memories: &mut Memories, are
     let form_panel_width = u16::try_from(widgets::side_by_side_form_panel_width(
         usize::from(area.width),
         FORM_INTERIOR,
-        WIDEST_FORM_LABEL,
+        WIDEST_STATIC_LABEL,
         longest_path,
         TABLE_INTERIOR_MIN,
     ))
@@ -647,7 +701,10 @@ fn render_form(frame: &mut Frame, palette: &Palette, memories: &Memories, area: 
 /// The form's rows, one `Line` per row plus the disabled-chip tooltip. `width` is the panel's
 /// interior width, which the selected rows' tint pads out to.
 fn form_panel(palette: &Palette, memories: &Memories, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::with_capacity(FormRow::ALL.len() + 1);
+    let mut rows = Vec::with_capacity(StaticRow::ALL.len() + FormRow::ALL.len() + 1);
+    for row in StaticRow::ALL {
+        rows.push(static_form_row(palette, memories, row, width));
+    }
     for (index, row) in FormRow::ALL.into_iter().enumerate() {
         rows.push(form_row(palette, memories, row, index, width));
     }
@@ -658,38 +715,45 @@ fn form_panel(palette: &Palette, memories: &Memories, width: usize) -> Vec<Line<
     rows
 }
 
+/// One static (non-focusable) key:value row, column-aligned (contract: Static key:value rows): the
+/// key is `TEXT_DIM + bold`, padded to [`STATIC_LABEL_COLUMN`] so the values stack, no colon, no
+/// caret, no selection tint. The values take what the panel leaves after the label column, floored
+/// at [`PATH_CELLS`] for the two path rows so the narrow side-by-side form keeps its tight value.
+fn static_form_row(palette: &Palette, memories: &Memories, row: StaticRow, width: usize) -> Line<'static> {
+    match row {
+        StaticRow::Source => {
+            let budget = (width.saturating_sub(STATIC_LABEL_COLUMN)).max(PATH_CELLS);
+            let value = match memories.source.to_str().filter(|text| !text.is_empty()) {
+                Some(path) => Span::styled(right_pad(&head_ellipsis(path, budget), budget), Style::new().fg(palette.text)),
+                None => Span::styled(right_pad("—", budget), Style::new().fg(palette.text_faint)),
+            };
+            display_row(palette, row.label(), STATIC_LABEL_COLUMN, vec![value])
+        }
+        StaticRow::Output => {
+            let budget = (width.saturating_sub(STATIC_LABEL_COLUMN)).max(PATH_CELLS);
+            let shown = head_ellipsis(&memories.out_root.to_string_lossy(), budget);
+            display_row(
+                palette,
+                row.label(),
+                STATIC_LABEL_COLUMN,
+                vec![Span::styled(right_pad(&shown, budget), Style::new().fg(palette.text))],
+            )
+        }
+        StaticRow::DiskFree => {
+            // The value budget is what the row has left after the label column.
+            let budget = width.saturating_sub(STATIC_LABEL_COLUMN);
+            let value = disk_free_value(palette, &memories.environment, budget);
+            display_row(palette, row.label(), STATIC_LABEL_COLUMN, value)
+        }
+    }
+}
+
 fn form_row(palette: &Palette, memories: &Memories, row: FormRow, index: usize, width: usize) -> Line<'static> {
     let selected = row_selected(memories, index);
     let focused = row_focused(memories, index);
     let caret = caret(palette, focused);
 
     match row {
-        FormRow::Source => {
-            let budget = path_budget(width, row.label(), PATH_CELLS);
-            let value = match memories.source.to_str().filter(|text| !text.is_empty()) {
-                Some(path) => Span::styled(right_pad(&head_ellipsis(path, budget), budget), Style::new().fg(palette.text)),
-                None => Span::styled(right_pad("—", budget), Style::new().fg(palette.text_faint)),
-            };
-            static_row(palette, caret, row.label(), vec![value], selected, width)
-        }
-        FormRow::Output => {
-            let budget = path_budget(width, row.label(), PATH_CELLS);
-            let shown = head_ellipsis(&memories.out_root.to_string_lossy(), budget);
-            static_row(
-                palette,
-                caret,
-                row.label(),
-                vec![Span::styled(right_pad(&shown, budget), Style::new().fg(palette.text))],
-                selected,
-                width,
-            )
-        }
-        FormRow::DiskFree => {
-            // The value budget is what the row has left after the caret, the label and the gap.
-            let budget = width.saturating_sub(CARET_GUTTER + cells(row.label()) + LABEL_GAP);
-            let value = disk_free_value(palette, &memories.environment, budget);
-            static_row(palette, caret, row.label(), value, selected, width)
-        }
         FormRow::Transcode => {
             let mut spans = vec![caret, form_label(palette, row.label(), focused), Span::raw("  ")];
             spans.extend(palette.toggle(memories.transcode));
@@ -705,21 +769,36 @@ fn render_progress(frame: &mut Frame, palette: &Palette, memories: &mut Memories
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if usize::from(inner.width) < TABLE_INTERIOR_MIN {
-        return;
-    }
-
     match &memories.run {
-        Run::Idle => empty_state(frame, palette, inner, "no run yet"),
+        Run::Idle | Run::Active { view: None, worker: Worker::Finished } => render_idle(frame, palette, memories, inner),
         Run::Active { view: None, worker: Worker::Working } => {
             frame.render_widget(Paragraph::new(planning_spinner(palette, memories.spinner)), inner);
         }
-        Run::Active { view: None, worker: Worker::Finished } => {
-            empty_state(frame, palette, inner, "no run yet");
-        }
         Run::Active { view: Some(view), .. } => {
-            render_table(frame, palette, view, &mut memories.table, inner);
+            // The table is all-or-nothing across the width: its columns share a floor. Below the
+            // floor the panel must still say why it is empty rather than going blank while a live
+            // run writes files (sweep: run screens). The empty state and the spinner render at any
+            // width; only the table itself is gated.
+            if usize::from(inner.width) < TABLE_INTERIOR_MIN {
+                let note = Line::styled("not enough room for the table — widen the terminal", Style::new().fg(palette.text_dim));
+                frame.render_widget(Paragraph::new(note), inner);
+            } else {
+                render_table(frame, palette, view, &mut memories.table, inner);
+            }
         }
+    }
+}
+
+/// The empty progress panel: the problem-and-fix copy when the source holds no export (sweep:
+/// empty and error states), the ordinary empty state otherwise.
+fn render_idle(frame: &mut Frame, palette: &Palette, memories: &Memories, inner: Rect) {
+    if memories.source_state == SourceState::NoExport {
+        // The run's own refusal, shown before the run is ever started — the history tab's
+        // failed-load pattern, wrapped so a long path never clips mid-word.
+        let text = RunError::NoExportId(memories.source.clone()).to_string();
+        frame.render_widget(Paragraph::new(Line::styled(text, Style::new().fg(palette.text_dim))).wrap(Wrap { trim: true }), inner);
+    } else {
+        empty_state(frame, palette, inner, "no run yet");
     }
 }
 
@@ -753,16 +832,65 @@ fn render_table(frame: &mut Frame, palette: &Palette, view: &RunView, table: &mu
 }
 
 /// The footer alert a run outcome raises.
-fn summary(outcome: &RunOutcome) -> RunAlert {
+fn summary(memories: &Memories, outcome: &RunOutcome) -> RunAlert {
     match outcome {
-        RunOutcome::Completed(report) => RunAlert::completion(report),
+        RunOutcome::Completed(report) => {
+            let mut alert = RunAlert::completion(report);
+            // Reconcile the table's paired rows with the overview's every-entry count: the entries
+            // with no media on disk are `source_missing` and appear nowhere else on this tab
+            // (sweep: run screens). Naming the count makes the difference visible.
+            if report.resumed.source_missing > 0 {
+                alert.message = format!("{} {} {} missing media", alert.message, glyph::CLAUSE_SEPARATOR, report.resumed.source_missing);
+            }
+            // A run into a new --out skips every finished item whose recorded output still verifies
+            // at its old path; say where the manifest holds them rather than leaving "N skipped"
+            // unexplained (sweep: run screens). Appended to, never rebuilt from: the completion copy
+            // above already carries the fixed/failed/skipped/deferred/dropped clauses, and a mixed
+            // resume (new items fixed + old items skipped elsewhere) must keep both counts visible.
+            if skipped_outputs_recorded_elsewhere(memories, report.skipped) {
+                alert.kind = AlertKind::Warning;
+                alert.message = format!("{} {} outputs recorded under a different out dir", alert.message, glyph::CLAUSE_SEPARATOR);
+            }
+            alert
+        }
         RunOutcome::Failed(error) => RunAlert::failure(error),
     }
 }
 
+/// Whether a run skipped finished items whose recorded outputs live outside the current out root —
+/// the resume-keyed-on-export-id trap (sweep: run screens). Pointing `--out` at a new empty dir
+/// makes the resume sweep verify every `done` item at its OLD path (still present), so every item
+/// is skipped and nothing is written, with no screen saying why. The tell is a `done` row whose
+/// recorded `output_path` is not under [`Memories::out_root`].
+fn skipped_outputs_recorded_elsewhere(memories: &Memories, skipped: usize) -> bool {
+    if skipped == 0 {
+        return false;
+    }
+    let Run::Active { view: Some(view), .. } = &memories.run else { return false };
+    // Both sides of a path-identity compare must be canonicalized the same way (cloudify rust index,
+    // 2026-07-11). The plan canonicalizes `out_root` through [`canonical_out_root`] before deriving
+    // any output, so a real record is already canonical — but `memories.out_root` is the raw value
+    // `RunDefaults::resolve` handed down, and a symlinked or relative `--out` (the default
+    // `source/exportsnap-out` under a symlinked source included) makes a raw-vs-canonical
+    // `starts_with` answer false even when the outputs ARE under the current root. Resolve the
+    // recorded file too — it exists, since the resume sweep only skips outputs it verified — and
+    // decline to warn when either side cannot be resolved.
+    let Ok(out_root) = canonical_out_root(&memories.out_root) else { return false };
+    view.manifest.items(ItemKind::Memory).is_ok_and(|items| {
+        items.into_iter().any(|item| {
+            item.status == ItemStatus::Done
+                && item.output_path.as_ref().is_some_and(|path| {
+                    let Ok(canonical) = path.canonicalize() else { return false };
+                    !canonical.starts_with(&out_root)
+                })
+        })
+    })
+}
+
 /// The form's rows must fit the body a panel is guaranteed at the compact floor, the same
-/// invariant the overview's panels rest on.
-const _: () = assert!(FormRow::ALL.len() <= GUARANTEED_INTERIOR_ROWS as usize);
+/// invariant the overview's panels rest on. The strict `<` reserves the disabled chip's tooltip
+/// row on top of the five visible rows (`a + 1 <= b` spelled `a < b`, the clippy-fix form).
+const _: () = assert!(StaticRow::ALL.len() + FormRow::ALL.len() < GUARANTEED_INTERIOR_ROWS as usize);
 
 #[cfg(test)]
 mod tests {
@@ -791,7 +919,7 @@ mod tests {
         // The bar is elastic, so the row always fits its budget.
         let environment =
             Environment { ffmpeg: None, vlc: None, available_space: Some(10_000 * 1024_u64.pow(5)), total_space: Some(u64::MAX) };
-        let budget = FORM_INTERIOR - CARET_GUTTER - cells("disk free") - LABEL_GAP;
+        let budget = FORM_INTERIOR - STATIC_LABEL_COLUMN;
         let value = disk_free_value(&Palette::new(crate::tui::theme::Tier::Full), &environment, budget);
         let width: usize = value.iter().map(Span::width).sum();
         assert!(width <= budget, "row is {width} cells, over the {budget}-cell budget");

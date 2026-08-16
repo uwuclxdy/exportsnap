@@ -357,6 +357,13 @@ fn press(app: &mut App, code: KeyCode) {
     app.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
 }
 
+/// Moves the caret from the default (the transcode toggle) onto the start chip and presses enter —
+/// the screen's one start/descend trigger now that the static rows are out of the walk.
+fn enter_on_start_chip(app: &mut App) {
+    press(app, KeyCode::Down);
+    press(app, KeyCode::Enter);
+}
+
 /// Bounded for the reason `chat_media_screen.rs`'s `on_tab` spells out in full: `→` is inert while
 /// a pane is descended, so an unbounded walk from a descended screen never terminates.
 ///
@@ -475,16 +482,23 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     // The two panels sit side by side (120 wide).
     assert!(row(buffer, 1).starts_with("╭─ SETUP ─"));
     assert!(row(buffer, 1).contains("PROGRESS"));
-    // The form's five rows, static keys bolded, the disk bar showing 40% used (3 of 5 GiB free).
-    // The focusable rows are ragged: label, exactly the ≥ 2-space gap, then the value — never
-    // padded to a shared column (that alignment is for display-only rows).
+    // The three static rows render as column-aligned key:value rows — no caret, key padded to the
+    // shared label column so the values stack (contract: Static key:value rows). The disk bar shows
+    // 40% used (3 of 5 GiB free). The two real controls sit below them, ragged.
     let source_row = cell_run(buffer, 2);
-    assert!(source_row.contains("❯ source  /export"), "{source_row}");
+    assert!(!source_row.contains('❯'), "the static source row takes no caret: {source_row}");
+    assert!(source_row.contains("source"), "{source_row}");
+    assert!(source_row.contains("/export"), "{source_row}");
     let output_row = cell_run(buffer, 3);
-    assert!(output_row.contains("output dir  /export/out"), "{output_row}");
+    assert!(!output_row.contains('❯'), "the static output row takes no caret: {output_row}");
+    assert!(output_row.contains("output dir"), "{output_row}");
+    assert!(output_row.contains("/export/out"), "{output_row}");
+    // The values stack in one column: the `/` that opens each path sits at the same cell offset.
+    let value_col = |line: &str| line.chars().position(|c| c == '/').unwrap_or(0);
+    assert_eq!(value_col(&source_row), value_col(&output_row), "static values stack in one column:\n{source_row}\n{output_row}");
     assert!(cell_run(buffer, 4).contains("3.0 GiB"));
     assert!(cell_run(buffer, 4).contains("40%"));
-    assert!(cell_run(buffer, 5).contains("transcode"));
+    assert!(cell_run(buffer, 5).contains("❯ transcode"), "the caret starts on the first real control: {:?}", cell_run(buffer, 5));
     assert!(cell_run(buffer, 6).contains("start run"));
     // The empty state names the key that starts the run, centered in the full-height progress
     // panel: 20 interior rows, a 4-row frame, 8 above and 8 below.
@@ -493,39 +507,29 @@ fn the_idle_memories_tab_renders_the_form_and_the_empty_state() {
     // The footer hint bar advertises the shell keys.
     assert!(row(buffer, 23).contains("←→ switch"), "{:?}", row(buffer, 23));
 
-    // The toggle row's label, blurred — the caret is still on `source`. This and the promoted half
-    // below are this screen's WIRING guard on the shared form-row widget, NOT a second tier pin:
-    // the tier axis is pinned once, on the widget, by `the_focus_promoted_form_label_holds_both_tiers`.
-    // `transcode` starts at column 4, after the panel's border, its padding cell and the caret gutter.
+    // The caret starts on the toggle now that the static rows are out of the walk, so the toggle
+    // label is promoted at rest. This and the blurred half below are this screen's WIRING guard on
+    // the shared form-row widget, NOT a second tier pin: the tier axis is pinned once, on the
+    // widget, by `the_focus_promoted_form_label_holds_both_tiers`. `transcode` starts at column 4,
+    // after the panel's border, its padding cell and the caret gutter.
     let palette = Palette::new(Tier::Full);
     for x in 4..13 {
-        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text_dim), "blurred toggle label, cell ({x}, 5)");
+        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text), "focus-promoted toggle label, cell ({x}, 5)");
+        assert!(buffer[(x, 5)].style().add_modifier.contains(Modifier::BOLD), "focus-promoted toggle label, cell ({x}, 5)");
     }
 
     assert_eq!(app.active(), exportsnap::app::Tab::Memories);
     assert!(!app.is_quit_armed());
     assert!(!app.memories().descended());
 
-    // …and promoted once the caret lands on it, which is the half a flattened palette kills.
-    //
-    // **What this catches is the CALL, and swapping it back is not what reds it.** Re-inlining a
-    // copy of the widget here leaves the whole suite green, because that copy is byte-identical
-    // today — measured at 725/725, not assumed. It is an equivalent mutant for the tests, and what
-    // it really costs is every LATER edit to the widget. That part IS observable, and is what these
-    // two lines are for: flattening the widget reds them while the screen calls it, and stops
-    // reddening them the moment the screen carries its own copy (measured, both directions).
-    //
-    // The swap-back does red the LINT, since it orphans the `form_label` import under `-D warnings`.
-    // Do not lean on that — it is a reachability artifact that goes silent the moment this screen
-    // gains a second call site, which is exactly the state the chat twin is already in.
-    for _ in 0..3 {
-        press(&mut app, KeyCode::Down);
-    }
+    // …and blurred once the caret moves to the start chip. Flattening the widget reds both halves
+    // while the screen calls it, and stops reddening them the moment the screen carries its own
+    // copy — the wiring guard's reason for living beside the shared widget's own tier pin.
+    press(&mut app, KeyCode::Down);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     for x in 4..13 {
-        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text), "focus-promoted toggle label, cell ({x}, 5)");
-        assert!(buffer[(x, 5)].style().add_modifier.contains(Modifier::BOLD), "focus-promoted toggle label, cell ({x}, 5)");
+        assert_eq!(buffer[(x, 5)].style().fg, Some(palette.text_dim), "blurred toggle label, cell ({x}, 5)");
     }
 }
 
@@ -613,7 +617,7 @@ fn a_planned_run_renders_the_overall_bar_the_header_and_one_row_per_item() {
 
     // The selection follows the tail even while the form owns the caret; the caret glyph itself
     // renders only in the focused pane, so descend and redraw to see it on the last row.
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     assert!(cell_run(buffer, 6).contains("❯ 00000003"), "{:?}", cell_run(buffer, 6));
@@ -708,7 +712,7 @@ fn the_statuses_that_land_with_the_finished_event_still_reach_the_table() {
     // the cleared flag instead of re-pinning the tail. `finish`'s own clearing is a different line
     // and is pinned separately, by `a_run_that_plans_and_finishes_in_one_tick_…` — the one state
     // where it is observable.
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     press(&mut app, KeyCode::Up);
     assert!(app.memories().descended());
 
@@ -748,13 +752,12 @@ fn the_statuses_that_land_with_the_finished_event_still_reach_the_table() {
 ///
 /// The fast path a small export takes: everything happens inside one 80 ms tick, so the plan and the
 /// finished event are in the channel together. The poll then runs for the first and only time after
-/// `finish`, which is where the two halves below come from — the statuses must be real, and
-/// `finish`'s clearing of `follow_tail` must hold, or the poll pins the tail on a table the user
-/// never scrolled. This is the ONLY reachable state where that clearing is observable: every other
-/// route to the transition tick has either already pinned the tail (follow on, selection at the tail
-/// anyway) or had it cleared by `table_move`.
+/// `finish`, which clears `follow_tail` — but the tail was already pinned at plan time, so this run
+/// ends with the tail selected exactly like a normally-completed one (todo §18). The keypress below
+/// is the whole point: from that tail, the first `↓` wraps onto row one, which is what a
+/// never-pinned table used to skip.
 #[test]
-fn a_run_that_plans_and_finishes_in_one_tick_renders_its_statuses_and_adopts_no_selection() {
+fn a_run_that_plans_and_finishes_in_one_tick_ends_selected_and_down_lands_on_row_one() {
     let dir = export_tree("one-tick", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
@@ -797,15 +800,26 @@ fn a_run_that_plans_and_finishes_in_one_tick_renders_its_statuses_and_adopts_no_
     assert!(cell_run(buffer, 4).contains("[ done ]"), "{:?}", cell_run(buffer, 4));
     assert!(cell_run(buffer, 5).contains("[ done ]"), "{:?}", cell_run(buffer, 5));
 
-    // The caret renders only in the focused pane, so descend before reading it. A run the user
-    // watched from the form leaves the finished table with nothing selected.
-    press(&mut app, KeyCode::Enter);
+    // The caret renders only in the focused pane, so descend before reading it. A one-tick run ends
+    // with the tail selected, exactly like a normally-completed run — the plan-time tail pin, since
+    // the finishing poll's pin is skipped once `finish` clears `follow_tail`.
+    enter_on_start_chip(&mut app);
     assert!(app.memories().descended());
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    for y in [4, 5] {
-        assert!(!cell_run(buffer, y).contains('❯'), "the finished table adopted a selection: {:?}", cell_run(buffer, y));
-    }
+    assert!(
+        cell_run(buffer, 5).contains(&format!("❯ {}", &uuid(2)[..8])),
+        "the finished table is pinned to the tail: {:?}",
+        cell_run(buffer, 5)
+    );
+    assert!(!cell_run(buffer, 4).contains('❯'), "row one is not selected yet: {:?}", cell_run(buffer, 4));
+
+    // The keypress pin: the first `↓` from the pinned tail wraps onto row one, never the second row.
+    press(&mut app, KeyCode::Down);
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(cell_run(buffer, 4).contains(&format!("❯ {}", &uuid(1)[..8])), "the first ↓ lands on row one: {:?}", cell_run(buffer, 4));
+    assert!(!cell_run(buffer, 5).contains('❯'), "the tail is no longer selected: {:?}", cell_run(buffer, 5));
 }
 
 /// One planned run with a live manifest behind it, and the sender for the run's later events.
@@ -939,7 +953,7 @@ fn x_dismisses_the_alert_even_when_the_quit_is_armed() {
 }
 
 #[test]
-fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
+fn descending_into_the_table_and_q_ascends_without_arming_the_quit() {
     let dir = export_tree("descend", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
@@ -950,8 +964,8 @@ fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
         vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
     );
 
-    // Enter on the static source row descends.
-    press(&mut app, KeyCode::Enter);
+    // Enter on the start chip descends (one ↓ from the default toggle caret reaches it).
+    enter_on_start_chip(&mut app);
     assert!(app.memories().descended());
 
     // The descended hint set advertises every ascend key, esc included — never a dead binding.
@@ -965,7 +979,8 @@ fn entering_on_a_static_row_descends_and_q_ascends_without_arming_the_quit() {
     press(&mut app, KeyCode::Left);
     assert!(!app.memories().descended(), "← ascends");
 
-    // Descend again; `q` ascends like esc, because q is the back key here — and arms nothing.
+    // The caret is still on the start chip after ascending, so enter descends again directly;
+    // `q` ascends like esc, because q is the back key here — and arms nothing.
     press(&mut app, KeyCode::Enter);
     assert!(app.memories().descended());
     press(&mut app, KeyCode::Char('q'));
@@ -991,7 +1006,7 @@ fn arrows_are_trapped_while_descended_but_the_alt_jump_still_lands() {
         vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
     );
 
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     assert!(app.memories().descended());
     press(&mut app, KeyCode::Left);
     assert_eq!(app.active(), exportsnap::app::Tab::Memories, "← ascends rather than switching tabs");
@@ -1035,13 +1050,10 @@ fn the_form_caret_walks_all_rows_and_enter_acts_on_toggle_and_start() {
     app.memories_mut().set_manifest_dir(state.path().to_path_buf());
     assert!(!app.memories().descended());
 
-    // Down wraps to the start chip; enter there starts the run through the production path — a
-    // real worker against the tempdir export, with the manifest parked beside it.
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Down);
-    press(&mut app, KeyCode::Enter);
+    // One ↓ reaches the start chip (the static rows are out of the walk); enter there starts the
+    // run through the production path — a real worker against the tempdir export, with the
+    // manifest parked beside it.
+    enter_on_start_chip(&mut app);
     assert!(app.memories().alert().is_none(), "a fresh run shows no alert");
 
     // The screen-driven run completes end to end: the worker fixes the memory, the poll sees
@@ -1214,7 +1226,7 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
     let dir = export_tree("tint", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     // At 50 wide the panels stack and the form takes the full width, so its interior (46
-    // cells) is wider than the row's own content (36) — exactly the case where a tint that
+    // cells) is wider than the toggle row's own content — exactly the case where a tint that
     // stops at the last span would show a gap before the padding boundary.
     let mut terminal = Terminal::new(TestBackend::new(50, 30)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
@@ -1222,14 +1234,17 @@ fn the_focused_form_row_tint_reaches_the_padding_boundary() {
     let palette = Palette::new(Tier::Full);
 
     // The interior runs from column 2 to 47 (border + padding on each side of the 50-cell
-    // panel). The focused (first) form row's tint must reach column 47 — the padding boundary.
+    // panel). The focused toggle row (the first focusable row, now that the static rows are out of
+    // the walk) carries the tint out to column 47 — the padding boundary.
     for x in 2..48 {
-        assert_eq!(buffer[(x, 2)].style().bg, Some(palette.bg_hover), "focused row column {x}");
+        assert_eq!(buffer[(x, 5)].style().bg, Some(palette.bg_hover), "focused row column {x}");
     }
-    // The padding columns stay on the base surface, and the unfocused row carries no tint.
-    assert_ne!(buffer[(1, 2)].style().bg, Some(palette.bg_hover));
-    assert_ne!(buffer[(48, 2)].style().bg, Some(palette.bg_hover));
-    assert_ne!(buffer[(2, 3)].style().bg, Some(palette.bg_hover));
+    // The padding columns stay on the base surface, and neither a static row above nor the start
+    // chip row below carries the tint.
+    assert_ne!(buffer[(1, 5)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(48, 5)].style().bg, Some(palette.bg_hover));
+    assert_ne!(buffer[(2, 2)].style().bg, Some(palette.bg_hover), "the static source row takes no tint");
+    assert_ne!(buffer[(2, 6)].style().bg, Some(palette.bg_hover), "the start chip row is unfocused");
 }
 
 #[test]
@@ -1292,14 +1307,14 @@ fn the_empty_state_action_line_names_a_key_that_actually_starts_the_run() {
     let state = TempDir::new().unwrap();
     app.memories_mut().set_manifest_dir(state.path().to_path_buf());
 
-    // The empty state says "press ↵ to start" — and with the caret on the first static row,
-    // enter really does start the run (there is no table yet to descend into). The frame is
-    // centered in the full-height panel, so the action line is its last interior row.
+    // The empty state says "press ↵ to start" — and enter on the start chip (one ↓ from the default
+    // toggle caret) really does start the run, since there is no table yet to descend into. The
+    // frame is centered in the full-height panel, so the action line is its last interior row.
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     assert!(cell_run(terminal.backend().buffer(), 12).contains("press ↵ to start"), "{:?}", cell_run(terminal.backend().buffer(), 12));
 
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     wait_for_alert(&mut app);
     let alert = app.memories().alert().unwrap();
     assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
@@ -1307,14 +1322,14 @@ fn the_empty_state_action_line_names_a_key_that_actually_starts_the_run() {
 }
 
 #[test]
-fn enter_on_a_static_row_descends_only_when_a_table_exists() {
+fn enter_on_the_start_chip_starts_without_a_table_and_descends_with_one() {
     let dir = export_tree("static-enter", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
     app.memories_mut().set_manifest_dir(state.path().to_path_buf());
 
-    // No table yet: enter on Source starts the run rather than descending into nothing.
-    press(&mut app, KeyCode::Enter);
+    // No table yet: enter on the start chip starts the run rather than descending into nothing.
+    enter_on_start_chip(&mut app);
     assert!(!app.memories().descended());
     assert!(app.memories().run_in_flight());
 
@@ -1323,12 +1338,13 @@ fn enter_on_a_static_row_descends_only_when_a_table_exists() {
     // gave up would otherwise leave `descended()` true off the plan alone and read as a pass.
     wait_for_alert(&mut app);
     assert!(app.memories().alert().is_some(), "the wait above must have produced the alert it waited for");
+    // The caret is still on the start chip, so a plain enter descends into the now-live table.
     press(&mut app, KeyCode::Enter);
-    assert!(app.memories().descended(), "with a table live, enter on a static row descends");
+    assert!(app.memories().descended(), "with a table live, enter on the start chip descends");
 }
 
 #[test]
-fn the_selected_form_row_keeps_its_tint_while_the_table_is_descended() {
+fn descending_moves_the_caret_and_tint_off_the_toggle() {
     let dir = export_tree("blur-tint", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
     let mut app = app_on_memories(&dir);
     let state = TempDir::new().unwrap();
@@ -1343,20 +1359,20 @@ fn the_selected_form_row_keeps_its_tint_while_the_table_is_descended() {
     let _ = sender;
     let palette = Palette::new(Tier::Full);
 
-    // The form owns the caret: the selected first row is tinted AND carries the caret.
+    // The form owns the caret: the toggle (the first focusable row) is tinted AND carries the caret.
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(2, 2)].style().bg, Some(palette.bg_hover));
-    assert_eq!(buffer[(2, 2)].symbol(), "❯");
+    assert_eq!(buffer[(2, 5)].style().bg, Some(palette.bg_hover));
+    assert_eq!(buffer[(2, 5)].symbol(), "❯");
 
-    // Descend: the form goes blurred — the caret drops, the tint stays (contract: blurred panes
-    // preserve their last-selected row's tint).
-    press(&mut app, KeyCode::Enter);
+    // Descend via the start chip: the caret drops, and the toggle's tint drops with it — the
+    // selection moved to the chip, which never carries a tint (the chip is its own block).
+    enter_on_start_chip(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(2, 2)].style().bg, Some(palette.bg_hover), "the tint survives the blur");
-    assert_ne!(buffer[(2, 2)].symbol(), "❯", "the caret drops when the pane blurs");
+    assert_ne!(buffer[(2, 5)].symbol(), "❯", "the caret drops when the pane blurs");
+    assert_ne!(buffer[(2, 5)].style().bg, Some(palette.bg_hover), "the toggle's tint drops when the selection moves to the chip");
 }
 
 #[test]
@@ -1413,6 +1429,205 @@ fn the_completion_summary_hides_zero_counts() {
     assert!(alert.message.contains("3 skipped"), "{}", alert.message);
     assert!(!alert.message.contains("0 fixed"), "a zero count must be hidden: {}", alert.message);
     assert!(!alert.message.contains("0 skipped"), "{}", alert.message);
+}
+
+#[test]
+fn a_completed_run_names_the_missing_media_count() {
+    // The overview counts every memories entry; the run enrols only entries with media on disk. The
+    // difference — `source_missing` — appears nowhere on this tab unless the alert names it, which
+    // is what reconciles 3 fixed against 8 entries on the overview (sweep: run screens).
+    let dir = export_tree("missing-count", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    let mut app = app_on_memories(&dir);
+    let (sender, receiver) = mpsc::channel();
+    let report = FixReport {
+        resumed: ResumeReport { demoted: vec![], verified: 0, pending: 0, failed: 0, source_missing: 5, retired: 0, excluded: 0 },
+        fixed: 3,
+        failed: vec![],
+        skipped: 0,
+        deferred: 0,
+        excluded: 0,
+        notices: vec![],
+    };
+    sender.send(RunEvent::Finished(RunOutcome::Completed(report))).unwrap();
+    drop(sender);
+    app.with_memories_channel(receiver);
+    app.tick();
+
+    let alert = app.memories().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
+    assert!(alert.message.contains("3 fixed"), "{}", alert.message);
+    assert!(alert.message.contains("5 missing media"), "the entries without media are named: {}", alert.message);
+}
+
+#[test]
+fn resuming_into_a_new_out_dir_reports_where_the_manifest_holds_the_outputs() {
+    let dir = export_tree("resume-root", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    let state = TempDir::new().unwrap();
+
+    // First run writes under the source-derived `out`.
+    let mut app = app_on_memories(&dir);
+    app.memories_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app);
+    wait_for_alert(&mut app);
+    let alert = app.memories().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
+    assert!(alert.message.contains("1 fixed"), "{}", alert.message);
+
+    // Second run points at a fresh, empty out root. The manifest is keyed on the export id (decision
+    // 6), so the resume sweep verifies the first run's outputs at their OLD path, skips every item,
+    // and writes nothing — the screen must say the manifest holds them elsewhere.
+    let out2 = dir.path().join("out2");
+    let mut app2 = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: out2.clone(), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
+    );
+    on_memories(&mut app2);
+    app2.memories_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app2);
+    wait_for_alert(&mut app2);
+
+    let alert = app2.memories().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert!(alert.message.contains("1 skipped"), "{}", alert.message);
+    assert!(alert.message.contains("outputs recorded under a different out dir"), "{}", alert.message);
+    assert!(!out2.join("2021").exists(), "the fresh out root stays empty: {}", out2.display());
+}
+
+#[test]
+fn a_mixed_resume_keeps_the_fixed_count_beside_the_skipped_elsewhere_note() {
+    // One item runs first and fixes under the source-derived `out`. A newcomer then joins the
+    // export, and the next run points at a fresh, empty out root: the old item's recorded output
+    // still verifies at its old path (skipped elsewhere) while the newcomer fixes under the new
+    // root. The alert must keep BOTH counts — the skipped-elsewhere note explains the skip, it does
+    // not replace the completion copy.
+    let dir = export_tree("mixed-resume", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    let state = TempDir::new().unwrap();
+
+    let mut app = app_on_memories(&dir);
+    app.memories_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app);
+    wait_for_alert(&mut app);
+    let alert = app.memories().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Info, "{}", alert.message);
+    assert!(alert.message.contains("1 fixed"), "{}", alert.message);
+
+    // A second entry on another day (an exact bucket, so it takes its own date) and its file.
+    let part = dir.path().join(format!("mydata~{EXPORT_ID}"));
+    write_json(&part.join("json"), &[(&at("2021-01-15", "13:30:05"), "Image", ""), (&at("2021-02-20", "09:00:00"), "Image", "")]);
+    write_main(&part, "2021-02-20", 2);
+
+    let out2 = dir.path().join("out2");
+    let mut app2 = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: out2.clone(), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
+    );
+    on_memories(&mut app2);
+    app2.memories_mut().set_manifest_dir(state.path().to_path_buf());
+    enter_on_start_chip(&mut app2);
+    wait_for_alert(&mut app2);
+
+    let alert = app2.memories().alert().unwrap();
+    assert_eq!(alert.kind, AlertKind::Warning, "{}", alert.message);
+    assert!(alert.message.contains("1 fixed"), "the fixed count survives the skipped-elsewhere note: {}", alert.message);
+    assert!(alert.message.contains("1 skipped"), "{}", alert.message);
+    assert!(alert.message.contains("outputs recorded under a different out dir"), "{}", alert.message);
+    assert!(out2.join("2021").exists(), "the newcomer was fixed under the new out root: {}", out2.display());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_into_the_same_symlinked_out_root_does_not_warn_about_another_dir() {
+    // A symlinked `--out` spells one root two ways: the raw value keeps the symlink while the plan
+    // canonicalizes it (resolving the link) before deriving any output path, so the recorded
+    // output_path is the REAL spelling and `memories.out_root` the symlink one. Comparing the two
+    // raw fires a false "recorded under a different out dir" Warning on a resume into the SAME
+    // root (cloudify rust index, 2026-07-11). The run itself is unaffected — both runs canonicalize
+    // identically — so the resume simply skips every item as verified.
+    let base = TempDir::new().unwrap();
+    let real = base.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let part = real.join(format!("mydata~{EXPORT_ID}"));
+    write_json(&part.join("json"), &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    write_main(&part, "2021-01-15", 1);
+
+    fn run_into(out_root: PathBuf, source: &Path, state: &Path) -> (AlertKind, String) {
+        let mut app = App::new(Tier::Full).with_source_environment(
+            source.to_path_buf(),
+            RunDefaults { out_root, ..RunDefaults::resolve(None, &Config::default(), source) },
+            Environment {
+                ffmpeg: None,
+                vlc: None,
+                available_space: Some(3 * 1024 * 1024 * 1024),
+                total_space: Some(5 * 1024 * 1024 * 1024),
+            },
+        );
+        on_memories(&mut app);
+        app.memories_mut().set_manifest_dir(state.to_path_buf());
+        enter_on_start_chip(&mut app);
+        wait_for_alert(&mut app);
+        let alert = app.memories().alert().unwrap();
+        (alert.kind, alert.message.clone())
+    }
+
+    let state = TempDir::new().unwrap();
+    let out = link.join("out");
+
+    let (kind, message) = run_into(out.clone(), &real, state.path());
+    assert_eq!(kind, AlertKind::Info, "{message}");
+    assert!(message.contains("1 fixed"), "{message}");
+
+    let (kind, message) = run_into(out, &real, state.path());
+    assert_eq!(kind, AlertKind::Info, "{message}");
+    assert!(message.contains("1 skipped"), "{message}");
+    assert!(!message.contains("outputs recorded under a different out dir"), "a same-root resume must not warn: {message}");
+}
+
+#[test]
+fn a_live_run_below_the_table_floor_says_why_the_panel_is_empty() {
+    let dir = export_tree("narrow-table", &[(&at("2021-01-15", "13:30:05"), "Image", "")]);
+    let mut app = app_on_memories(&dir);
+    let state = TempDir::new().unwrap();
+    let _writer = Manifest::open_in(state.path(), &ExportId::new(EXPORT_ID).unwrap()).unwrap();
+    feed_plan(
+        &mut app,
+        state.path(),
+        vec![PlanRow { source_id: uuid(1), output_name: "x.jpg".to_owned(), place_name: None, leg: Leg::Image }],
+    );
+    // 70 wide: the stacked progress panel's interior (66) is below the 72-cell table floor, so the
+    // panel must say why it is empty instead of going blank while the run is live (sweep: run
+    // screens).
+    let mut terminal = Terminal::new(TestBackend::new(70, 30)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = screen_text(buffer);
+    assert!(text.contains("not enough room for the table"), "{text}");
+}
+
+#[test]
+fn a_source_with_no_export_names_the_problem_instead_of_inviting_a_run() {
+    let dir = TempDir::new().unwrap();
+    let mut app = App::new(Tier::Full).with_source_environment(
+        dir.path().to_path_buf(),
+        RunDefaults { out_root: dir.path().join("out"), ..RunDefaults::resolve(None, &Config::default(), dir.path()) },
+        Environment { ffmpeg: None, vlc: None, available_space: Some(3 * 1024 * 1024 * 1024), total_space: Some(5 * 1024 * 1024 * 1024) },
+    );
+    on_memories(&mut app);
+    // Wide enough that the problem-and-fix copy stays on one line even where the gate's symlinked
+    // TMPDIR lengthens the tempdir path that the message names.
+    let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = screen_text(buffer);
+    // The empty state names the problem and the fix (the run's own `NoExportId` refusal), the way
+    // the history tab does — never the bare "press ↵ to start" (sweep: empty and error states).
+    assert!(text.contains("no mydata~ export part under"), "{text}");
+    assert!(text.contains("export's parts"), "the fix clause renders: {text}");
+    assert!(!text.contains("press ↵ to start"), "a no-export source must not invite a run: {text}");
 }
 
 #[test]
@@ -1590,7 +1805,7 @@ fn the_focused_rows_place_name_grows_a_tooltip_below_it_only_while_descended() {
     }
 
     // Descend: the selection follows the tail, which is the row WITHOUT a name — still no tooltip.
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     for y in 4..=8 {
@@ -1613,12 +1828,14 @@ fn the_focused_rows_place_name_grows_a_tooltip_below_it_only_while_descended() {
 
     // Ascend with the selection still on the named row: the tooltip's gate is the pane's focus,
     // so it must vanish even though the row that grew it is still selected. Whole-frame sweep,
-    // because the gate's absence would drop the tooltip below the row, not above the form.
+    // because the gate's absence would drop the tooltip below the row, not above the form. Swept
+    // for the FULL name rather than the `└` leader — the caret is on the disabled start chip here,
+    // whose own `a run is already in flight` tooltip also carries a `└`.
     press(&mut app, KeyCode::Esc);
     assert!(!app.memories().descended(), "esc must ascend from the table");
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
-    assert!(!screen_text(buffer).contains('└'), "a tooltip rendered while the form owned the caret and a named row was selected");
+    assert!(!screen_text(buffer).contains(LONG_PLACE), "the place-name tooltip must vanish while the form owns the caret");
 
     // Re-descend: the selection survived the ascend, so the tooltip returns — the phase above
     // measured the focus gate, not the selection moving.
@@ -1651,7 +1868,7 @@ fn a_place_name_token_reaches_no_output_path_error_or_manifest_field() {
     let state = TempDir::new().unwrap();
     app.memories_mut().set_manifest_dir(state.path().to_path_buf());
 
-    press(&mut app, KeyCode::Enter);
+    enter_on_start_chip(&mut app);
     wait_for_alert(&mut app);
     let alert = app.memories().alert().unwrap();
     let alert_kind = alert.kind;
