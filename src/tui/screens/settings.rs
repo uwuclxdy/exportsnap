@@ -77,6 +77,11 @@ const fn cycle_cells() -> usize {
 /// `   · file` from reading as a fourth option.
 const TAG_GAP: usize = 3;
 
+/// The placeholder an empty field reads as: the ffmpeg row's honest answer when neither the file
+/// nor the probe found the tool. Rendered in the `TEXT_FAINT` placeholder tier, never the `ACCENT`
+/// a real value takes (cloudy-tui: Input row — an empty field shows a faint placeholder).
+const NOT_FOUND: &str = "not found";
+
 /// The form panel's interior cells at its widest row, derived per row rather than summed from
 /// the widest label, value and clause: no row carries all three at once, and the sum
 /// overestimates by two — which would blank the form at 57 columns. The ffmpeg path row
@@ -768,16 +773,11 @@ fn form_row(palette: &Palette, settings: &Settings, row: FormRow, width: usize) 
     let focused = settings.form_focus == row.index();
     match row {
         FormRow::OutputDir => {
-            input_row(palette, settings, row, focused, settings.effective_out_root().to_string_lossy().into_owned(), width)
+            input_row(palette, settings, row, focused, Some(settings.effective_out_root().to_string_lossy().into_owned()), width)
         }
-        FormRow::Ffmpeg => input_row(
-            palette,
-            settings,
-            row,
-            focused,
-            settings.effective_ffmpeg().map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| "not found".to_owned()),
-            width,
-        ),
+        FormRow::Ffmpeg => {
+            input_row(palette, settings, row, focused, settings.effective_ffmpeg().map(|path| path.to_string_lossy().into_owned()), width)
+        }
         FormRow::Theme => {
             let words = Tier::ALL.map(Tier::as_name);
             let selected = Tier::ALL.iter().position(|tier| *tier == settings.effective_tier()).unwrap_or(0);
@@ -802,13 +802,16 @@ fn value_budget(row: FormRow, provenance: Option<Provenance>, width: usize) -> u
 }
 
 /// One path row. Blurred, the effective value reads in `ACCENT` — an actionable affordance,
-/// the chat-media form's path treatment; focused, `TEXT`. A live edit swaps in the draft
-/// window with the `✎` glyph for the caret; an empty draft shows the effective value as an
-/// ellipsised, `…`-marked placeholder naming what committing empty would apply, a draft in
-/// `TEXT` beside it. The value is ragged like a state row's: it takes its natural width up to
-/// [`value_budget`] and the provenance clause trails it at its 3-cell gap, never padded flush
-/// against the panel edge.
-fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool, effective: String, width: usize) -> Line<'static> {
+/// the chat-media form's path treatment; focused, `TEXT`. An empty field — `None`, the ffmpeg
+/// row with nothing found — reads the faint [`NOT_FOUND`] placeholder instead, since it is an
+/// absence, not a value. A live edit swaps in the draft window with the `✎` glyph for the
+/// caret; an empty draft shows the effective value as an ellipsised, `…`-marked placeholder
+/// naming what committing empty would apply, a draft in `TEXT` beside it. The value is ragged
+/// like a state row's: it takes its natural width up to [`value_budget`] and the provenance
+/// clause trails it at its 3-cell gap, never padded flush against the panel edge.
+fn input_row(
+    palette: &Palette, settings: &Settings, row: FormRow, focused: bool, effective: Option<String>, width: usize,
+) -> Line<'static> {
     let editing = settings.editing.as_ref().filter(|session| session.row == row);
     let budget = value_budget(row, settings.provenance(row), width);
     // The edit glyph replaces the caret while the field is being edited (cloudy-tui: Text
@@ -830,14 +833,20 @@ fn input_row(palette: &Palette, settings: &Settings, row: FormRow, focused: bool
             // content cue, so it survives NO_COLOR where the dim-vs-text contrast dies
             // (design.md: anything that must stay legible without color needs a content cue,
             // not an attribute).
-            let shown = head_ellipsis(&effective, budget - 1);
+            let placeholder = effective.as_deref().unwrap_or(NOT_FOUND);
+            let shown = head_ellipsis(placeholder, budget - 1);
             let marked = format!("{shown}{}", glyph::ELLIPSIS);
             Span::styled(marked, Style::new().fg(palette.text_faint))
         } else {
             Span::styled(window, Style::new().fg(palette.text))
         }
     } else {
-        Span::styled(head_ellipsis(&effective, budget), Style::new().fg(if focused { palette.text } else { palette.accent }))
+        match &effective {
+            // A real value reads ACCENT blurred / TEXT focused; the empty field's placeholder
+            // stays faint whatever the focus, because it is an absence rather than a value.
+            Some(value) => Span::styled(head_ellipsis(value, budget), Style::new().fg(if focused { palette.text } else { palette.accent })),
+            None => Span::styled(head_ellipsis(NOT_FOUND, budget), Style::new().fg(palette.text_faint)),
+        }
     };
     spans.push(value_span);
     spans.extend(provenance_tag(palette, settings.provenance(row)));
@@ -1047,6 +1056,25 @@ mod tests {
 
         assert_eq!(crate::config::load(dir.path()).unwrap().out_dir, None, "the pinned row's commit gains the file nothing");
         assert_eq!(settings.provenance(FormRow::OutputDir), Some(Provenance::Flag), "the clause still names the pin");
+    }
+
+    #[test]
+    fn the_ffmpeg_draft_seeds_from_the_file_layer_not_detection() {
+        // The config key is absent and the probe found ffmpeg: the row SHOWS the detected path,
+        // but the draft must open empty. Seeding it from the effective value would write the
+        // detection answer into the config on commit, silently promoting a machine probe result
+        // to a persisted setting — the file layer is what a commit writes, so it is the only
+        // thing the draft may seed from (begin_edit's doc contract).
+        let mut settings = Settings::with_layers(SettingsLayers {
+            detected_ffmpeg: Some(PathBuf::from("/detected/ffmpeg")),
+            ..SettingsLayers::defaults_for(crate::tui::theme::Tier::Full)
+        });
+        settings.form_focus = FormRow::Ffmpeg.index();
+        settings.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let session = settings.editing.as_ref().expect("enter opens the ffmpeg field");
+        assert_eq!(session.row, FormRow::Ffmpeg);
+        assert!(session.draft.is_empty(), "the draft opens empty, never the detected path");
     }
 
     #[test]

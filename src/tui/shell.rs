@@ -73,7 +73,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Modal::Help => footer::help_hints(&palette, footer_area.width),
         }
     } else if app.descended() {
-        footer::descended_hints(&palette, footer_area.width)
+        // The history formats pane binds keys the generic descended set does not advertise —
+        // `space` toggles a format and `↵` runs the export — so it takes its own set (the hint
+        // derives from what the focused pane actually binds, the same rule the footer follows
+        // per tab).
+        if app.active() == Tab::History {
+            footer::history_descended_hints(&palette, footer_area.width)
+        } else {
+            footer::descended_hints(&palette, footer_area.width)
+        }
     } else {
         match app.active() {
             Tab::History => footer::history_hints(&palette, app.history().picker_has_rows(), footer_area.width),

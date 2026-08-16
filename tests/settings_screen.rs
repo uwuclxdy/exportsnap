@@ -294,7 +294,7 @@ fn a_flag_overridden_row_shows_the_flag_value_and_reads_as_overridden() {
 }
 
 #[test]
-fn the_ffmpeg_row_with_nothing_reports_not_found_without_a_clause() {
+fn the_ffmpeg_row_with_nothing_reports_not_found_as_a_faint_placeholder() {
     let dir = TempDir::new().unwrap();
     let mut settings = Settings::with_layers(SettingsLayers { detected_ffmpeg: None, ..layers(Some(dir.path())) });
     settings.set_source(PathBuf::from("/export"));
@@ -304,8 +304,8 @@ fn the_ffmpeg_row_with_nothing_reports_not_found_without_a_clause() {
     assert_eq!(row(buffer, 3), panel_row(&padded("  ffmpeg path  not found", 15), 37));
     assert_eq!(
         buffer[(17, 3)].style().fg,
-        Some(Palette::new(Tier::Full).accent),
-        "the not-found answer reads like any other blurred value"
+        Some(Palette::new(Tier::Full).text_faint),
+        "an empty field reads the faint placeholder, not the ACCENT a real value takes"
     );
 }
 

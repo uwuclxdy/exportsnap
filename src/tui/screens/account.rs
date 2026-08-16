@@ -384,7 +384,10 @@ impl Account {
 /// arm that still names the screen's content (the summary-only rule). The breakpoints are
 /// derived from the panels' own copy needs, not picked widths.
 pub fn render(frame: &mut Frame, palette: &Palette, account: &mut Account, area: Rect) {
-    let side_by_side = usize::from(area.width) >= usize::from(sections_panel_width()) + usize::from(detail_panel_min_width());
+    // The selector grows toward ~30% of the body width (clamped 20-40) instead of sitting at its
+    // 20-cell content floor — the ruling that makes the master-detail selectors flexible-width.
+    let selector = widgets::selector_panel_width(area.width, sections_panel_width());
+    let side_by_side = usize::from(area.width) >= usize::from(selector) + usize::from(detail_panel_min_width());
     let stacked = !side_by_side && usize::from(area.width) >= usize::from(detail_panel_min_width()) && area.height >= stacked_height();
 
     // The pane's existence is a render-derived fact the handlers read back: below the stacked
@@ -397,7 +400,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, account: &mut Account, area:
     }
 
     if side_by_side {
-        let [left, right] = Layout::horizontal([Constraint::Length(sections_panel_width()), Constraint::Fill(1)]).areas(area);
+        let [left, right] = Layout::horizontal([Constraint::Length(selector), Constraint::Fill(1)]).areas(area);
         render_sections(frame, palette, account, left);
         render_detail(frame, palette, account, right);
     } else if stacked {

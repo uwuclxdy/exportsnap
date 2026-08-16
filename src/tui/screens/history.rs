@@ -44,11 +44,12 @@ use crate::export::history::conversation_title;
 use crate::export::history_run::{self, HistoryFormat, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
 use crate::export::model::ConversationId;
 use crate::tui::alert::RunAlert;
-use crate::tui::format::{cells, grouped, middle_ellipsis, plural, truncate_prose};
+use crate::tui::format::{cells, grouped, head_ellipsis, middle_ellipsis, plural, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::Palette;
 use crate::tui::widgets::{
-    self, CARET_GUTTER, PanelStyle, action_chip, caret, form_label, list_scrollbar, panel, planning_spinner, tint_to_edge,
+    self, CARET_GUTTER, LABEL_GAP, PanelStyle, action_chip, caret, display_row, form_label, list_scrollbar, panel, planning_spinner,
+    tint_to_edge,
 };
 
 // ---- layout budgets ----
@@ -56,8 +57,9 @@ use crate::tui::widgets::{
 /// The picker panel's interior cells at the widest row: caret, checkbox, gap, and a
 /// middle-ellipsised label.
 const PICKER_INTERIOR: usize = CARET_GUTTER + 3 + 1 + 24;
-/// The picker panel's width — the master side of the split, so it takes a fixed budget and the
-/// formats pane takes what is left.
+/// The picker panel's content floor — the master side of the split, which [`render`] grows toward
+/// ~30% of the body width (clamped 20-40) via [`widgets::selector_panel_width`]. Below this the
+/// picker's widest row cannot render whole.
 const PICKER_PANEL_WIDTH: u16 = PICKER_INTERIOR as u16 + widgets::CHROME_COLUMNS;
 /// The formats pane's interior floor: the caret gutter and the counter "999 of 999
 /// conversations".
@@ -73,6 +75,11 @@ const FORMATS_INTERIOR: usize = CARET_GUTTER + 24;
 const FORMATS_PANEL_WIDTH: u16 = FORMATS_INTERIOR as u16 + widgets::CHROME_COLUMNS;
 /// The checkbox column: brackets and the mark, one cell each.
 const CHECKBOX_CELLS: usize = 3;
+
+/// The static output-dir row's label column: `output dir` (10 cells) plus the ≥ 2-space gap — the
+/// same column the run screens' static rows stack at (contract: Static key:value rows pad each
+/// label to the group's widest label width + ≥ 2 spaces).
+const OUTPUT_DIR_COLUMN: usize = 10 + LABEL_GAP;
 
 /// The formats pane's rows, in caret order: the four format toggles and the export chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,7 +655,10 @@ impl History {
 /// with the pane it normally lives in (the auditor's chip-survival rule). The picker's own width
 /// gate is the floor below which nothing renders at all.
 pub fn render(frame: &mut Frame, palette: &Palette, history: &mut History, area: Rect) {
-    let side_by_side = usize::from(area.width) >= usize::from(PICKER_PANEL_WIDTH + FORMATS_PANEL_WIDTH);
+    // The picker grows toward ~30% of the body width (clamped 20-40) instead of sitting at its
+    // 34-cell content floor — the ruling that makes the master-detail selectors flexible-width.
+    let picker_width = widgets::selector_panel_width(area.width, PICKER_PANEL_WIDTH);
+    let side_by_side = usize::from(area.width) >= usize::from(picker_width) + usize::from(FORMATS_PANEL_WIDTH);
 
     // The pane's existence is a render-derived fact the handlers read back: below the floor,
     // `descended` cannot survive — the formats rows it walks do not render there, and a resize
@@ -659,7 +669,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, history: &mut History, area:
     }
 
     if side_by_side {
-        let [left, right] = Layout::horizontal([Constraint::Length(PICKER_PANEL_WIDTH), Constraint::Fill(1)]).areas(area);
+        let [left, right] = Layout::horizontal([Constraint::Length(picker_width), Constraint::Fill(1)]).areas(area);
         render_picker(frame, palette, history, left, false);
         render_formats(frame, palette, history, right);
     } else {
@@ -782,11 +792,22 @@ fn render_formats(frame: &mut Frame, palette: &Palette, history: &History, area:
     frame.render_widget(Paragraph::new(rows), inner);
 }
 
-/// The formats pane's rows: the four toggles, the export chip, the disabled chip's tooltip while
-/// it holds focus, and the run's counter slot. `width` is the panel's interior width, which the
-/// selected rows' tint pads out to.
+/// The static output-dir row, the screen's answer to "where does the export land" (decision 60:
+/// documents write under `<out>/chat/<key>/`, so the root shown here is the `chat/` parent the
+/// screen was handed). Display-only, like the run screens' static rows — no caret, no focus, no
+/// key binding; the path head-ellipsises into the pane's remaining width.
+fn output_dir_row(palette: &Palette, history: &History, width: usize) -> Line<'static> {
+    let budget = width.saturating_sub(OUTPUT_DIR_COLUMN);
+    let shown = head_ellipsis(&history.out_root.to_string_lossy(), budget);
+    display_row(palette, "output dir", OUTPUT_DIR_COLUMN, vec![Span::styled(shown, Style::new().fg(palette.text))])
+}
+
+/// The formats pane's rows: the static output-dir row, the four toggles, the export chip, the
+/// disabled chip's tooltip while it holds focus, and the run's counter slot. `width` is the
+/// panel's interior width, which the selected rows' tint pads out to.
 fn formats_panel(palette: &Palette, history: &History, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::with_capacity(FormatsRow::ALL.len() + 2);
+    let mut rows = Vec::with_capacity(FormatsRow::ALL.len() + 3);
+    rows.push(output_dir_row(palette, history, width));
     for (index, row) in FormatsRow::ALL.into_iter().enumerate() {
         rows.push(formats_row(palette, history, row, index, width));
     }
@@ -853,11 +874,11 @@ fn summary(outcome: &RunOutcome) -> RunAlert {
 /// The formats pane's rows must fit the body a panel is guaranteed at the compact floor, the
 /// same invariant the other screens' forms rest on. The wrapped tooltip can reach two rows —
 /// the floor's 22-cell reason budget holds "pick at least one conversation" as two — so the
-/// pane's worst case is the four toggles, the chip, two tooltip rows, and the counter slot,
-/// and the row below the pane's bottom clips before any of those do. The picker-only arm's
-/// chip slot — chip, wrapped reason, counter — is a subset of that count, so the same bound
-/// covers its row claim against the same floor.
-const _: () = assert!(FormatsRow::ALL.len() + 3 <= GUARANTEED_INTERIOR_ROWS as usize);
+/// pane's worst case is the output-dir row, the four toggles, the chip, two tooltip rows, and
+/// the counter slot, and the row below the pane's bottom clips before any of those do. The
+/// picker-only arm's chip slot — chip, wrapped reason, counter — is a subset of that count, so
+/// the same bound covers its row claim against the same floor.
+const _: () = assert!(FormatsRow::ALL.len() + 4 <= GUARANTEED_INTERIOR_ROWS as usize);
 
 /// The chip's label: `export N` while anything is selected, `export` alone when the selection is
 /// empty (finding 6 — zero hides the count rather than reading "export 0", and the chip is

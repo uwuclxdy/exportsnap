@@ -23,17 +23,21 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 
 const EXPORT_ID: &str = "1784667002819";
-/// The side-by-side breakpoint: the master pane's clamp-floor 20 cells plus the detail pane's
-/// 31.
-const SECTIONS_PANEL_WIDTH: u16 = 20;
-/// Interior columns of the sections panel at `WIDE`: one border plus one padding cell in from
-/// each edge — the floor's interior, exactly.
-const SECTIONS_INTERIOR: std::ops::Range<u16> = 2..18;
-/// Interior columns of the detail panel: one border plus one padding cell in from each edge,
-/// the panel starting at the sections panel's edge. The width is the terminal's, so the same
-/// spelling holds at the side-by-side floor.
-fn detail_columns(width: u16) -> std::ops::Range<u16> {
-    22..(width - 2)
+/// The master (sections) pane's width at a terminal width: ~30% of the body, clamped 20-40 —
+/// the growth the screen's `widgets::selector_panel_width` gives its 20-cell content floor. At
+/// the 51-cell side-by-side floor this stays 20; at `WIDE` it grows to 36.
+fn sections_panel_width(terminal_width: u16) -> u16 {
+    ((usize::from(terminal_width) * 3) / 10).clamp(20, 40) as u16
+}
+/// Interior columns of the sections panel at `terminal_width`: one border plus one padding cell
+/// in from each edge.
+fn sections_interior(terminal_width: u16) -> std::ops::Range<u16> {
+    2..(sections_panel_width(terminal_width) - 1)
+}
+/// Interior columns of the detail panel at `terminal_width`: one border plus one padding cell
+/// in from each edge, the panel starting at the sections panel's edge.
+fn detail_columns(terminal_width: u16) -> std::ops::Range<u16> {
+    (sections_panel_width(terminal_width) + 2)..(terminal_width - 2)
 }
 /// The scrollbar column inside the detail panel at `WIDE`: the interior's right edge, which is
 /// the panel's right padding column.
@@ -174,7 +178,7 @@ fn cell_run(buffer: &Buffer, columns: std::ops::Range<u16>, y: u16) -> String {
 
 /// The sections pane's interior on row `y`.
 fn sections_row(buffer: &Buffer, y: u16) -> String {
-    cell_run(buffer, SECTIONS_INTERIOR, y)
+    cell_run(buffer, sections_interior(buffer.area.width), y)
 }
 
 /// The detail pane's interior on row `y` at a given terminal width.
@@ -248,7 +252,7 @@ fn the_five_sections_render_and_the_caret_wraps() {
     assert_eq!(buffer[(4, FIRST_ROW + 1)].style().fg, Some(palette.text_dim));
     // The master pane is the focused one: LINE_STRONG border and an ACCENT_2 first-panel title.
     assert_eq!(buffer[(0, 1)].style().fg, Some(palette.line_strong));
-    assert!(cell_run(buffer, SECTIONS_INTERIOR, 1).starts_with(" SECTIONS"));
+    assert!(cell_run(buffer, sections_interior(WIDE), 1).starts_with(" SECTIONS"));
     assert_eq!(buffer[(3, 1)].style().fg, Some(palette.accent_2));
     assert!(buffer[(3, 1)].style().add_modifier.contains(ratatui::style::Modifier::ITALIC));
     assert!(buffer[(3, 1)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
@@ -277,15 +281,18 @@ fn enter_descends_into_the_detail_and_esc_ascends() {
     let dir = export_tree();
     let mut app = app_on_account(dir.path());
     let palette = Palette::new(Tier::Full);
+    // The master pane's grown width at `WIDE`; the detail pane's interior starts two cells past
+    // its edge (border + padding).
+    let master = sections_panel_width(WIDE);
     let terminal = draw(&mut app, WIDE, TALL);
     let buffer = terminal.backend().buffer();
     // Top level: the detail pane is drawn blurred — LINE border, TEXT_DIM italic title — with
     // the account rows.
-    assert_eq!(buffer[(SECTIONS_PANEL_WIDTH, 1)].style().fg, Some(palette.line));
+    assert_eq!(buffer[(master, 1)].style().fg, Some(palette.line));
     assert!(detail_row(buffer, WIDE, 1).starts_with(" ACCOUNT"));
-    assert_eq!(buffer[(23, 1)].style().fg, Some(palette.text_dim));
-    assert!(buffer[(23, 1)].style().add_modifier.contains(ratatui::style::Modifier::ITALIC));
-    assert!(!buffer[(23, 1)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
+    assert_eq!(buffer[(master + 3, 1)].style().fg, Some(palette.text_dim));
+    assert!(buffer[(master + 3, 1)].style().add_modifier.contains(ratatui::style::Modifier::ITALIC));
+    assert!(!buffer[(master + 3, 1)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
     assert_eq!(detail_row(buffer, WIDE, FIRST_ROW), "  username  fixture-user");
 
     press(&mut app, KeyCode::Enter);
@@ -293,13 +300,13 @@ fn enter_descends_into_the_detail_and_esc_ascends() {
     let buffer = terminal.backend().buffer();
     // Descended: the detail pane owns the caret — LINE_STRONG border, bold title — and the
     // caret has left the sections pane for the detail's first row.
-    assert_eq!(buffer[(SECTIONS_PANEL_WIDTH, 1)].style().fg, Some(palette.line_strong));
-    assert!(buffer[(23, 1)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
+    assert_eq!(buffer[(master, 1)].style().fg, Some(palette.line_strong));
+    assert!(buffer[(master + 3, 1)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
     assert_eq!(buffer[(0, 1)].style().fg, Some(palette.line));
     assert_eq!(buffer[(2, FIRST_ROW)].symbol(), " ");
-    assert_eq!(buffer[(22, FIRST_ROW)].symbol(), "❯");
-    assert_eq!(buffer[(24, FIRST_ROW)].style().fg, Some(palette.text_dim));
-    assert!(buffer[(24, FIRST_ROW)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
+    assert_eq!(buffer[(master + 2, FIRST_ROW)].symbol(), "❯");
+    assert_eq!(buffer[(master + 4, FIRST_ROW)].style().fg, Some(palette.text_dim));
+    assert!(buffer[(master + 4, FIRST_ROW)].style().add_modifier.contains(ratatui::style::Modifier::BOLD));
 
     press(&mut app, KeyCode::Esc);
     let terminal = draw(&mut app, WIDE, TALL);
@@ -307,10 +314,10 @@ fn enter_descends_into_the_detail_and_esc_ascends() {
     assert_eq!(buffer[(2, FIRST_ROW)].symbol(), "❯", "esc returns the caret to the sections");
     // A blurred pane keeps its last-selected row's tint but drops the caret (contract: Pane
     // focus — the sections pane does the same through its List highlight).
-    assert_eq!(buffer[(22, FIRST_ROW)].symbol(), " ", "the blurred detail drops the caret");
-    assert_eq!(buffer[(22, FIRST_ROW)].style().bg, Some(palette.bg_hover), "the blurred detail keeps its selection's tint");
-    assert_eq!(buffer[(24, FIRST_ROW)].style().bg, Some(palette.bg_hover), "the tint runs through the label");
-    assert_eq!(buffer[(SECTIONS_PANEL_WIDTH, 1)].style().fg, Some(palette.line));
+    assert_eq!(buffer[(master + 2, FIRST_ROW)].symbol(), " ", "the blurred detail drops the caret");
+    assert_eq!(buffer[(master + 2, FIRST_ROW)].style().bg, Some(palette.bg_hover), "the blurred detail keeps its selection's tint");
+    assert_eq!(buffer[(master + 4, FIRST_ROW)].style().bg, Some(palette.bg_hover), "the tint runs through the label");
+    assert_eq!(buffer[(master, 1)].style().fg, Some(palette.line));
 }
 
 #[test]
@@ -368,7 +375,7 @@ fn each_section_renders_its_stats() {
     );
     assert_eq!(detail_row(buffer, WIDE, FIRST_ROW + 5), "  devices  1");
     assert_eq!(detail_row(buffer, WIDE, FIRST_ROW + 6), "  logins  1");
-    assert_eq!(buffer[(33, FIRST_ROW + 2)].style().fg, Some(palette.text));
+    assert_eq!(buffer[(sections_panel_width(WIDE) + 13, FIRST_ROW + 2)].style().fg, Some(palette.text));
 
     let terminal = draw_section(&mut app, 1);
     let buffer = terminal.backend().buffer();
@@ -581,7 +588,7 @@ fn the_layout_ladder_keeps_two_panels_and_then_the_sections() {
     let terminal = draw(&mut app, 51, TALL);
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(0, 1)].symbol(), "╭", "the sections panel opens at the body's left edge");
-    assert_eq!(buffer[(SECTIONS_PANEL_WIDTH, 1)].symbol(), "╭", "the detail panel opens at the master's edge");
+    assert_eq!(buffer[(sections_panel_width(51), 1)].symbol(), "╭", "the detail panel opens at the master's edge");
     assert_eq!(detail_row(buffer, 51, FIRST_ROW + 2), "  created  2019-05-04", "the timestamp row renders whole at the floor");
     // One cell short: the detail stacks full-width under the sections.
     let terminal = draw(&mut app, 50, TALL);
@@ -618,7 +625,7 @@ fn a_short_detail_scrolls_its_rows() {
     // 9 rows tall: the compact shell leaves a 4-row detail. Nine location rows don't fit.
     let terminal = draw(&mut app, WIDE, 9);
     let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(22, 3)].symbol(), "❯", "the caret opens on the first row");
+    assert_eq!(buffer[(sections_panel_width(WIDE) + 2, 3)].symbol(), "❯", "the caret opens on the first row");
     for _ in 0..5 {
         press(&mut app, KeyCode::Down);
     }
@@ -629,7 +636,7 @@ fn a_short_detail_scrolls_its_rows() {
     // scrollbar thumb paints the interior's right column.
     assert_eq!(detail_row(buffer, WIDE, 3), "  daily top locations  1", "row 3 is the pane's top row now");
     assert_eq!(detail_row(buffer, WIDE, 5), "❯ location history  1", "the walk reached row 5");
-    assert_eq!(buffer[(22, 5)].symbol(), "❯", "the caret follows the walk past the fold");
+    assert_eq!(buffer[(sections_panel_width(WIDE) + 2, 5)].symbol(), "❯", "the caret follows the walk past the fold");
     let thumb: Vec<u16> = (3..7).filter(|&y| buffer[(DETAIL_SCROLLBAR_COLUMN, y)].symbol() == "┃").collect();
     assert!(!thumb.is_empty(), "the scrollbar thumb paints the right column");
 }

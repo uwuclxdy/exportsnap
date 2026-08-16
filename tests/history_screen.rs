@@ -79,22 +79,27 @@ fn press_with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle_event(&Event::Key(KeyEvent::new(code, modifiers)));
 }
 
+/// The picker pane's width at a terminal width, mirroring the screen's selector growth: ~30%
+/// of the body, clamped 20-40, floored at the picker's 34-cell content floor. At the 64-cell
+/// side-by-side floor this stays 34; at the 120-wide render these tests draw it grows to 36.
+fn picker_panel_width(terminal_width: u16) -> u16 {
+    ((usize::from(terminal_width) * 3) / 10).clamp(34, 40) as u16
+}
+
 /// The picker pane's interior cells of row `y` — the panel's padding and border sit at columns 0-1
-/// and its right border at `PICKER_PANEL_WIDTH - 1`, so the full-width row also carries the
+/// and its right border at the picker's right edge, so the full-width row also carries the
 /// formats pane's cells.
 fn picker_row(buffer: &Buffer, y: u16) -> String {
-    (2..PICKER_PANEL_WIDTH - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()
+    let picker = picker_panel_width(buffer.area.width);
+    (2..picker - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()
 }
 
 /// The formats pane's interior cells of row `y`: its border and padding sit at
-/// `PICKER_PANEL_WIDTH..=PICKER_PANEL_WIDTH + 1`, and its right border at the pane's edge.
+/// `picker..=picker + 1`, and its right border at the pane's edge.
 fn formats_row(buffer: &Buffer, y: u16) -> String {
-    (PICKER_PANEL_WIDTH + 2..buffer.area.width - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()
+    let picker = picker_panel_width(buffer.area.width);
+    (picker + 2..buffer.area.width - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()
 }
-
-/// The picker pane's width at the 120x24 render these tests draw — the two panels sit side by
-/// side, the picker taking its fixed budget and the formats pane the rest.
-const PICKER_PANEL_WIDTH: u16 = 34;
 
 /// The fill pin: every panel spans its full allotted body height — its bottom border closes on
 /// the body's last row, not capped under its content. Walks the frame for panel top-left corners
@@ -163,7 +168,7 @@ fn the_picker_scrollbar_thumb_reaches_the_track_end_at_max_scroll() {
         let buffer = terminal.backend().buffer();
         // The scrollbar paints the picker panel's right padding column; its last row is the
         // row above the picker's bottom border.
-        let column = PICKER_PANEL_WIDTH - 2;
+        let column = picker_panel_width(width) - 2;
         let bottom = (1..buffer.area.height).find(|&y| buffer[(0, y)].symbol() == "╰").unwrap() - 1;
         assert_eq!(buffer[(column, bottom)].symbol(), "┃", "the thumb must reach the track's last cell at max scroll");
     }
@@ -211,18 +216,23 @@ fn wait_for_alert(app: &mut App) {
 }
 
 /// The picker's interior rows start below the panel's top border; the formats pane's below its
-/// own. At 120x24 both panels sit side by side, so the picker's interior runs columns 2..32 and
-/// the formats pane's columns 36..118 of each row.
+/// own. At 120x24 both panels sit side by side, so the picker's interior runs columns 2..34 and
+/// the formats pane's columns 38..118 of each row.
 const PICKER_ROWS_Y: u16 = 2;
-/// Row 0 of the formats pane's interior: the first format toggle.
-const FORMATS_ROWS_Y: u16 = 2;
-/// The export chip's slot among the formats rows: the four toggles then the chip.
+/// Row 0 of the formats pane's interior: the static output-dir row, which leads the four format
+/// toggles.
+const FORMATS_ROWS_Y: u16 = 3;
+/// The export chip's slot among the formats rows: the output-dir row, the four toggles, then the
+/// chip.
 const CHIP_ROW: u16 = FORMATS_ROWS_Y + 4;
 /// The row below the chip: the disabled chip's tooltip while it holds focus, and the run counter
 /// otherwise. With the tooltip live the counter sits one row lower.
 const COUNTER_ROW: u16 = CHIP_ROW + 1;
-/// Where the chip's text starts: the pane's border, the padding cell, and the caret gutter.
-const CHIP_X: u16 = PICKER_PANEL_WIDTH + 4;
+/// Where the chip's text starts at `terminal_width`: the pane's border, the padding cell, and the
+/// caret gutter.
+fn chip_x(terminal_width: u16) -> u16 {
+    picker_panel_width(terminal_width) + 4
+}
 
 /// Descends to the formats pane and parks the caret on the export chip. Requires the pane's
 /// focus to be fresh (at the first toggle): the focus keeps its position across ascents, and the
@@ -389,7 +399,7 @@ fn the_picker_shows_the_house_empty_state_for_an_export_with_no_conversations() 
     // The house empty state inside the pane: a rounded frame around a hint, minus the action
     // line — an empty conversation list has no key to offer, so the shared widget's hardcoded
     // "press ↵ to start" would advertise a run that starts nothing.
-    let interior = |y: u16| (2..PICKER_PANEL_WIDTH - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    let interior = |y: u16| (2..picker_panel_width(buffer.area.width) - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>();
     let hint_y = (PICKER_ROWS_Y..20)
         .find(|&y| interior(y).contains("no conversations"))
         .expect("the empty state names the condition somewhere in it");
@@ -469,6 +479,31 @@ fn the_formats_pane_toggles_formats_and_refuses_an_empty_selection() {
 }
 
 #[test]
+fn the_formats_pane_names_the_output_location() {
+    // No other row on the history tab states where an export lands, so the static output-dir row
+    // leads the formats pane — the resolved out root the run writes under, head-ellipsised into
+    // the pane's width (finding 14).
+    let dir = export_tree(&two_threads());
+    let mut app = app_on_history(&dir);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let row = formats_row(buffer, FORMATS_ROWS_Y - 1);
+    assert!(row.starts_with("output dir  "), "the static key names the value: {row}");
+    assert!(row.ends_with("out"), "the resolved out root renders as the value: {row}");
+    // The static key is the TEXT_DIM + bold anchor of a display-only row, never a focusable
+    // row's interactive label.
+    let palette = Palette::new(Tier::Full);
+    let key_x = picker_panel_width(buffer.area.width) + 2;
+    assert_eq!(buffer[(key_x, FORMATS_ROWS_Y - 1)].style().fg, Some(palette.text_dim), "the static key stays TEXT_DIM");
+    assert!(
+        buffer[(key_x, FORMATS_ROWS_Y - 1)].style().add_modifier.contains(ratatui::style::Modifier::BOLD),
+        "the static key's bold is its anchor, not a focus cue"
+    );
+}
+
+#[test]
 fn an_empty_conversation_selection_is_a_visible_refusal_not_a_run_of_everything() {
     let dir = export_tree(&two_threads());
     let mut app = app_on_history(&dir);
@@ -485,7 +520,7 @@ fn an_empty_conversation_selection_is_a_visible_refusal_not_a_run_of_everything(
     // reads faint on the raised fill. The two pins are the brief's refusal contract.
     assert_eq!(formats_row(buffer, CHIP_ROW), "❯  export");
     assert_eq!(formats_row(buffer, COUNTER_ROW), "  └ pick at least one conversation");
-    assert_eq!(buffer[(CHIP_X, CHIP_ROW)].style().fg, Some(palette.text_faint));
+    assert_eq!(buffer[(chip_x(buffer.area.width), CHIP_ROW)].style().fg, Some(palette.text_faint));
 
     // Enter on the disabled chip is inert: no worker, no counter. The tooltip holds the row below
     // the chip, so the empty counter slot sits one row lower.
@@ -557,12 +592,13 @@ fn the_tooltip_wraps_inside_the_pane_rather_than_clipping_at_the_narrow_floor() 
     let buffer = terminal.backend().buffer();
 
     // Side by side: the picker's 34 columns and the formats pane's 30, borders touching. The
-    // pane's interior rows: four toggles, the chip, the wrapped tooltip, the counter slot.
+    // pane's interior rows: the output-dir row, four toggles, the chip, the wrapped tooltip,
+    // the counter slot.
     let row = |y: u16| (36..62).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned();
-    assert_eq!(row(6), "❯  export");
-    assert_eq!(row(7), "  └ pick at least one", "the reason's first segment keeps the leader");
-    assert_eq!(row(8), "    conversation", "the continuation line indents to the leader's width");
-    assert_eq!(row(9), "", "the counter slot follows the wrapped reason");
+    assert_eq!(row(7), "❯  export");
+    assert_eq!(row(8), "  └ pick at least one", "the reason's first segment keeps the leader");
+    assert_eq!(row(9), "    conversation", "the continuation line indents to the leader's width");
+    assert_eq!(row(10), "", "the counter slot follows the wrapped reason");
 }
 
 // ---- the run: counter, alert lifecycle, worker machinery ----
@@ -862,6 +898,21 @@ fn the_history_tab_hints_name_its_own_keys_while_the_picker_holds_rows() {
 }
 
 #[test]
+fn the_descended_hints_name_the_formats_panes_own_keys() {
+    // The generic descended set advertises only move/back; the formats pane also binds `space`
+    // (toggle a format) and `↵` (run the export), so descending must advertise those — the same
+    // derive-from-bindings rule the picker's toggle hints follow.
+    let dir = export_tree(&two_threads());
+    let mut app = app_on_history(&dir);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    press(&mut app, KeyCode::Enter);
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let footer = (0..120).map(|x| terminal.backend().buffer()[(x, 23)].symbol()).collect::<String>();
+    assert_eq!(footer.trim_end(), " ↑↓ move   space toggle   ↵ export   ← back   esc back   ? help   q back");
+}
+
+#[test]
 fn the_toggle_hints_leave_the_footer_when_the_picker_has_no_rows() {
     // An export that LOADS but holds no conversations: the picker is empty, so `t` and `space`
     // have nothing to act on, and their hints are derived away — never copied per branch.
@@ -914,10 +965,11 @@ fn the_picker_sorts_titles_case_insensitively_with_the_key_breaking_ties() {
 
 #[test]
 fn the_picker_truncates_titles_as_prose_and_keys_as_identities() {
-    // A title and a key-only row, both longer than the 24-cell label budget at this width: the
-    // title takes the prose trailing cut, the key row keeps the identity middle cut (finding 11).
+    // A title and a key-only row, both longer than the 26-cell label budget at this width (the
+    // picker grew from 34 to 36 cells): the title takes the prose trailing cut, the key row keeps
+    // the identity middle cut (finding 11).
     let dir = export_tree(&[
-        ("b~aB3xY9aB3xY9aB3xY9aB3xY9", vec![chat_entry("2021-03-04 09:00:00 UTC", None)]),
+        ("b~aB3xY9aB3xY9aB3xY9aB3xY9aB3xY9", vec![chat_entry("2021-03-04 09:00:00 UTC", None)]),
         ("key-zz", vec![chat_entry("2021-03-04 10:00:00 UTC", Some("The titled conversation chat"))]),
     ]);
     let mut app = app_on_history(&dir);
@@ -927,11 +979,11 @@ fn the_picker_truncates_titles_as_prose_and_keys_as_identities() {
     // The key-only row sorts first (`b~` before `t`), and its label ends in id characters —
     // the middle cut preserved the tail, which is the identity's discriminating half.
     let key_row = picker_row(terminal.backend().buffer(), PICKER_ROWS_Y);
-    assert_eq!(key_row, "❯ [x] b~aB3xY9aB3…aB3xY9aB3xY9");
+    assert_eq!(key_row, "❯ [x] b~aB3xY9aB3x…9aB3xY9aB3xY9");
     assert!(key_row.ends_with('9'), "the key row keeps the identity tail: {key_row}");
     // The title row takes the prose cut: the trailing ellipsis names what was cut.
-    // 28 chars of title against a 24-cell budget: prose truncation keeps 23 chars + the ellipsis.
-    assert_eq!(picker_row(terminal.backend().buffer(), PICKER_ROWS_Y + 1), "  [x] The titled conversation…");
+    // 28 chars of title against a 26-cell budget: prose truncation keeps 25 chars + the ellipsis.
+    assert_eq!(picker_row(terminal.backend().buffer(), PICKER_ROWS_Y + 1), "  [x] The titled conversation c…");
 }
 
 // ---- the chip must survive the picker-only fallback ----

@@ -107,6 +107,23 @@ pub(crate) fn descended_hints(palette: &Palette, width: u16) -> Line<'static> {
     hint_line(palette, &trim_hints(&[(&up_down, "move"), (&left, "back"), ("esc", "back"), ("?", "help"), ("q", "back")], width))
 }
 
+/// The hint set while the history tab's formats pane is descended: arrows move the caret,
+/// `space` toggles the focused format, `↵` toggles a format or runs the export on the chip, and
+/// `←`/`esc`/`q` ascend. The generic descended set advertises neither of the two pane-specific
+/// keys, which is why this exists rather than the shell reusing [`descended_hints`] per tab.
+pub(crate) fn history_descended_hints(palette: &Palette, width: u16) -> Line<'static> {
+    let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
+    let left = glyph::KEY_LEFT.to_string();
+    let enter = glyph::KEY_ENTER.to_string();
+    hint_line(
+        palette,
+        &trim_hints(
+            &[(&up_down, "move"), ("space", "toggle"), (&enter, "export"), (&left, "back"), ("esc", "back"), ("?", "help"), ("q", "back")],
+            width,
+        ),
+    )
+}
+
 /// The hint set while the action menu owns input: arrows move the caret (wrapping), `↵` picks, and
 /// `esc`/`q` both cancel. Deliberately no `←→ switch`, `? help` or `q quit` group — while a modal is
 /// open those keys are the modal's to ignore, so advertising them would mislabel what the key does

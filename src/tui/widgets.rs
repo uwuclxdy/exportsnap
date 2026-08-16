@@ -157,6 +157,24 @@ pub(crate) fn side_by_side_form_panel_width(
     (form_interior + usize::from(CHROME_COLUMNS)).min(body_width.saturating_sub(table_panel))
 }
 
+/// The master-detail selector pane's clamp bounds (cloudy-tui Master-detail): ~30% of the body
+/// width, clamped to 20-40 cells.
+pub(crate) const SELECTOR_CLAMP_FLOOR: u16 = 20;
+pub(crate) const SELECTOR_CLAMP_CEIL: u16 = 40;
+
+/// The master-detail selector pane's width in cells: ~30% of the body width, clamped to the
+/// contract's 20-40 cells, and never below the selector's own content floor — a selector narrower
+/// than its widest row renders nothing. The account selector's floor is the 20-cell clamp floor
+/// itself; the history picker's is its 34-cell row, which raises the effective floor above 20. At
+/// a wide terminal the selector grows from its floor toward the 40-cell ceiling.
+#[must_use]
+pub(crate) fn selector_panel_width(body_width: u16, content_floor: u16) -> u16 {
+    let share = (usize::from(body_width) * 3) / 10;
+    let floor = usize::from(content_floor.max(SELECTOR_CLAMP_FLOOR));
+    let clamped = share.clamp(floor, usize::from(SELECTOR_CLAMP_CEIL));
+    u16::try_from(clamped).unwrap_or(SELECTOR_CLAMP_CEIL)
+}
+
 /// An INTERACTIVE row's label: `TEXT_DIM` blurred, promoted to `TEXT + bold` when the row is
 /// focused (contract: Forms — the focused row's label promotes).
 ///
@@ -853,6 +871,20 @@ mod tests {
             ProgressColumns::for_width(floor_width + 13, 20, 0, 19),
             ProgressColumns { identity: IDENTITY_CELLS, location: LOCATION_CELLS, output: 19 }
         );
+    }
+
+    #[test]
+    fn the_selector_width_grows_toward_thirty_percent_and_clamps_to_the_content_floor() {
+        // The contract's ~30%-of-body formula, clamped 20-40 and never below the selector's own
+        // content floor: the account selector (20) and the history picker (34) both grow toward
+        // the 40-cell ceiling at wide terminals while a narrower body keeps each at its floor.
+        assert_eq!(selector_panel_width(120, 20), 36, "120 * 3/10 = 36");
+        assert_eq!(selector_panel_width(120, 34), 36);
+        assert_eq!(selector_panel_width(80, 20), 24);
+        assert_eq!(selector_panel_width(80, 34), 34, "the 24-cell share still meets the picker's 34-cell floor");
+        assert_eq!(selector_panel_width(64, 34), 34, "the side-by-side floor stays the picker's content floor");
+        assert_eq!(selector_panel_width(200, 34), 40, "the 40-cell ceiling caps the growth");
+        assert_eq!(selector_panel_width(51, 20), 20, "below 30% the selector sits at its floor");
     }
 
     #[test]
