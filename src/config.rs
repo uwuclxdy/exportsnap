@@ -19,7 +19,7 @@
 //! path, and the two run defaults (transcode, overlay mode) — and nothing more. Every key is
 //! read at startup: the tier resolver takes `[theme] name`, and `app::RunDefaults::resolve`
 //! plus the startup probe take the rest (decision 66, wired as task 85). The file is the raw
-//! layer the settings screen's write-back rounds through and task 86's provenance reads.
+//! layer the settings screen's write-back rounds through and its effective-value reads.
 //!
 //! # Contract
 //!

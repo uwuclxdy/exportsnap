@@ -124,7 +124,7 @@ fn main() -> Result<()> {
     // `--out=<dir>` names where a memories run writes (decision 33); absent, the file's `out_dir`
     // or the source-derived default decides (decision 66). Parsed before the terminal is taken
     // over, like the source. The raw layers — the flag and the file — go on to the app's settings
-    // screen, which states provenance off them (task 86).
+    // screen, which reads the effective value off them (task 86).
     let out = parse_out_arg(args)?;
     let defaults = RunDefaults::resolve(out.as_deref(), &config, &source);
 

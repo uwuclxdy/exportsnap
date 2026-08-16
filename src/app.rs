@@ -124,8 +124,8 @@ impl Tab {
 
 /// The run inputs the startup composition settled, once, in decision 66's order (flag > config >
 /// detection > default). The config file is the raw layer, kept reachable in `main` so the
-/// settings screen can state provenance; this is the effective answer a run reads, the way the
-/// resolved tier is the only layer the screens see.
+/// settings screen can write it back and read its effective value; this is the effective answer a
+/// run reads, the way the resolved tier is the only layer the screens see.
 ///
 /// Deliberately no `Default` impl, for the reason [`crate::export::local_fix::VideoOptions`]
 /// documents: one would have to answer an out root without resolving it, which reads as the
