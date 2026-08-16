@@ -50,7 +50,7 @@ use crate::export::env::Environment;
 use crate::export::local_fix::{VideoOptions, canonical_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::zip::discover_parts;
-use crate::tui::alert::{AlertKind, RunAlert};
+use crate::tui::alert::RunAlert;
 use crate::tui::format::{cells, head_ellipsis, plural, right_pad, truncate_prose};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
@@ -1011,7 +1011,7 @@ fn summary(chat: &ChatMedia, outcome: &RunOutcome) -> RunAlert {
             // above already carries the fixed/failed/skipped/deferred/dropped clauses, and a mixed
             // resume (new items fixed + old items skipped elsewhere) must keep both counts visible.
             if skipped_outputs_recorded_elsewhere(chat, report.skipped) {
-                alert.kind = AlertKind::Warning;
+                alert.note_attention();
                 alert.message = format!("{} {} outputs recorded under a different out dir", alert.message, glyph::CLAUSE_SEPARATOR);
             }
             alert

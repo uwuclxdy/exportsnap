@@ -48,3 +48,17 @@ fn completion_and_failure_assign_the_kind() {
 
     assert_eq!(RunAlert::failure(&"boom".to_string()).kind, AlertKind::Danger);
 }
+
+/// `note_attention` promotes a clean run to `Warning` but never demotes a genuine failure: a run
+/// that both failed items and skipped finished items to a different out dir stays `Danger`
+/// (severity precedence, Danger over Warning).
+#[test]
+fn note_attention_promotes_a_clean_run_but_never_demotes_a_failure() {
+    let mut clean = RunAlert { kind: AlertKind::Info, message: String::new() };
+    clean.note_attention();
+    assert_eq!(clean.kind, AlertKind::Warning);
+
+    let mut failed = RunAlert { kind: AlertKind::Danger, message: String::new() };
+    failed.note_attention();
+    assert_eq!(failed.kind, AlertKind::Danger);
+}

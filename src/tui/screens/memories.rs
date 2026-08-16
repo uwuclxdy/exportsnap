@@ -46,7 +46,7 @@ use crate::export::local_fix::{VideoOptions, canonical_out_root};
 use crate::export::manifest::{ItemKind, ItemStatus, Manifest};
 use crate::export::memories_run::{self, PlanRow, PlanSnapshot, RunError, RunEvent, RunInputs, RunOutcome};
 use crate::export::zip::discover_parts;
-use crate::tui::alert::{AlertKind, RunAlert};
+use crate::tui::alert::RunAlert;
 use crate::tui::format::{cells, head_ellipsis, right_pad};
 use crate::tui::screens::overview::GUARANTEED_INTERIOR_ROWS;
 use crate::tui::theme::{Palette, glyph};
@@ -864,7 +864,7 @@ fn summary(memories: &Memories, outcome: &RunOutcome) -> RunAlert {
             // above already carries the fixed/failed/skipped/deferred/dropped clauses, and a mixed
             // resume (new items fixed + old items skipped elsewhere) must keep both counts visible.
             if skipped_outputs_recorded_elsewhere(memories, report.skipped) {
-                alert.kind = AlertKind::Warning;
+                alert.note_attention();
                 alert.message = format!("{} {} outputs recorded under a different out dir", alert.message, glyph::CLAUSE_SEPARATOR);
             }
             alert

@@ -127,4 +127,14 @@ impl RunAlert {
             AlertKind::Danger => TabActivity::Danger,
         }
     }
+
+    /// Mark a finished run as "needs attention" without demoting a genuine failure. A
+    /// skipped-elsewhere resume (outputs recorded under a different out dir) promotes a clean run
+    /// from `Info` to `Warning`, but `Danger` wins over `Warning`: a run that failed somewhere must
+    /// stay `Danger` however many other items it also skipped.
+    pub fn note_attention(&mut self) {
+        if self.kind == AlertKind::Info {
+            self.kind = AlertKind::Warning;
+        }
+    }
 }
