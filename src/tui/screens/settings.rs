@@ -233,6 +233,29 @@ impl Settings {
         self.source = source;
     }
 
+    /// The `--out` flag, for the app's source re-probe to re-resolve out-root precedence. It is
+    /// a startup value the screen never rewrites, so reading it here rather than from an
+    /// app-side snapshot keeps the layers to one copy.
+    #[must_use]
+    pub(crate) fn cli_out(&self) -> Option<&Path> {
+        self.layers.cli_out.as_deref()
+    }
+
+    /// The live config file layer — the one [`Self::write`] replaces in place on a successful
+    /// commit. The app's source re-probe resolves run defaults from this, not from a startup
+    /// snapshot, so a setting changed after launch reaches the run screens.
+    #[must_use]
+    pub(crate) fn config(&self) -> &Config {
+        &self.layers.config
+    }
+
+    /// Replaces the probe's ffmpeg detection answer in place, so the machine probe a re-probe
+    /// just ran reaches the ffmpeg row without rebuilding the screen — a rebuild would drop a
+    /// committed config, a live toast and the form's focus.
+    pub(crate) fn set_detected_ffmpeg(&mut self, detected_ffmpeg: Option<PathBuf>) {
+        self.layers.detected_ffmpeg = detected_ffmpeg;
+    }
+
     /// Whether a text field is being edited — the app's `q`/`x` suspension and the shell's
     /// hint set both read it.
     #[must_use]

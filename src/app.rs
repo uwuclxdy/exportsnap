@@ -21,7 +21,7 @@ use crate::tui::screens::account::Account;
 use crate::tui::screens::chat_media::ChatMedia;
 use crate::tui::screens::history::History;
 use crate::tui::screens::memories::Memories;
-use crate::tui::screens::overview::Overview;
+use crate::tui::screens::overview::{Overview, OverviewKey};
 use crate::tui::screens::settings::{Settings, SettingsLayers};
 use crate::tui::shell;
 use crate::tui::theme::{Palette, Tier};
@@ -277,6 +277,16 @@ impl App {
     fn start_with(
         tier: Tier, source: PathBuf, defaults: RunDefaults, layers: SettingsLayers, locate: impl Fn(Tool) -> Option<PathBuf>,
     ) -> Self {
+        let mut app = Self::new(tier);
+        app.settings = Settings::with_layers(layers);
+        app.reprobe_with(source, defaults, locate);
+        app
+    }
+
+    /// The startup composition, run once at launch and again for each path the overview's input
+    /// commits: probe the machine once, merge the config's ffmpeg over detection, re-measure the
+    /// space at the output root, re-read the overview, and hand every screen the result.
+    fn reprobe_with(&mut self, source: PathBuf, defaults: RunDefaults, locate: impl Fn(Tool) -> Option<PathBuf>) {
         let mut environment = Environment::probe_with(locate, &source);
         // The settings ffmpeg row reads the PROBE's own answer as its detection layer, so the
         // answer is captured before the file's path replaces it below: a derivation after the
@@ -291,17 +301,17 @@ impl App {
         }
         let media = environment.measured_at(probe_target(&defaults.out_root));
 
-        Self::new(tier)
-            .with_settings(Settings::with_layers(SettingsLayers { detected_ffmpeg, ..layers }))
-            .with_overview(Overview::load_with(&source, environment))
-            .with_source_environment(source, defaults, media)
+        self.settings.set_detected_ffmpeg(detected_ffmpeg);
+        self.overview = Overview::load_with(&source, environment);
+        self.set_source_environment(source, defaults, media);
     }
 
-    /// Replaces the settings screen's layers — [`Self::start_with`]'s own construction, which
-    /// knows the probe capture the default layers cannot.
-    fn with_settings(mut self, settings: Settings) -> Self {
-        self.settings = settings;
-        self
+    /// Re-probes the source dir from the TUI's path input: re-resolves the run defaults against the
+    /// new source (its out root is source-derived until `--out` or the file names one), then re-runs
+    /// the startup composition. The overview's `enter` on a committed path calls this.
+    pub fn reprobe_source(&mut self, source: PathBuf) {
+        let defaults = RunDefaults::resolve(self.settings.cli_out(), self.settings.config(), &source);
+        self.reprobe_with(source, defaults, locate);
     }
 
     /// Hands the overview screen a real read of the source dir. [`Self::start`] calls this before
@@ -322,6 +332,13 @@ impl App {
     /// test uses to pin the disk-free rows without reaching for the real filesystem.
     #[must_use]
     pub fn with_source_environment(mut self, source: PathBuf, defaults: RunDefaults, environment: Environment) -> Self {
+        self.set_source_environment(source, defaults, environment);
+        self
+    }
+
+    /// The body of [`Self::with_source_environment`], shared with the re-probe so the two hand-offs
+    /// cannot drift apart.
+    fn set_source_environment(&mut self, source: PathBuf, defaults: RunDefaults, environment: Environment) {
         // The settings form's out-dir default derives from the same source the run screens
         // read — one delivery, like every other source consumer.
         self.settings.set_source(source.clone());
@@ -330,7 +347,6 @@ impl App {
             ChatMedia::with_environment(source.clone(), defaults.out_root.clone(), environment, defaults.transcode, defaults.overlay_mode);
         self.history = History::with_environment(source.clone(), defaults.out_root);
         self.account = Account::with_environment(source);
-        self
     }
 
     /// Hands the memories screen a receiver the test feeds — the seam the render and tick tests
@@ -467,6 +483,17 @@ impl App {
             Tab::History => self.history.descended(),
             Tab::Account => self.account.descended(),
             Tab::Overview | Tab::Settings => false,
+        }
+    }
+
+    /// Whether the ACTIVE screen has a text input mid-edit — the `q`/`x`/`?`/`a` suspension, which
+    /// lets those letters type into the field rather than fire their shell meanings. The settings
+    /// form and the overview's source-path input are the two text inputs.
+    fn editing_text(&self) -> bool {
+        match self.active {
+            Tab::Settings => self.settings.is_editing(),
+            Tab::Overview => self.overview.is_editing(),
+            _ => false,
         }
     }
 
@@ -691,10 +718,11 @@ impl App {
                 self.quit_armed = false;
                 return;
             }
-            // While a settings text input is being edited, `q` is a letter the field types — the
-            // same suspension a descended pane gets, without the ascend step because the settings
-            // form has no pane. The screen must receive the key, so this falls through.
-            let editing_input = self.active == Tab::Settings && self.settings.is_editing();
+            // While a text input is being edited (settings or the overview's path input), `q` is a
+            // letter the field types — the same suspension a descended pane gets, without the
+            // ascend step because neither screen has a pane. The screen must receive the key, so
+            // this falls through.
+            let editing_input = self.editing_text();
             if !editing_input {
                 // `q` at the top level arms a 2-step quit and never quits in one press. Hotkeys are
                 // case-insensitive, so caps lock can't strand a user with no way out.
@@ -710,10 +738,10 @@ impl App {
         // `x` dismisses whatever the frame is showing: the settings toast floats over every tab,
         // so it goes first, then the run-completion footer alert the row is actually showing.
         // With nothing live it is a key like any other (it still disarms an armed quit below), and
-        // while a settings text input is being edited it is a letter the field types — the
-        // dismissal keys are suspended exactly like `q`.
+        // while a text input is being edited it is a letter the field types — the dismissal keys
+        // are suspended exactly like `q`.
         if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-            let editing_input = self.active == Tab::Settings && self.settings.is_editing();
+            let editing_input = self.editing_text();
             if (!editing_input && self.settings.dismiss_toast()) || self.dismiss_alert() {
                 return;
             }
@@ -722,10 +750,10 @@ impl App {
         self.quit_armed = false;
 
         // `?` opens the help modal and `a` the action menu (cloudy-tui: Action menu; Help modal).
-        // Both are suspended while a settings text input is being edited, where they are letters
-        // the field types — the same suspension `q` and `x` get. `a` with no actions on the active
-        // screen is inert, so it opens nothing and the hint bar derives its hint from that.
-        let editing_input = self.active == Tab::Settings && self.settings.is_editing();
+        // Both are suspended while a text input is being edited, where they are letters the field
+        // types — the same suspension `q` and `x` get. `a` with no actions on the active screen is
+        // inert, so it opens nothing and the hint bar derives its hint from that.
+        let editing_input = self.editing_text();
         if !editing_input {
             if matches!(key.code, KeyCode::Char('?')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
                 self.modal = Some(Modal::Help);
@@ -748,7 +776,14 @@ impl App {
             Tab::History => self.history.handle_key(key),
             Tab::Account => self.account.handle_key(key),
             Tab::Settings => self.settings.handle_key(key),
-            Tab::Overview => false,
+            Tab::Overview => match self.overview.handle_key(key) {
+                OverviewKey::Reprobbed(path) => {
+                    self.reprobe_source(path);
+                    true
+                }
+                OverviewKey::Handled => true,
+                OverviewKey::Unhandled => false,
+            },
         };
         if consumed {
             return;
@@ -943,5 +978,36 @@ mod tests {
             );
         }
         assert_eq!(walks.into_inner().len(), Tool::ALL.len(), "the probe still runs once per tool");
+    }
+
+    #[test]
+    fn a_reprobe_reads_the_settings_screens_live_config() {
+        // A config change committed on the settings screen must reach the run screens on the next
+        // re-probe, not be dropped in favour of a launch snapshot. `App` keeps no duplicate of the
+        // config, so the re-probe resolves defaults from the screen's own live layers.
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let layers = SettingsLayers { config_dir: Some(config_dir.path().to_path_buf()), ..SettingsLayers::defaults_for(Tier::Full) };
+        let mut app = App::start_with(
+            Tier::Full,
+            PathBuf::from("/nope"),
+            RunDefaults::resolve(None, &Config::default(), Path::new("/nope")),
+            layers,
+            |_| None,
+        );
+
+        // Commit an out_dir through the settings form's own write path, exactly as the user
+        // would: the output-dir row is the form's first, so `enter` opens it, the letters fill
+        // the draft, and `enter` commits through `config::write`.
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.settings.handle_key(key(KeyCode::Enter));
+        for ch in "/committed/out".chars() {
+            app.settings.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.settings.handle_key(key(KeyCode::Enter));
+
+        app.reprobe_source(PathBuf::from("/nope"));
+
+        let (_, out) = app.memories().run_paths();
+        assert_eq!(out, Path::new("/committed/out"), "the committed out_dir must reach the run screens");
     }
 }

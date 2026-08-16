@@ -6,22 +6,26 @@
 //! download url ever reaches this module — the load path deliberately discards the errors that
 //! could carry one (see [`Counts::of`]).
 //!
-//! Neither panel is focusable: nothing on this screen has a focus model yet, so both render
-//! blurred (`LINE` border, italic title without bold) per the contract's read-only detail-pane
-//! rule.
+//! Neither panel has a cursor — nothing on this screen is focusable — but the summary is the
+//! screen's primary and renders `LINE_STRONG` while the environment stays `LINE` (ruling: one
+//! panel strong; a sole summary panel in the narrow fallback counts as focused per the contract).
+//! The summary's empty state carries one hotkey, which opens the source-path input this screen
+//! holds while it is live.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 
-use crate::export::ExportJson;
 use crate::export::env::{Environment, Tool};
-use crate::export::model::{Conversation, Timestamp};
+use crate::export::model::{self, Conversation, ParseError, Timestamp};
+use crate::export::read_model;
+use crate::export::schema;
 use crate::export::zip::{PartGroup, discover_parts};
 use crate::tui::shell;
 use crate::tui::theme::{Palette, glyph};
@@ -43,6 +47,10 @@ const SOURCE_PATH_CELLS: usize = 18;
 
 const DISK_FREE_LABEL: &str = "disk free";
 const SOURCE_LABEL: &str = "source";
+
+/// The key that opens the source-path input from the summary's empty state. `s` for "set source";
+/// not one of the reserved `a`/`x`/`?`/`q` (cloudy-tui: Action menu → Hotkey assignment).
+const SOURCE_HOTKEY: char = 's';
 
 /// Every row the summary panel can render, in report order.
 ///
@@ -120,6 +128,8 @@ pub struct Overview {
     parts: Parts,
     counts: Counts,
     environment: Environment,
+    /// The live source-path input, `Some` while the summary's empty-state hotkey has it open.
+    editing: Option<EditSession>,
 }
 
 impl Overview {
@@ -128,7 +138,7 @@ impl Overview {
     /// frame draws.
     #[must_use]
     pub fn unloaded() -> Self {
-        Self { source: None, parts: Parts::None, counts: Counts::NotUnpacked, environment: Environment::default() }
+        Self { source: None, parts: Parts::None, counts: Counts::absent(), environment: Environment::default(), editing: None }
     }
 
     /// What the machine could do when this screen was built. Test-only: `App`'s own startup test
@@ -160,16 +170,16 @@ impl Overview {
             // state names the fix instead. Its KIND is not: that carries no path and no content, and
             // it is the difference between two failures with different fixes. Upgrade path for the
             // full text: the footer alert, once a second alert exists to justify wiring dismissal.
-            Err(error) if error.source.kind() == io::ErrorKind::NotFound => (Parts::Missing, Counts::NotUnpacked),
-            Err(_) => (Parts::Unreadable, Counts::NotUnpacked),
+            Err(error) if error.source.kind() == io::ErrorKind::NotFound => (Parts::Missing, Counts::absent()),
+            Err(_) => (Parts::Unreadable, Counts::absent()),
             Ok(groups) => match groups.as_slice() {
-                [] => (Parts::None, Counts::NotUnpacked),
+                [] => (Parts::None, Counts::absent()),
                 [group] => (Parts::of(group), Counts::of(group)),
-                several => (Parts::Several(several.len()), Counts::NotUnpacked),
+                several => (Parts::Several(several.len()), Counts::absent()),
             },
         };
 
-        Self { source: Some(source), parts, counts, environment }
+        Self { source: Some(source), parts, counts, environment, editing: None }
     }
 
     /// This screen's share of the `--print-source` report: the dir it was built against, what the
@@ -204,6 +214,63 @@ impl Overview {
         let source = self.source.as_deref().unwrap_or(Path::new(""));
         format!("source={source:?}\n{found}\n{space}")
     }
+
+    /// Whether the source-path input is open — the app's `q`/`x`/`?`/`a` suspension reads it,
+    /// exactly like the settings form's.
+    #[must_use]
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// This screen's keys. While the path input is open, its editing keys are consumed and a key it
+    /// does not own — a `⌥<digit>` jump above all — comes back unhandled so the shell sees it; with
+    /// the input closed, [`SOURCE_HOTKEY`] opens it from the summary's empty state.
+    pub fn handle_key(&mut self, key: KeyEvent) -> OverviewKey {
+        if self.editing.is_some() {
+            return self.handle_edit_key(key);
+        }
+        if self.is_empty()
+            && matches!(key.code, KeyCode::Char(c) if c.to_ascii_lowercase() == SOURCE_HOTKEY)
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        {
+            // Seed the draft from the current source so a typo is corrected rather than retyped; a
+            // first-time open has no source and starts empty.
+            let draft = self.source.as_ref().map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+            let caret = draft.chars().count();
+            self.editing = Some(EditSession { draft, caret });
+            return OverviewKey::Handled;
+        }
+        OverviewKey::Unhandled
+    }
+
+    /// One key while the path input is open: `enter` commits a non-empty draft as the source to
+    /// re-probe, `esc` cancels, and the editing keys edit the draft. A key the field does not own —
+    /// a `⌥<digit>` jump above all — comes back [`OverviewKey::Unhandled`], so the shell's own
+    /// bindings still see it (cloudy-tui: `⌥<digit>` never suspends, live in edit mode). That is
+    /// what lets a jump leave the input with its draft suspended instead of trapping the user until
+    /// `esc` discards it.
+    fn handle_edit_key(&mut self, key: KeyEvent) -> OverviewKey {
+        match key.code {
+            KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                let Some(session) = self.editing.take() else { return OverviewKey::Unhandled };
+                if session.draft.is_empty() { OverviewKey::Handled } else { OverviewKey::Reprobbed(PathBuf::from(session.draft)) }
+            }
+            KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
+                self.editing = None;
+                OverviewKey::Handled
+            }
+            _ => {
+                let Some(session) = self.editing.as_mut() else { return OverviewKey::Unhandled };
+                if edit_session_key(session, key) { OverviewKey::Handled } else { OverviewKey::Unhandled }
+            }
+        }
+    }
+
+    /// Whether the summary is showing its empty state rather than rows — the only state the hotkey
+    /// advertises from.
+    fn is_empty(&self) -> bool {
+        !matches!(self.parts, Parts::One { .. })
+    }
 }
 
 /// What the source dir holds.
@@ -230,61 +297,87 @@ impl Parts {
     }
 }
 
-/// The `json/` dir's numbers, or why there are none.
+/// The `json/` dir's four counts, each decided by its own file.
+///
+/// Every count is optional because `ExportJson` holds every file it models optionally: a `json/`
+/// that arrived without `chat_history.json` must not report `0` chats, which is a confident wrong
+/// answer where the truth is "that section is not here". [`Section::Loaded`]`(0)` is the section
+/// being present and genuinely empty, and only that renders a zero. A malformed file reads
+/// `unreadable` for its own count alone — its siblings keep their own answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Counts {
-    /// No part is unpacked yet, so there is no `json/` to read.
-    NotUnpacked,
-    /// A `json/` dir is there and did not load.
+struct Counts {
+    memories: Section,
+    /// Earliest and latest year across the memories that carry a date; meaningful only when
+    /// `memories` is [`Section::Loaded`].
+    years: Option<(u16, u16)>,
+    chats: Section,
+    snaps: Section,
+    /// Accepted friends only. Blocked, deleted and pending lists are their own thing and belong on
+    /// the account tab, not folded into one headline number here.
+    friends: Section,
+}
+
+/// One count's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    /// The file behind the section is not in the `json/` dir.
+    Absent,
+    /// The file is there and did not load.
     Unreadable,
-    Loaded(Totals),
+    /// The file loaded to this count.
+    Loaded(usize),
 }
 
 impl Counts {
+    /// No `json/` to read: every section absent.
+    fn absent() -> Self {
+        Self { memories: Section::Absent, years: None, chats: Section::Absent, snaps: Section::Absent, friends: Section::Absent }
+    }
+
     fn of(group: &PartGroup) -> Self {
         // Only the first part carried `json/` in the one export observed, so this walks every
         // unpacked part rather than assuming which one has it.
         let Some(json_dir) = group.extracted.iter().find_map(|part| part.json_dir.as_deref()) else {
-            return Self::NotUnpacked;
+            return Self::absent();
         };
-        match ExportJson::load_dir(json_dir) {
-            Ok(export) => Self::Loaded(Totals::of(&export)),
-            // The error text never reaches the screen: a `ParseError` carries the offending value,
-            // and `Field::Location` makes that value a coordinate pair. This screen renders
-            // metadata only, so the word `unreadable` is the whole report.
-            Err(_) => Self::Unreadable,
+
+        // Each file is read on its own, so a malformed one lands as `Unreadable` for its own count
+        // while the rest still resolve. The error text never reaches the screen: a `ParseError`
+        // carries the offending value, and `Field::Location` makes that value a coordinate pair, so
+        // the word `unreadable` is the whole report.
+        let (memories, years) = match read_model::<schema::MemoriesHistory, model::Memories>(json_dir, "memories_history.json") {
+            Ok(None) => (Section::Absent, None),
+            Ok(Some(history)) => {
+                let years = year_span(history.saved_media.iter().filter_map(|memory| memory.date));
+                (Section::Loaded(history.saved_media.len()), years)
+            }
+            Err(_) => (Section::Unreadable, None),
+        };
+
+        Self {
+            memories,
+            years,
+            chats: count_section::<schema::ChatHistory, model::ChatHistory>(json_dir, "chat_history.json", |history| {
+                records(&history.conversations)
+            }),
+            snaps: count_section::<schema::SnapHistory, model::SnapHistory>(json_dir, "snap_history.json", |history| {
+                records(&history.conversations)
+            }),
+            friends: count_section::<schema::Friends, model::Friends>(json_dir, "friends.json", |friends| friends.friends.len()),
         }
     }
 }
 
-/// The counts the summary panel reports.
-///
-/// Every count is optional because `ExportJson` holds every file it models optionally: a
-/// `json/` that arrived without `chat_history.json` must not report `0` chats, which is a confident
-/// wrong answer where the truth is "that section is not here". `Some(0)` is the section being
-/// present and genuinely empty, and only that renders a zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Totals {
-    memories: Option<usize>,
-    /// Earliest and latest year across the memories that carry a date.
-    years: Option<(u16, u16)>,
-    chats: Option<usize>,
-    snaps: Option<usize>,
-    /// Accepted friends only. Blocked, deleted and pending lists are their own thing and belong on
-    /// the account tab, not folded into one headline number here.
-    friends: Option<usize>,
-}
-
-impl Totals {
-    fn of(export: &ExportJson) -> Self {
-        let memories = export.memories.as_ref();
-        Self {
-            memories: memories.map(|history| history.saved_media.len()),
-            years: memories.and_then(|history| year_span(history.saved_media.iter().filter_map(|memory| memory.date))),
-            chats: export.chat_history.as_ref().map(|history| records(&history.conversations)),
-            snaps: export.snap_history.as_ref().map(|history| records(&history.conversations)),
-            friends: export.friends.as_ref().map(|friends| friends.friends.len()),
-        }
+/// Reads one model file into a count: absent, unreadable, or the loaded count `count` derives.
+fn count_section<S, M>(json_dir: &Path, file: &'static str, count: impl FnOnce(&M) -> usize) -> Section
+where
+    S: serde::de::DeserializeOwned,
+    M: TryFrom<S, Error = ParseError>,
+{
+    match read_model::<S, M>(json_dir, file) {
+        Ok(None) => Section::Absent,
+        Ok(Some(model)) => Section::Loaded(count(&model)),
+        Err(_) => Section::Unreadable,
     }
 }
 
@@ -299,6 +392,137 @@ fn year_span(dates: impl Iterator<Item = Timestamp>) -> Option<(u16, u16)> {
     })
 }
 
+// ---- the source-path input ----
+
+/// What [`Overview::handle_key`] did with a key, so the shell can route tab-switching and the
+/// re-probe off one answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverviewKey {
+    /// The key was not this screen's; the shell's own bindings should see it.
+    Unhandled,
+    /// The screen handled the key.
+    Handled,
+    /// `enter` committed a non-empty path; re-probe the source at it.
+    Reprobbed(PathBuf),
+}
+
+/// One live source-path edit: the draft and the caret as a CHAR index into it. Chars rather than
+/// bytes so a wide or multi-byte character never splits a grapheme (the same model the settings
+/// form keeps; that one is private to settings.rs, which is out of scope for this screen).
+#[derive(Debug)]
+struct EditSession {
+    draft: String,
+    caret: usize,
+}
+
+/// One editing key against the draft (cloudy-tui: Text input — edit grammar). Mirrors the settings
+/// form's `edit_session_key` for the same reason as [`EditSession`]: settings.rs is out of scope.
+/// `false` for a key the field does not own — a `⌥<digit>` jump above all — so the shell's own
+/// bindings still see it.
+fn edit_session_key(session: &mut EditSession, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            let mut chars: Vec<char> = session.draft.chars().collect();
+            chars.insert(session.caret.min(chars.len()), c);
+            session.draft = chars.into_iter().collect();
+            session.caret += 1;
+            true
+        }
+        KeyCode::Backspace if key.modifiers == KeyModifiers::NONE => {
+            if session.caret > 0 {
+                let mut chars: Vec<char> = session.draft.chars().collect();
+                chars.remove(session.caret - 1);
+                session.draft = chars.into_iter().collect();
+                session.caret -= 1;
+            }
+            true
+        }
+        KeyCode::Delete if key.modifiers == KeyModifiers::NONE => {
+            let mut chars: Vec<char> = session.draft.chars().collect();
+            if session.caret < chars.len() {
+                chars.remove(session.caret);
+                session.draft = chars.into_iter().collect();
+            }
+            true
+        }
+        KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {
+            let mut chars: Vec<char> = session.draft.chars().collect();
+            let mut start = session.caret.min(chars.len());
+            while start > 0 && chars[start - 1] == ' ' {
+                start -= 1;
+            }
+            while start > 0 && chars[start - 1] != ' ' {
+                start -= 1;
+            }
+            chars.drain(start..session.caret.min(chars.len()));
+            session.draft = chars.into_iter().collect();
+            session.caret = start;
+            true
+        }
+        KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
+            session.caret = session.caret.saturating_sub(1);
+            true
+        }
+        KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
+            session.caret = (session.caret + 1).min(session.draft.chars().count());
+            true
+        }
+        KeyCode::Home if key.modifiers == KeyModifiers::NONE => {
+            session.caret = 0;
+            true
+        }
+        KeyCode::End if key.modifiers == KeyModifiers::NONE => {
+            session.caret = session.draft.chars().count();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The byte offset of the `caret`-th char, or the draft's length past its end.
+fn char_byte(draft: &str, caret: usize) -> usize {
+    draft.char_indices().nth(caret).map(|(byte, _)| byte).unwrap_or(draft.len())
+}
+
+/// The visible window of a draft path and the caret's cell offset within it.
+///
+/// The caret is a CHAR index; the window is measured in CELLS (a wide char is two). It keeps the
+/// caret inside `budget` cells by dropping leading chars, so a long pasted path shows its tail and
+/// a caret moved left shows its context. Mirrors the settings form's private `draft_window` /
+/// `draft_window_text` pair — settings.rs is out of scope for this slice, so the overview's input
+/// reimplements the two as one return.
+fn input_window(draft: &str, caret: usize, budget: usize) -> (String, usize) {
+    if cells(draft) <= budget {
+        return (draft.to_owned(), cells(&draft[..char_byte(draft, caret)]));
+    }
+    let caret_byte = char_byte(draft, caret);
+    let caret_cells = cells(&draft[..caret_byte]);
+    let desired = (caret_cells + 1).saturating_sub(budget);
+    let mut start = caret;
+    let mut start_cells = 0;
+    for (index, ch) in draft.chars().take(caret + 1).enumerate() {
+        if start_cells >= desired {
+            start = index;
+            break;
+        }
+        start_cells += cells(&ch.to_string());
+    }
+    let text: String = draft
+        .chars()
+        .skip(start)
+        .scan(0usize, |used, ch| {
+            let width = cells(&ch.to_string());
+            if *used + width > budget {
+                None
+            } else {
+                *used += width;
+                Some(ch)
+            }
+        })
+        .collect();
+    (text, caret_cells.saturating_sub(start_cells))
+}
+
 // ---- render ----
 
 /// Draws the screen into `area`.
@@ -306,7 +530,7 @@ pub fn render(frame: &mut Frame, palette: &Palette, overview: &Overview, area: R
     let summary = summary_panel(palette, overview);
     let environment = environment_panel(palette, overview);
 
-    let first = PanelStyle { first: true, focused: false };
+    let first = PanelStyle { first: true, focused: true };
     let second = PanelStyle { first: false, focused: false };
 
     let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(area);
@@ -357,7 +581,10 @@ enum Body {
     /// Display rows.
     Rows(Vec<Line<'static>>),
     /// The framed empty state that replaces the rows when there is nothing to count.
-    Empty { hint: String, action: String },
+    Empty { hint: String, action: Line<'static> },
+    /// The empty state with the source-path input open: the hint stays, the input replaces the
+    /// action line, and the native cursor marks the caret.
+    Input { hint: String, draft: String, caret: usize },
 }
 
 impl ScreenPanel {
@@ -378,7 +605,10 @@ impl Body {
     fn width(&self) -> usize {
         match self {
             Self::Rows(lines) => lines.iter().map(Line::width).max().unwrap_or(0),
-            Self::Empty { hint, action } => cells(hint).max(cells(action)) + 2 * EMPTY_STATE_INSET + 2,
+            Self::Empty { hint, action } => cells(hint).max(action.width()) + 2 * EMPTY_STATE_INSET + 2,
+            // The input is ellipsised to whatever the panel leaves, so it never widens the panel
+            // past the action line that advertised the hotkey.
+            Self::Input { hint, .. } => cells(hint).max(source_action_cells()) + 2 * EMPTY_STATE_INSET + 2,
         }
     }
 
@@ -386,7 +616,7 @@ impl Body {
     fn height(&self) -> u16 {
         match self {
             Self::Rows(lines) => u16::try_from(lines.len()).unwrap_or(u16::MAX),
-            Self::Empty { .. } => EMPTY_STATE_ROWS,
+            Self::Empty { .. } | Self::Input { .. } => EMPTY_STATE_ROWS,
         }
     }
 
@@ -404,7 +634,7 @@ impl Body {
     fn min_height(&self) -> u16 {
         match self {
             Self::Rows(_) => 1,
-            Self::Empty { .. } => EMPTY_STATE_ROWS,
+            Self::Empty { .. } | Self::Input { .. } => EMPTY_STATE_ROWS,
         }
     }
 }
@@ -444,33 +674,86 @@ fn render_panel(frame: &mut Frame, palette: &Palette, content: ScreenPanel, area
             let width = u16::try_from(need).unwrap_or(u16::MAX);
             let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
             let copy = Style::new().fg(palette.text_dim);
-            let inset = u16::try_from(EMPTY_STATE_INSET).unwrap_or(u16::MAX);
-            let block = Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(palette.line))
-                .padding(Padding::new(inset, inset, 0, 0));
 
-            // Hint line plus an action line naming the fix. The contract colors an action line's
-            // HOTKEY LETTER `ACCENT` and its LABEL `TEXT_DIM`; with no key bound there is no letter,
-            // so an all-`TEXT_DIM` line is the contract's own output here and not a departure from
-            // it. Do not "restore" an accent by inventing a hotkey that nothing handles.
-            frame.render_widget(Paragraph::new(vec![Line::styled(hint, copy), Line::styled(action, copy)]).block(block), frame_area);
+            // Hint line plus an action line naming the hotkey. The contract colors the action
+            // line's HOTKEY LETTER `ACCENT` and its LABEL `TEXT_DIM`, which is what `source_action`
+            // builds.
+            frame.render_widget(Paragraph::new(vec![Line::styled(hint, copy), action]).block(empty_block(palette)), frame_area);
+        }
+        Body::Input { hint, draft, caret } => {
+            let width = u16::try_from(need).unwrap_or(u16::MAX);
+            let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
+            let copy = Style::new().fg(palette.text_dim);
+
+            // The input replaces the action line: `✎ ` plus the draft window, the native cursor at
+            // the caret (cloudy-tui: Text input — the terminal's own cursor marks the caret).
+            let budget = usize::from(width).saturating_sub(2 + 2 * EMPTY_STATE_INSET + 2);
+            let (window, caret_cells) = input_window(&draft, caret, budget);
+            let edit = Span::styled(format!("{} ", glyph::EDIT_GLYPH), Style::new().fg(palette.accent).bold());
+            let value = Span::styled(window, Style::new().fg(palette.text));
+            frame.render_widget(
+                Paragraph::new(vec![Line::styled(hint, copy), Line::from(vec![edit, value])]).block(empty_block(palette)),
+                frame_area,
+            );
+
+            // The caret cell: the frame's left border, the inset, the edit glyph, then the caret's
+            // offset within the window. Row 1 is the input (row 0 is the hint).
+            let caret_x = frame_area.x
+                + 1
+                + u16::try_from(EMPTY_STATE_INSET).unwrap_or(u16::MAX)
+                + 2
+                + u16::try_from(caret_cells).unwrap_or(u16::MAX);
+            frame.set_cursor_position(Position::new(caret_x, frame_area.y + 2));
         }
     }
+}
+
+/// The empty state's rounded frame (cloudy-tui: Empty state): `LINE` border, the 3-cell inset on
+/// each side, no vertical padding. Shared by the [`Body::Empty`] and [`Body::Input`] arms.
+fn empty_block(palette: &Palette) -> Block<'static> {
+    let inset = u16::try_from(EMPTY_STATE_INSET).unwrap_or(u16::MAX);
+    Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(palette.line)).padding(Padding::new(inset, inset, 0, 0))
 }
 
 // ---- export summary panel ----
 
 fn summary_panel(palette: &Palette, overview: &Overview) -> ScreenPanel {
-    let body = match overview.parts {
-        Parts::Missing => Body::Empty { hint: "source dir not found".to_owned(), action: "check --source=<dir>".to_owned() },
-        Parts::Unreadable => Body::Empty { hint: "source dir unreadable".to_owned(), action: "pass --source=<dir>".to_owned() },
-        Parts::None => Body::Empty { hint: "no export found".to_owned(), action: "pass --source=<dir>".to_owned() },
-        Parts::Several(count) => Body::Empty { hint: format!("{count} exports found here"), action: "point --source at one".to_owned() },
-        Parts::One { zips, unpacked, missing } => Body::Rows(summary_rows(palette, zips, unpacked, missing, overview.counts)),
+    let hint = match overview.parts {
+        Parts::Missing => "source dir not found".to_owned(),
+        Parts::Unreadable => "source dir unreadable".to_owned(),
+        Parts::None => "no export found".to_owned(),
+        Parts::Several(count) => format!("{count} exports found here"),
+        Parts::One { zips, unpacked, missing } => {
+            return ScreenPanel {
+                title: "export summary",
+                body: Body::Rows(summary_rows(palette, zips, unpacked, missing, overview.counts)),
+                source: None,
+            };
+        }
+    };
+
+    let body = match &overview.editing {
+        Some(session) => Body::Input { hint, draft: session.draft.clone(), caret: session.caret },
+        None => Body::Empty { hint, action: source_action(palette) },
     };
 
     ScreenPanel { title: "export summary", body, source: None }
+}
+
+/// The empty state's action copy: the hotkey letter in `ACCENT`, the rest `TEXT_DIM` (cloudy-tui:
+/// Empty state — action line).
+fn source_action(palette: &Palette) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("press ", Style::new().fg(palette.text_dim)),
+        Span::styled(SOURCE_HOTKEY.to_string(), Style::new().fg(palette.accent).bold()),
+        Span::styled(" to set source", Style::new().fg(palette.text_dim)),
+    ])
+}
+
+/// The action line's cell width, independent of styling: the hotkey is one ascii cell whatever the
+/// letter, so [`source_action`]'s three parts sum the same with or without a palette.
+fn source_action_cells() -> usize {
+    cells("press ") + 1 + cells(" to set source")
 }
 
 fn summary_rows(palette: &Palette, zips: usize, unpacked: usize, missing: usize, counts: Counts) -> Vec<Line<'static>> {
@@ -508,27 +791,27 @@ fn summary_rows(palette: &Palette, zips: usize, unpacked: usize, missing: usize,
 /// measured before it is styled.
 type JsonValue = (String, Color);
 
-/// The four values the `json/` dir feeds, in report order.
+/// The four values the `json/` dir feeds, in report order, each decided by its own section.
 fn json_values(palette: &Palette, counts: Counts) -> (JsonValue, JsonValue, JsonValue, JsonValue) {
     // `—` is "this number is not available" — whether because no part is unpacked, or because the
     // file behind one section was not in the `json/` that is. `unreadable` is the third, different
     // thing: json that is there and did not load. A `0` only ever means a section that IS there and
     // holds nothing.
-    let absent = || ("—".to_owned(), palette.text_faint);
-    let failed = || ("unreadable".to_owned(), palette.danger);
+    let memories = match counts.memories {
+        Section::Absent => ("—".to_owned(), palette.text_faint),
+        Section::Unreadable => ("unreadable".to_owned(), palette.danger),
+        Section::Loaded(count) => (memories_text(count, counts.years), palette.text),
+    };
 
-    match counts {
-        Counts::NotUnpacked => (absent(), absent(), absent(), absent()),
-        Counts::Unreadable => (failed(), failed(), failed(), failed()),
-        Counts::Loaded(totals) => {
-            let count = |value: Option<usize>| value.map_or_else(absent, |count| (grouped(count), palette.text));
-            (
-                totals.memories.map_or_else(absent, |memories| (memories_text(memories, totals.years), palette.text)),
-                count(totals.chats),
-                count(totals.snaps),
-                count(totals.friends),
-            )
-        }
+    (memories, section_value(palette, counts.chats), section_value(palette, counts.snaps), section_value(palette, counts.friends))
+}
+
+/// One bare count's value: the `—` absent token, the `unreadable` word, or the grouped number.
+fn section_value(palette: &Palette, section: Section) -> JsonValue {
+    match section {
+        Section::Absent => ("—".to_owned(), palette.text_faint),
+        Section::Unreadable => ("unreadable".to_owned(), palette.danger),
+        Section::Loaded(count) => (grouped(count), palette.text),
     }
 }
 
@@ -703,5 +986,92 @@ mod tests {
                 | SummaryRow::Friends => {}
             }
         }
+    }
+
+    #[test]
+    fn the_hotkey_opens_the_input_and_enter_commits_a_reprobe() {
+        let mut overview = Overview::unloaded();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        assert!(matches!(overview.handle_key(key(KeyCode::Char('s'))), OverviewKey::Handled));
+        assert!(overview.is_editing());
+
+        for ch in ['/', 't', 'm', 'p'] {
+            assert!(matches!(overview.handle_key(key(KeyCode::Char(ch))), OverviewKey::Handled));
+        }
+        assert!(matches!(overview.handle_key(key(KeyCode::Enter)), OverviewKey::Reprobbed(path) if path.as_path() == Path::new("/tmp")));
+        assert!(!overview.is_editing(), "the commit closes the input");
+    }
+
+    #[test]
+    fn esc_cancels_the_input_without_reprobing() {
+        let mut overview = Overview::unloaded();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        overview.handle_key(key(KeyCode::Char('s')));
+        overview.handle_key(key(KeyCode::Char('x')));
+        assert!(matches!(overview.handle_key(key(KeyCode::Esc)), OverviewKey::Handled));
+        assert!(!overview.is_editing());
+    }
+
+    #[test]
+    fn an_alt_digit_while_editing_is_unhandled_so_the_jump_escape_hatch_fires() {
+        // The input must not trap the user: `⌥<digit>` is the escape hatch that jumps tabs while
+        // live in edit mode (cloudy-tui: `⌥<digit>` never suspends). It comes back `Unhandled`, the
+        // input stays open, and the draft is neither polluted with the digit nor discarded.
+        let mut overview = Overview::unloaded();
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(matches!(overview.handle_key(key), OverviewKey::Handled));
+        assert!(matches!(overview.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)), OverviewKey::Handled));
+
+        let alt_1 = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT);
+        assert!(matches!(overview.handle_key(alt_1), OverviewKey::Unhandled), "⌥1 is the shell's jump key, not the field's");
+        assert!(overview.is_editing(), "the input stays open through an unhandled jump key");
+
+        // The jump neither inserted the digit nor cancelled the draft: committing still yields just `/`.
+        assert!(matches!(
+            overview.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            OverviewKey::Reprobbed(path) if path.as_path() == Path::new("/")
+        ));
+    }
+
+    #[test]
+    fn the_hotkey_is_inert_when_the_summary_has_rows() {
+        let mut overview = Overview {
+            source: None,
+            parts: Parts::One { zips: 1, unpacked: 0, missing: 0 },
+            counts: Counts::absent(),
+            environment: Environment::default(),
+            editing: None,
+        };
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(matches!(overview.handle_key(key), OverviewKey::Unhandled));
+        assert!(!overview.is_editing());
+    }
+
+    #[test]
+    fn the_input_window_keeps_the_caret_in_view() {
+        assert_eq!(input_window("", 0, 10), (String::new(), 0));
+        assert_eq!(input_window("/tmp/x", 6, 10), ("/tmp/x".to_owned(), 6));
+        // A long draft head-truncates to the budget and keeps the end caret visible.
+        let (text, caret) = input_window(&"a".repeat(20), 20, 10);
+        assert!(cells(&text) <= 10, "{text:?}");
+        assert!(caret < 10, "caret stays inside the window: {caret}");
+    }
+
+    #[test]
+    fn the_source_action_names_the_hotkey() {
+        assert_eq!(source_action_cells(), 21);
+    }
+
+    #[test]
+    fn the_source_action_styles_the_hotkey_in_accent() {
+        let palette = Palette::new(crate::tui::theme::Tier::Full);
+        let line = source_action(&palette);
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "s", "the hotkey letter is its own span");
+        assert_eq!(line.spans[1].style.fg, Some(palette.accent), "the hotkey is ACCENT");
+        assert_eq!(line.spans[0].style.fg, Some(palette.text_dim));
+        assert_eq!(line.spans[2].style.fg, Some(palette.text_dim));
     }
 }

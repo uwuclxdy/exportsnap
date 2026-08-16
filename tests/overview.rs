@@ -14,14 +14,15 @@ use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use exportsnap::app::App;
+use exportsnap::app::{App, Tab};
 use exportsnap::export::env::Environment;
-use exportsnap::tui::screens::overview::Overview;
+use exportsnap::tui::screens::overview::{Overview, OverviewKey};
 use exportsnap::tui::shell;
 use exportsnap::tui::theme::{Palette, Tier};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Modifier;
 
 /// The crate-level allow is scoped here rather than inside `common`, and only on the crates that
@@ -67,6 +68,12 @@ fn cell_run(buffer: &Buffer, columns: Range<u16>, y: u16) -> String {
 /// Every interior row of one panel, from the first down to `count` rows.
 fn panel_rows(buffer: &Buffer, columns: Range<u16>, count: u16) -> Vec<String> {
     (0..count).map(|offset| cell_run(buffer, columns.clone(), FIRST_ROW + offset)).collect()
+}
+
+/// The four rows of the summary's framed empty state, top border first, interior whitespace
+/// trimmed — the frame sits 6 interior rows down, the same split [`cell_run`]'s callers read.
+fn empty_state_rows(buffer: &Buffer) -> Vec<String> {
+    (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect()
 }
 
 /// A scratch dir under cargo's own test tmpdir, emptied first so a rerun starts clean.
@@ -354,9 +361,10 @@ fn the_json_search_walks_every_unpacked_part_not_just_the_first() {
 }
 
 #[test]
-fn the_json_rows_say_unreadable_when_the_export_json_will_not_load() {
-    // An unpacked part whose json is there and broken is a different thing from one that was never
-    // unpacked, and the word is the whole report: a `LoadError` can carry the offending value, and
+fn a_malformed_json_file_blanks_only_its_own_count() {
+    // One broken file must not blank its siblings: each count is decided by its own file, so the
+    // three healthy ones still report their numbers and only `friends` reads unreadable. The word
+    // is the whole report either way: a `LoadError` can carry the offending value, and
     // `Field::Location` makes that a coordinate pair.
     let dir = scratch("overview-broken-json");
     let json = dir.join("mydata~t3").join("json");
@@ -366,14 +374,16 @@ fn the_json_rows_say_unreadable_when_the_export_json_will_not_load() {
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(
-        panel_rows(buffer, LEFT, 5),
-        ["parts     1 unpacked", "memories  unreadable", "chats     unreadable", "snaps     unreadable", "friends   unreadable",]
-    );
+    assert_eq!(cell_run(buffer, LEFT, FIRST_ROW), "parts     1 unpacked");
+    let value = |y: u16| cell_run(buffer, 12..48, y).trim().to_owned();
+    assert_eq!(value(FIRST_ROW + 1), "3 · 2019-2021", "memories still resolves");
+    assert_eq!(value(FIRST_ROW + 2), "3", "chats still resolves");
+    assert_eq!(value(FIRST_ROW + 3), "1", "snaps still resolves");
+    assert_eq!(value(FIRST_ROW + 4), "unreadable", "only the broken friends file reads unreadable");
 
-    let value = buffer[(12, FIRST_ROW + 1)].style();
-    assert_eq!(buffer[(12, FIRST_ROW + 1)].symbol(), "u");
-    assert_eq!(value.fg, Some(Palette::new(Tier::Full).danger));
+    let word = buffer[(12, FIRST_ROW + 4)].style();
+    assert_eq!(buffer[(12, FIRST_ROW + 4)].symbol(), "u");
+    assert_eq!(word.fg, Some(Palette::new(Tier::Full).danger), "the unreadable word still carries DANGER");
 }
 
 #[test]
@@ -406,18 +416,18 @@ fn a_source_dir_with_no_delivery_says_so_in_a_framed_empty_state() {
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    // 16 interior rows, a 4-row frame: 6 above and 6 below.
-    assert_eq!(
-        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect::<Vec<_>>(),
-        ["╭─────────────────────────╮", "│   no export found       │", "│   pass --source=<dir>   │", "╰─────────────────────────╯",]
-    );
-    // The frame carries no action line with a hotkey in it, because no key is bound yet.
+    // The hint names the state and the action line advertises the hotkey (cloudy-tui: Empty state —
+    // "press c to create" shape).
+    let rows = empty_state_rows(buffer);
+    assert!(rows[1].contains("no export found"), "{rows:?}");
+    assert!(rows[2].contains("press s to set source"), "{rows:?}");
+    // The frame sits below the panel's first interior row.
     assert_eq!(cell_run(buffer, LEFT, FIRST_ROW), "");
 }
 
 #[test]
 fn the_empty_state_frame_sits_centred_in_its_panel() {
-    // Its 27 cells inside a 46-cell interior leave 19 to split, so the two pads differ by one —
+    // Its 29 cells inside a 46-cell interior leave 17 to split, so the two pads differ by one —
     // which side takes the extra is ratatui's remainder rule, not a choice this screen makes.
     // Vertically it centers in the full-height panel: 16 interior rows, a 4-row frame, 6 above
     // and 6 below.
@@ -428,23 +438,22 @@ fn the_empty_state_frame_sits_centred_in_its_panel() {
     let left_pad = framed.chars().take_while(|c| *c == ' ').count();
     let right_pad = LEFT.len() - framed.chars().count();
 
-    assert_eq!(framed.trim_start().chars().count(), 27, "frame width");
+    assert_eq!(framed.trim_start().chars().count(), 29, "frame width");
     assert!(left_pad.abs_diff(right_pad) <= 1, "pads {left_pad} and {right_pad} are not a centred split");
 }
 
 #[test]
 fn a_source_dir_that_is_not_there_says_not_found_rather_than_unreadable() {
     // A typo in `--source` is the likeliest failure of the lot. Diagnosing it as "unreadable" would
-    // point at permissions, and an action line reading `pass --source=<dir>` would answer with the
-    // step the user just took.
+    // point at permissions, and the action line now offers the in-app path input instead of
+    // answering with the `--source` step the user just took.
     let dir = scratch("overview-not-found").join("gone").join("deeper");
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(
-        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect::<Vec<_>>(),
-        ["╭──────────────────────────╮", "│   source dir not found   │", "│   check --source=<dir>   │", "╰──────────────────────────╯",]
-    );
+    let rows = empty_state_rows(buffer);
+    assert!(rows[1].contains("source dir not found"), "{rows:?}");
+    assert!(rows[2].contains("press s to set source"), "{rows:?}");
 }
 
 /// Unix-only: making a dir genuinely unlistable while it exists needs a mode change, and running as
@@ -465,21 +474,13 @@ fn a_source_dir_that_exists_and_cannot_be_listed_still_says_unreadable() {
     }
 
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
-    let rendered: Vec<String> =
-        (0..4).map(|offset| cell_run(terminal.backend().buffer(), LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect();
+    let rendered = empty_state_rows(terminal.backend().buffer());
 
     // Restore before asserting, so a failure does not leave an unlistable dir behind for the rerun.
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-    assert_eq!(
-        rendered,
-        [
-            "╭───────────────────────────╮",
-            "│   source dir unreadable   │",
-            "│   pass --source=<dir>     │",
-            "╰───────────────────────────╯",
-        ]
-    );
+    assert!(rendered[1].contains("source dir unreadable"), "{rendered:?}");
+    assert!(rendered[2].contains("press s to set source"), "{rendered:?}");
 }
 
 #[test]
@@ -492,15 +493,9 @@ fn several_deliveries_are_counted_rather_than_guessed_between() {
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(
-        (0..4).map(|offset| cell_run(buffer, LEFT, FIRST_ROW + 6 + offset).trim().to_owned()).collect::<Vec<_>>(),
-        [
-            "╭───────────────────────────╮",
-            "│   3 exports found here    │",
-            "│   point --source at one   │",
-            "╰───────────────────────────╯",
-        ]
-    );
+    let rows = empty_state_rows(buffer);
+    assert!(rows[1].contains("3 exports found here"), "{rows:?}");
+    assert!(rows[2].contains("press s to set source"), "{rows:?}");
 }
 
 #[test]
@@ -509,8 +504,85 @@ fn an_app_that_never_loaded_anything_draws_the_no_export_state() {
     let terminal = draw(Overview::unloaded(), WIDE, TALL);
     let buffer = terminal.backend().buffer();
 
-    assert_eq!(cell_run(buffer, LEFT, FIRST_ROW + 7).trim(), "│   no export found       │");
+    assert!(cell_run(buffer, LEFT, FIRST_ROW + 7).contains("no export found"), "the empty state hint renders");
     assert_eq!(panel_rows(buffer, RIGHT, 4), ["ffmpeg     [ missing ]", "vlc        [ missing ]", "disk free  unknown", "source     —",]);
+}
+
+#[test]
+fn the_hotkey_opens_the_source_path_input() {
+    let dir = scratch("overview-input-open");
+    fs::write(dir.join("holiday-photos.zip"), b"").unwrap();
+
+    let mut overview = Overview::load_with(&dir, environment());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    assert!(matches!(overview.handle_key(key(KeyCode::Char('s'))), OverviewKey::Handled));
+
+    let mut app = App::new(Tier::Full).with_overview(overview);
+    let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // The edit glyph marks the open input, and the action line yields to it.
+    let frame: String = (0..TALL).map(|y| row(buffer, y)).collect();
+    assert!(frame.contains("✎"), "the input is open: {frame}");
+    assert!(!frame.contains("press s to set source"), "the action line yields to the input");
+}
+
+#[test]
+fn a_committed_path_reprobes_the_source_through_the_startup_composition() {
+    // The overview's `enter` commit routes through `App::handle_event` — the loop's own entry — to
+    // `App::reprobe_source`, which re-reads the source the same way startup does, so typing a dir
+    // that holds a delivery turns the empty state into the summary rows. Driven through the event
+    // path rather than by calling `reprobe_source` directly, so deleting the
+    // `self.reprobe_source(path)` bridge in `App::handle_key` leaves this red: the summary stays
+    // empty. The summary half is deterministic whatever the real probe answers.
+    //
+    // `App::new` starts on the overview's empty state with no source named, so the hotkey opens an
+    // empty draft — it seeds from the current source, and there is none yet.
+    let loaded = export_tree("overview-reprobe-loaded");
+
+    let mut app = App::new(Tier::Full);
+    let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    app.handle_event(&key(KeyCode::Char('s')));
+    for ch in loaded.display().to_string().chars() {
+        app.handle_event(&key(KeyCode::Char(ch)));
+    }
+    app.handle_event(&key(KeyCode::Enter));
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(
+        panel_rows(buffer, LEFT, 5),
+        ["parts     2 zips · 1 unpacked", "memories  3 · 2019-2021", "chats     3", "snaps     1", "friends   4",]
+    );
+}
+
+#[test]
+fn an_alt_digit_jumps_away_from_the_open_path_input_without_discarding_it() {
+    // `⌥<digit>` never suspends (cloudy-tui: Tab bar → Switching tabs), so the jump must leave the
+    // open path input and switch tabs, keeping the draft suspended rather than discarded. The
+    // overview's input must not swallow the jump the way it used to.
+    let mut app = App::new(Tier::Full);
+    let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+
+    assert_eq!(app.active(), Tab::Overview);
+    app.handle_event(&key(KeyCode::Char('s'), KeyModifiers::NONE));
+    app.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+
+    app.handle_event(&key(KeyCode::Char('2'), KeyModifiers::ALT));
+    assert_eq!(app.active(), Tab::Memories, "⌥2 jumps tabs even with the input open");
+
+    // Jump back: the draft survived the round trip, so the input is still open.
+    app.handle_event(&key(KeyCode::Char('1'), KeyModifiers::ALT));
+    assert_eq!(app.active(), Tab::Overview);
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let frame: String = (0..TALL).map(|y| row(buffer, y)).collect();
+    assert!(frame.contains("✎"), "the input is still open after the jump round trip: {frame}");
 }
 
 // ---- the environment half ----
@@ -586,26 +658,53 @@ fn disk_free_takes_the_abbreviated_binary_form() {
 // ---- panel chrome ----
 
 #[test]
-fn both_panels_are_blurred_because_focus_never_reaches_them() {
-    // Read-only panes focus never descends into: `LINE` borders and italic titles with no bold.
-    // The first panel takes the warm anchor, the second `TEXT_DIM`.
+fn the_summary_panel_is_strong_and_the_environment_blurred() {
+    // One panel strong (ruling): the summary is the screen's primary, so it takes `LINE_STRONG`
+    // and a bold title; the read-only environment stays `LINE` with an italic-only title. Neither
+    // panel has a caret — the screen still carries no focus model.
     let dir = export_tree("overview-chrome");
     let terminal = draw(Overview::load_with(&dir, environment()), WIDE, TALL);
     let buffer = terminal.backend().buffer();
     let palette = Palette::new(Tier::Full);
 
-    for (x, expected, panel) in [(3, palette.accent_2, "first"), (53, palette.text_dim, "second")] {
-        let title = buffer[(x, TOP_BORDER)].style();
-        assert_eq!(title.fg, Some(expected), "{panel} panel title");
-        assert!(title.add_modifier.contains(Modifier::ITALIC), "{panel} panel title is italic");
-        assert!(!title.add_modifier.contains(Modifier::BOLD), "{panel} panel title drops the bold when blurred");
-    }
+    let summary_title = buffer[(3, TOP_BORDER)].style();
+    assert_eq!(summary_title.fg, Some(palette.accent_2), "the first panel title keeps the warm anchor");
+    assert!(summary_title.add_modifier.contains(Modifier::ITALIC));
+    assert!(summary_title.add_modifier.contains(Modifier::BOLD), "the summary title is bold: one panel strong");
 
-    for (x, panel) in [(0, "first"), (50, "second")] {
-        let corner = buffer[(x, TOP_BORDER)].style();
-        assert_eq!(buffer[(x, TOP_BORDER)].symbol(), "╭", "{panel} panel corner");
-        assert_eq!(corner.fg, Some(palette.line), "{panel} panel border is blurred");
-    }
+    let env_title = buffer[(53, TOP_BORDER)].style();
+    assert_eq!(env_title.fg, Some(palette.text_dim), "the second panel title");
+    assert!(env_title.add_modifier.contains(Modifier::ITALIC));
+    assert!(!env_title.add_modifier.contains(Modifier::BOLD), "the environment title drops the bold when blurred");
+
+    let summary_corner = buffer[(0, TOP_BORDER)].style();
+    assert_eq!(buffer[(0, TOP_BORDER)].symbol(), "╭");
+    assert_eq!(summary_corner.fg, Some(palette.line_strong), "the summary border is strong");
+    let env_corner = buffer[(50, TOP_BORDER)].style();
+    assert_eq!(env_corner.fg, Some(palette.line), "the environment border is blurred");
+}
+
+#[test]
+fn the_summary_only_fallback_is_strong() {
+    // A frame too narrow AND short for two panels gives the body to the summary alone, and a
+    // screen's sole content panel counts as focused: `LINE_STRONG`, not the blurred `LINE` the
+    // fallback used to render.
+    //
+    // At 40x14 the body is 12 rows — one short of the 13 a stacked layout needs, and far short of
+    // the two 33-cell halves side-by-side needs — so this is the summary-only `else` arm, not the
+    // stacked arm where the same corner is also strong and would let a blur of this arm alone stay
+    // green.
+    let dir = export_tree("overview-sole-strong");
+    let terminal = draw(Overview::load_with(&dir, environment()), 40, 14);
+    let buffer = terminal.backend().buffer();
+    let palette = Palette::new(Tier::Full);
+
+    // The environment panel is gone, not stacked below: this frame really is the sole-panel arm.
+    let frame: String = (0..14).map(|y| row(buffer, y)).collect();
+    assert!(!frame.contains("ENVIRONMENT"), "the fallback is the sole-panel arm, not stacked: {frame:?}");
+
+    assert_eq!(buffer[(0, TOP_BORDER)].symbol(), "╭");
+    assert_eq!(buffer[(0, TOP_BORDER)].style().fg, Some(palette.line_strong), "the sole summary panel is strong");
 }
 
 #[test]
