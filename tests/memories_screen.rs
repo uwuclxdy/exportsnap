@@ -957,7 +957,7 @@ fn x_dismisses_the_alert_even_when_the_quit_is_armed() {
     press(&mut app, KeyCode::Char('x'));
     assert!(app.memories().alert().is_none());
     assert!(app.is_running(), "the alert dismissal must not confirm the quit");
-    assert!(app.is_quit_armed(), "x dismisses the alert and returns before the disarm, so the armed quit survives");
+    assert!(!app.is_quit_armed(), "x is a key like any other, so dismissing the alert disarms the armed quit (any-key disarm)");
 }
 
 #[test]

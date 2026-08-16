@@ -528,3 +528,97 @@ fn a_and_question_mark_do_not_open_modals_while_a_settings_field_is_editing() {
     press(&mut app, KeyCode::Char('?'));
     assert!(app.modal().is_none(), "a and ? type into the field, never open a modal");
 }
+
+// ---- `x` dismissal stays live while a modal owns input (skill: Dismissal precedence) ----
+
+#[test]
+fn x_dismisses_a_live_footer_alert_while_a_modal_owns_input() {
+    use exportsnap::export::memories_run::{RunError, RunEvent, RunOutcome};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    // A finished memories run raises the footer alert; an open action menu owns input, but `x`
+    // still reaches the dismissal handler (cloudy-tui: Dismissal precedence) and leaves the menu
+    // open — the modal's own keys (`?`, `esc`, `q`, arrows) are untouched.
+    let mut app = app();
+    jump(&mut app, '2'); // memories
+    let (sender, receiver) = mpsc::channel();
+    app.with_memories_channel(receiver);
+    sender.send(RunEvent::Finished(RunOutcome::Failed(RunError::NoExportId(PathBuf::from("/nope"))))).unwrap();
+    app.tick();
+    assert!(app.memories().alert().is_some(), "the footer alert must be live before the menu opens");
+
+    press(&mut app, KeyCode::Char('a'));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::ActionMenu(_))));
+    press(&mut app, KeyCode::Char('x'));
+    assert!(app.memories().alert().is_none(), "x dismisses the footer alert while the menu is open");
+    assert!(app.modal().is_some(), "x leaves the modal open");
+}
+
+#[test]
+fn x_dismisses_a_live_toast_while_a_modal_owns_input() {
+    // A failed settings write (no config dir) raises the DANGER toast, and it floats over every
+    // tab — so an action menu open on another screen must still let `x` dismiss it, not swallow
+    // the key the way `?`, `esc`, `q` and the arrows stay swallowed.
+    let mut app = app();
+    jump(&mut app, '6'); // settings
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down); // transcode row, past output dir, theme and ffmpeg
+    }
+    press(&mut app, KeyCode::Enter); // commit the toggle with no config dir → toast
+    assert!(app.settings().toast_live(), "the failed write raises the toast");
+
+    jump(&mut app, '2'); // memories, which has actions
+    press(&mut app, KeyCode::Char('a'));
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::ActionMenu(_))));
+    press(&mut app, KeyCode::Char('x'));
+    assert!(!app.settings().toast_live(), "x dismisses the toast while the menu is open");
+    assert!(app.modal().is_some(), "x leaves the modal open");
+}
+
+#[test]
+fn x_dismissing_a_live_footer_alert_disarms_the_quit() {
+    use exportsnap::export::memories_run::{RunError, RunEvent, RunOutcome};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    // The completion alert and an armed 2-step quit can coexist (the armed quit wins the footer
+    // row, but the alert stays live beneath it). `x` dismisses the alert and must also disarm the
+    // quit — it is a key press like any other, so the next `q` re-arms rather than quitting.
+    let mut app = app();
+    jump(&mut app, '2'); // memories
+    let (sender, receiver) = mpsc::channel();
+    app.with_memories_channel(receiver);
+    sender.send(RunEvent::Finished(RunOutcome::Failed(RunError::NoExportId(PathBuf::from("/nope"))))).unwrap();
+    app.tick();
+    assert!(app.memories().alert().is_some(), "the footer alert must be live before arming");
+
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.is_quit_armed());
+
+    press(&mut app, KeyCode::Char('x'));
+    assert!(app.memories().alert().is_none(), "x dismisses the footer alert");
+    assert!(!app.is_quit_armed(), "x dismissing the alert must also disarm the armed quit");
+    assert!(app.is_running());
+}
+
+#[test]
+fn x_dismissing_a_live_toast_disarms_the_quit() {
+    // Same invariant on the toast path: `x` clears the floating toast and must not leave a 2-step
+    // quit armed behind it.
+    let mut app = app();
+    jump(&mut app, '6'); // settings
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down); // transcode row, past output dir, theme and ffmpeg
+    }
+    press(&mut app, KeyCode::Enter); // commit the toggle with no config dir → toast
+    assert!(app.settings().toast_live(), "the failed write raises the toast");
+
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.is_quit_armed());
+
+    press(&mut app, KeyCode::Char('x'));
+    assert!(!app.settings().toast_live(), "x dismisses the toast");
+    assert!(!app.is_quit_armed(), "x dismissing the toast must also disarm the armed quit");
+    assert!(app.is_running());
+}

@@ -797,8 +797,26 @@ impl App {
             return;
         }
 
-        // A modal owns input first: while one is open, every other key is the modal's — no `q`
-        // arming, no screen routing, no tab switch, no `⌥` jump (cloudy-tui: Modals → Focus).
+        // `x` dismisses whatever the frame is showing: the settings toast floats over every tab,
+        // so it goes first, then the run-completion footer alert the row is actually showing.
+        // With nothing live it is a key like any other, and either way it disarms an armed quit —
+        // a dismissal is a key press like any other, so the dismissing branch disarms before its
+        // early return rather than falling through to the shared disarm below. While a text input
+        // is being edited it is a letter the field types — the dismissal keys are suspended exactly
+        // like `q`. The dismissal stays live while a modal owns input: a toast or footer alert can
+        // be live beneath an open action menu or help modal, and `x` must still reach them
+        // (cloudy-tui: Dismissal precedence) without disturbing the modal's own keys below.
+        if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            let editing_input = self.editing_text();
+            if (!editing_input && self.settings.dismiss_toast()) || self.dismiss_alert() {
+                self.quit_armed = false;
+                return;
+            }
+        }
+
+        // A modal owns the rest of the input: while one is open, every other key is the modal's —
+        // no `q` arming, no screen routing, no tab switch, no `⌥` jump (cloudy-tui: Modals →
+        // Focus). `x` is the one exception, handled above so it stays live.
         if self.modal.is_some() {
             self.handle_modal_key(key);
             return;
@@ -826,18 +844,6 @@ impl App {
                 } else {
                     self.quit_armed = true;
                 }
-                return;
-            }
-        }
-
-        // `x` dismisses whatever the frame is showing: the settings toast floats over every tab,
-        // so it goes first, then the run-completion footer alert the row is actually showing.
-        // With nothing live it is a key like any other (it still disarms an armed quit below), and
-        // while a text input is being edited it is a letter the field types — the dismissal keys
-        // are suspended exactly like `q`.
-        if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-            let editing_input = self.editing_text();
-            if (!editing_input && self.settings.dismiss_toast()) || self.dismiss_alert() {
                 return;
             }
         }
