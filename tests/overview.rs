@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use exportsnap::app::{App, Tab};
 use exportsnap::export::env::Environment;
-use exportsnap::tui::screens::overview::{Overview, OverviewKey};
+use exportsnap::tui::screens::overview::Overview;
 use exportsnap::tui::shell;
 use exportsnap::tui::theme::{Palette, Tier};
 use ratatui::Terminal;
@@ -43,9 +43,10 @@ const FIRST_ROW: u16 = TOP_BORDER + 1;
 /// edge of a 50-cell panel.
 const LEFT: Range<u16> = 2..48;
 const RIGHT: Range<u16> = 52..98;
-/// Cells the source value gets at [`WIDE`]: the right panel's 46-cell interior minus the 11-cell
-/// label column. The source row's own floor is 18, but at this width the path may use all 35.
-const SOURCE_CELLS: usize = 35;
+/// Cells the source value gets at [`WIDE`]: the right panel's 46-cell interior minus the 10-cell
+/// caret-gutter-plus-label-plus-gap lead. The source row's own floor is 18, but at this width the
+/// path may use all 36.
+const SOURCE_CELLS: usize = 36;
 
 // ---- harness ----
 
@@ -165,7 +166,7 @@ fn both_panels_report_the_export_they_were_pointed_at() {
 
     assert_eq!(
         panel_rows(buffer, RIGHT, 4),
-        ["ffmpeg     [ present ]", "vlc        [ missing ]", "disk free  2.0 GiB", format!("source     {}", shortened(&dir)).as_str(),]
+        ["ffmpeg     [ present ]", "vlc        [ missing ]", "disk free  2.0 GiB", format!("  source  {}", shortened(&dir)).as_str(),]
     );
 }
 
@@ -505,27 +506,30 @@ fn an_app_that_never_loaded_anything_draws_the_no_export_state() {
     let buffer = terminal.backend().buffer();
 
     assert!(cell_run(buffer, LEFT, FIRST_ROW + 7).contains("no export found"), "the empty state hint renders");
-    assert_eq!(panel_rows(buffer, RIGHT, 4), ["ffmpeg     [ missing ]", "vlc        [ missing ]", "disk free  unknown", "source     —",]);
+    assert_eq!(panel_rows(buffer, RIGHT, 4), ["ffmpeg     [ missing ]", "vlc        [ missing ]", "disk free  unknown", "  source  —",]);
 }
 
 #[test]
-fn the_hotkey_opens_the_source_path_input() {
+fn the_hotkey_lands_the_caret_and_enter_opens_the_input() {
     let dir = scratch("overview-input-open");
     fs::write(dir.join("holiday-photos.zip"), b"").unwrap();
 
-    let mut overview = Overview::load_with(&dir, environment());
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    assert!(matches!(overview.handle_key(key(KeyCode::Char('s'))), OverviewKey::Handled));
+    let mut app = App::new(Tier::Full).with_overview(Overview::load_with(&dir, environment()));
+    let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
-    let mut app = App::new(Tier::Full).with_overview(overview);
+    app.handle_event(&key(KeyCode::Char('s')));
     let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
-    let buffer = terminal.backend().buffer();
+    let frame: String = (0..TALL).map(|y| row(terminal.backend().buffer(), y)).collect();
+    assert!(frame.contains("❯ source"), "the caret is on the source row: {frame}");
+    assert!(frame.contains("press s to set source"), "the action line still names the key: {frame}");
+    assert!(!frame.contains("✎"), "the edit is off until enter: {frame}");
 
-    // The edit glyph marks the open input, and the action line yields to it.
-    let frame: String = (0..TALL).map(|y| row(buffer, y)).collect();
+    // `enter` opens the edit: `✎` replaces the caret and the native cursor marks the draft.
+    app.handle_event(&key(KeyCode::Enter));
+    terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
+    let frame: String = (0..TALL).map(|y| row(terminal.backend().buffer(), y)).collect();
     assert!(frame.contains("✎"), "the input is open: {frame}");
-    assert!(!frame.contains("press s to set source"), "the action line yields to the input");
 }
 
 #[test]
@@ -533,11 +537,11 @@ fn the_footer_advertises_the_edit_keys_while_the_path_input_is_open() {
     let dir = scratch("overview-input-hints");
     fs::write(dir.join("holiday-photos.zip"), b"").unwrap();
 
-    let mut overview = Overview::load_with(&dir, environment());
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    assert!(matches!(overview.handle_key(key(KeyCode::Char('s'))), OverviewKey::Handled));
+    let mut app = App::new(Tier::Full).with_overview(Overview::load_with(&dir, environment()));
+    let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    app.handle_event(&key(KeyCode::Char('s')));
+    app.handle_event(&key(KeyCode::Enter));
 
-    let mut app = App::new(Tier::Full).with_overview(overview);
     let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -558,13 +562,14 @@ fn a_committed_path_reprobes_the_source_through_the_startup_composition() {
     // `self.reprobe_source(path)` bridge in `App::handle_key` leaves this red: the summary stays
     // empty. The summary half is deterministic whatever the real probe answers.
     //
-    // `App::new` starts on the overview's empty state with no source named, so the hotkey opens an
+    // `App::new` starts on the overview's empty state with no source named, so the edit opens an
     // empty draft — it seeds from the current source, and there is none yet.
     let loaded = export_tree("overview-reprobe-loaded");
 
     let mut app = App::new(Tier::Full);
     let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
     app.handle_event(&key(KeyCode::Char('s')));
+    app.handle_event(&key(KeyCode::Enter));
     for ch in loaded.display().to_string().chars() {
         app.handle_event(&key(KeyCode::Char(ch)));
     }
@@ -590,6 +595,7 @@ fn an_alt_digit_jumps_away_from_the_open_path_input_without_discarding_it() {
 
     assert_eq!(app.active(), Tab::Overview);
     app.handle_event(&key(KeyCode::Char('s'), KeyModifiers::NONE));
+    app.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
     app.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
 
     app.handle_event(&key(KeyCode::Char('2'), KeyModifiers::ALT));
@@ -779,14 +785,16 @@ fn the_panels_fill_the_body_at_the_designed_sizes() {
 
 #[test]
 fn a_body_too_narrow_for_both_panels_gives_all_of_it_to_the_summary() {
-    // Both panels need 33 cells with this data, so 66 is the last width that fits two halves.
+    // The summary needs 33 cells (its widest row is 29) and the environment 32 (the ragged source
+    // input row), so 65 is the last width that fits two side-by-side halves; one narrower and the
+    // summary stacks full-width.
     let dir = export_tree("overview-narrow");
     let overview = || Overview::load_with(&dir, environment());
 
-    let two = draw(overview(), 66, TALL);
+    let two = draw(overview(), 65, TALL);
     assert_eq!(row(two.backend().buffer(), TOP_BORDER).matches('╮').count(), 2);
 
-    let one = draw(overview(), 65, TALL);
+    let one = draw(overview(), 64, TALL);
     let single = row(one.backend().buffer(), TOP_BORDER);
     assert_eq!(single.matches('╮').count(), 1, "{single:?}");
     assert!(single.starts_with("╭─ EXPORT SUMMARY ─"), "{single:?}");
@@ -857,7 +865,7 @@ fn the_two_panel_breakpoint_does_not_move_with_the_source_path_length() {
 fn a_short_source_path_renders_whole() {
     // A path that fits the budget renders whole, with no filler after it.
     let terminal = draw(Overview::load_with("/x", environment()), WIDE, TALL);
-    assert_eq!(cell_run(terminal.backend().buffer(), RIGHT, FIRST_ROW + 3), "source     /x");
+    assert_eq!(cell_run(terminal.backend().buffer(), RIGHT, FIRST_ROW + 3), "  source  /x");
 }
 
 #[test]

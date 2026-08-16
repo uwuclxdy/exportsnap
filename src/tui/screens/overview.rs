@@ -6,11 +6,12 @@
 //! download url ever reaches this module — the load path deliberately discards the errors that
 //! could carry one (see [`Counts::of`]).
 //!
-//! Neither panel has a cursor — nothing on this screen is focusable — but the summary is the
-//! screen's primary and renders `LINE_STRONG` while the environment stays `LINE` (ruling: one
-//! panel strong; a sole summary panel in the narrow fallback counts as focused per the contract).
-//! The summary's empty state carries one hotkey, which opens the source-path input this screen
-//! holds while it is live.
+//! The screen's one focusable row is the environment panel's source input row: `s` lands the
+//! caret on it, `enter` opens it for editing, `esc` cancels, and a committed non-empty path
+//! re-probes the source. While that row holds the caret the environment panel is the focused pane
+//! (`LINE_STRONG`); otherwise the summary is the primary and the environment stays `LINE` (ruling:
+//! one panel strong; a sole summary panel in the narrow fallback counts as focused per the
+//! contract). The summary's empty state carries the `s` hotkey that lands the caret on that row.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ use crate::export::schema;
 use crate::export::zip::{PartGroup, discover_parts};
 use crate::tui::shell;
 use crate::tui::theme::{Palette, glyph};
-use crate::tui::widgets::{self, EMPTY_STATE_ROWS, PanelStyle, min_width_for_title, panel};
+use crate::tui::widgets::{self, CARET_GUTTER, EMPTY_STATE_ROWS, PanelStyle, caret, form_label, min_width_for_title, panel, tint_to_edge};
 
 /// Both border columns plus the panel's 1-cell horizontal padding on each side, taken from the
 /// widget that draws them rather than restated here — the width-axis twin of
@@ -40,16 +41,18 @@ const LABEL_GAP: usize = 2;
 /// The empty state's inset inside its own frame, matching the contract's example.
 const EMPTY_STATE_INSET: usize = 3;
 /// The narrow floor of the source row's value: the fewest cells it occupies before head-ellipsising.
-/// A wider panel hands the value the interior width left after the label column (in `render_panel`),
-/// so a short path shows whole; this only stops the column shrinking below the whole-or-not-at-all
-/// budget, which keeps the responsive breakpoint from moving with how deep the source dir sits.
+/// A wider panel hands the value the interior width left after the caret gutter, label and gap (in
+/// `render_panel`), so a short path shows whole; this only stops the value shrinking below the
+/// whole-or-not-at-all budget, which keeps the responsive breakpoint from moving with how deep the
+/// source dir sits.
 const SOURCE_PATH_CELLS: usize = 18;
 
 const DISK_FREE_LABEL: &str = "disk free";
 const SOURCE_LABEL: &str = "source";
 
-/// The key that opens the source-path input from the summary's empty state. `s` for "set source";
-/// not one of the reserved `a`/`x`/`?`/`q` (cloudy-tui: Action menu → Hotkey assignment).
+/// The key that lands the caret on the source input row, advertised by the summary's empty state.
+/// `s` for "set source"; not one of the reserved `a`/`x`/`?`/`q` (cloudy-tui: Action menu →
+/// Hotkey assignment).
 const SOURCE_HOTKEY: char = 's';
 
 /// Every row the summary panel can render, in report order.
@@ -128,8 +131,8 @@ pub struct Overview {
     parts: Parts,
     counts: Counts,
     environment: Environment,
-    /// The live source-path input, `Some` while the summary's empty-state hotkey has it open.
-    editing: Option<EditSession>,
+    /// The source input row's focus state — the screen's one cursor.
+    source_focus: SourceFocus,
 }
 
 impl Overview {
@@ -138,7 +141,13 @@ impl Overview {
     /// frame draws.
     #[must_use]
     pub fn unloaded() -> Self {
-        Self { source: None, parts: Parts::None, counts: Counts::absent(), environment: Environment::default(), editing: None }
+        Self {
+            source: None,
+            parts: Parts::None,
+            counts: Counts::absent(),
+            environment: Environment::default(),
+            source_focus: SourceFocus::Blurred,
+        }
     }
 
     /// What the machine could do when this screen was built. Test-only: `App`'s own startup test
@@ -179,7 +188,7 @@ impl Overview {
             },
         };
 
-        Self { source: Some(source), parts, counts, environment, editing: None }
+        Self { source: Some(source), parts, counts, environment, source_focus: SourceFocus::Blurred }
     }
 
     /// This screen's share of the `--print-source` report: the dir it was built against, what the
@@ -215,61 +224,71 @@ impl Overview {
         format!("source={source:?}\n{found}\n{space}")
     }
 
-    /// Whether the source-path input is open — the app's `q`/`x`/`?`/`a` suspension reads it,
-    /// exactly like the settings form's.
+    /// Whether the source row is being edited — the app's `q`/`x`/`?`/`a` suspension reads it,
+    /// exactly like the settings form's. Merely holding the caret is not editing, so those letters
+    /// still fire their shell meanings then.
     #[must_use]
     pub fn is_editing(&self) -> bool {
-        self.editing.is_some()
+        matches!(self.source_focus, SourceFocus::Editing(_))
     }
 
-    /// This screen's keys. While the path input is open, its editing keys are consumed and a key it
-    /// does not own — a `⌥<digit>` jump above all — comes back unhandled so the shell sees it; with
-    /// the input closed, [`SOURCE_HOTKEY`] opens it from the summary's empty state.
+    /// This screen's keys. While the source row is being edited, its editing keys are consumed and a
+    /// key it does not own — a `⌥<digit>` jump above all — comes back unhandled so the shell sees it.
+    /// Otherwise [`SOURCE_HOTKEY`] lands the caret on the row, and on the row `enter` opens the edit
+    /// and `esc` blurs.
     pub fn handle_key(&mut self, key: KeyEvent) -> OverviewKey {
-        if self.editing.is_some() {
+        if matches!(self.source_focus, SourceFocus::Editing(_)) {
             return self.handle_edit_key(key);
         }
-        if self.is_empty()
-            && matches!(key.code, KeyCode::Char(c) if c.to_ascii_lowercase() == SOURCE_HOTKEY)
+        if matches!(key.code, KeyCode::Char(c) if c.to_ascii_lowercase() == SOURCE_HOTKEY)
             && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
         {
-            // Seed the draft from the current source so a typo is corrected rather than retyped; a
-            // first-time open has no source and starts empty.
-            let draft = self.source.as_ref().map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-            let caret = draft.chars().count();
-            self.editing = Some(EditSession { draft, caret });
+            self.source_focus = SourceFocus::Selected;
             return OverviewKey::Handled;
+        }
+        if matches!(self.source_focus, SourceFocus::Selected) {
+            return match key.code {
+                KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                    // Seed the draft from the current source so a typo is corrected rather than
+                    // retyped; a first-time open has no source and starts empty.
+                    let draft = self.source.as_ref().map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+                    let caret = draft.chars().count();
+                    self.source_focus = SourceFocus::Editing(EditSession { draft, caret });
+                    OverviewKey::Handled
+                }
+                KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
+                    self.source_focus = SourceFocus::Blurred;
+                    OverviewKey::Handled
+                }
+                _ => OverviewKey::Unhandled,
+            };
         }
         OverviewKey::Unhandled
     }
 
-    /// One key while the path input is open: `enter` commits a non-empty draft as the source to
-    /// re-probe, `esc` cancels, and the editing keys edit the draft. A key the field does not own —
-    /// a `⌥<digit>` jump above all — comes back [`OverviewKey::Unhandled`], so the shell's own
-    /// bindings still see it (cloudy-tui: `⌥<digit>` never suspends, live in edit mode). That is
-    /// what lets a jump leave the input with its draft suspended instead of trapping the user until
-    /// `esc` discards it.
+    /// One key while the source row is being edited: `enter` commits a non-empty draft as the source
+    /// to re-probe, `esc` cancels back to the selected row, and the editing keys edit the draft. A
+    /// key the field does not own — a `⌥<digit>` jump above all — comes back
+    /// [`OverviewKey::Unhandled`], so the shell's own bindings still see it (cloudy-tui: `⌥<digit>`
+    /// never suspends, live in edit mode). That is what lets a jump leave the edit with its draft
+    /// suspended instead of trapping the user until `esc` discards it.
     fn handle_edit_key(&mut self, key: KeyEvent) -> OverviewKey {
         match key.code {
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-                let Some(session) = self.editing.take() else { return OverviewKey::Unhandled };
+                let SourceFocus::Editing(session) = std::mem::replace(&mut self.source_focus, SourceFocus::Selected) else {
+                    return OverviewKey::Unhandled;
+                };
                 if session.draft.is_empty() { OverviewKey::Handled } else { OverviewKey::Reprobbed(PathBuf::from(session.draft)) }
             }
             KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
-                self.editing = None;
+                self.source_focus = SourceFocus::Selected;
                 OverviewKey::Handled
             }
             _ => {
-                let Some(session) = self.editing.as_mut() else { return OverviewKey::Unhandled };
+                let SourceFocus::Editing(session) = &mut self.source_focus else { return OverviewKey::Unhandled };
                 if edit_session_key(session, key) { OverviewKey::Handled } else { OverviewKey::Unhandled }
             }
         }
-    }
-
-    /// Whether the summary is showing its empty state rather than rows — the only state the hotkey
-    /// advertises from.
-    fn is_empty(&self) -> bool {
-        !matches!(self.parts, Parts::One { .. })
     }
 }
 
@@ -414,10 +433,22 @@ pub enum OverviewKey {
     Reprobbed(PathBuf),
 }
 
+/// The source input row's focus state — the screen's one cursor (cloudy-tui: Input row — edit is
+/// off by default, so landing on the row shows `❯` and `enter` opens the edit).
+#[derive(Debug, Clone)]
+enum SourceFocus {
+    /// No caret: the row is blurred and the screen is read-only.
+    Blurred,
+    /// The caret is on the row, edit off (`❯` + the value).
+    Selected,
+    /// The row is being edited (`✎` + the draft + the native cursor).
+    Editing(EditSession),
+}
+
 /// One live source-path edit: the draft and the caret as a CHAR index into it. Chars rather than
 /// bytes so a wide or multi-byte character never splits a grapheme (the same model the settings
 /// form keeps; that one is private to settings.rs, which is out of scope for this screen).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EditSession {
     draft: String,
     caret: usize,
@@ -538,8 +569,12 @@ pub fn render(frame: &mut Frame, palette: &Palette, overview: &Overview, area: R
     let summary = summary_panel(palette, overview);
     let environment = environment_panel(palette, overview);
 
-    let first = PanelStyle { first: true, focused: true };
-    let second = PanelStyle { first: false, focused: false };
+    // The caret lives on the source row, so the environment panel is the focused pane while it is
+    // there; otherwise the summary stays the primary (cloudy-tui: Pane focus — the strong border
+    // tracks where the cursor actually lives).
+    let source_focused = !matches!(overview.source_focus, SourceFocus::Blurred);
+    let first = PanelStyle { first: true, focused: !source_focused };
+    let second = PanelStyle { first: false, focused: source_focused };
 
     let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(area);
     let side_by_side = usize::from(left.width) >= summary.min_width() && usize::from(right.width) >= environment.min_width();
@@ -569,8 +604,9 @@ pub fn render(frame: &mut Frame, palette: &Palette, overview: &Overview, area: R
         render_panel(frame, palette, environment, bottom, second);
     } else {
         // Neither layout fits. The summary is the screen's primary content, so it takes what there
-        // is; below its own minimum it renders its box and no rows, per `render_panel`.
-        render_panel(frame, palette, summary, area, first);
+        // is; a sole content panel counts as focused whatever the source row's state. Below its own
+        // minimum it renders its box and no rows, per `render_panel`.
+        render_panel(frame, palette, summary, area, PanelStyle { first: true, focused: true });
     }
 }
 
@@ -578,10 +614,17 @@ pub fn render(frame: &mut Frame, palette: &Palette, overview: &Overview, area: R
 struct ScreenPanel {
     title: &'static str,
     body: Body,
-    /// The environment panel's source path, deferred because its value is head-ellipsised to the
-    /// panel's actual interior width rather than a fixed cell count. `None` on the summary panel
-    /// and on an environment with no source (whose `—` row is fixed-width and stays in `body`).
-    source: Option<String>,
+    /// The environment panel's source input row, deferred because its value is head-ellipsised to
+    /// the panel's actual interior width rather than a fixed cell count. `None` on the summary panel.
+    source: Option<SourceRow>,
+}
+
+/// The environment panel's source input row: the effective value plus the row's focus state.
+struct SourceRow {
+    /// The source path, or `None` when none is named (renders the `—` placeholder).
+    value: Option<String>,
+    /// The row's focus state: blurred, selected (`❯`), or editing (`✎` + draft + caret).
+    focus: SourceFocus,
 }
 
 /// A panel's interior.
@@ -590,15 +633,23 @@ enum Body {
     Rows(Vec<Line<'static>>),
     /// The framed empty state that replaces the rows when there is nothing to count.
     Empty { hint: String, action: Line<'static> },
-    /// The empty state with the source-path input open: the hint stays, the input replaces the
-    /// action line, and the native cursor marks the caret.
-    Input { hint: String, draft: String, caret: usize },
+}
+
+/// The source row's cells before its value: the caret gutter, the label and the gap.
+fn source_value_lead() -> usize {
+    CARET_GUTTER + cells(SOURCE_LABEL) + LABEL_GAP
+}
+
+/// The source row's whole content at its narrow floor: the lead plus the value's
+/// [`SOURCE_PATH_CELLS`] floor.
+fn source_row_cells() -> usize {
+    source_value_lead() + SOURCE_PATH_CELLS
 }
 
 impl ScreenPanel {
     /// The panel width this content needs to render whole.
     fn min_width(&self) -> usize {
-        let source = self.source.as_ref().map_or(0, |_| environment_label_column() + SOURCE_PATH_CELLS);
+        let source = self.source.as_ref().map_or(0, |_| source_row_cells());
         min_width_for_title(self.title).max(PANEL_CHROME + self.body.width()).max(PANEL_CHROME + source)
     }
 
@@ -614,9 +665,6 @@ impl Body {
         match self {
             Self::Rows(lines) => lines.iter().map(Line::width).max().unwrap_or(0),
             Self::Empty { hint, action } => cells(hint).max(action.width()) + 2 * EMPTY_STATE_INSET + 2,
-            // The input is ellipsised to whatever the panel leaves, so it never widens the panel
-            // past the action line that advertised the hotkey.
-            Self::Input { hint, .. } => cells(hint).max(source_action_cells()) + 2 * EMPTY_STATE_INSET + 2,
         }
     }
 
@@ -624,7 +672,7 @@ impl Body {
     fn height(&self) -> u16 {
         match self {
             Self::Rows(lines) => u16::try_from(lines.len()).unwrap_or(u16::MAX),
-            Self::Empty { .. } | Self::Input { .. } => EMPTY_STATE_ROWS,
+            Self::Empty { .. } => EMPTY_STATE_ROWS,
         }
     }
 
@@ -642,7 +690,7 @@ impl Body {
     fn min_height(&self) -> u16 {
         match self {
             Self::Rows(_) => 1,
-            Self::Empty { .. } | Self::Input { .. } => EMPTY_STATE_ROWS,
+            Self::Empty { .. } => EMPTY_STATE_ROWS,
         }
     }
 }
@@ -656,7 +704,7 @@ fn render_panel(frame: &mut Frame, palette: &Palette, content: ScreenPanel, area
     // panel still refuses to clip it below [`SOURCE_PATH_CELLS`].
     let mut need = content.body.width();
     if content.source.is_some() {
-        need = need.max(environment_label_column() + SOURCE_PATH_CELLS);
+        need = need.max(source_row_cells());
     }
 
     // Whole or not at all, across the width. A row clipped mid-way hides its value beside a label
@@ -671,10 +719,17 @@ fn render_panel(frame: &mut Frame, palette: &Palette, content: ScreenPanel, area
         Body::Rows(mut lines) => {
             if let Some(source) = content.source {
                 // The source is this panel's last row: head-ellipsise it to whatever the interior
-                // actually leaves after the label column, so a short path shows whole.
-                let budget = usize::from(inner.width).saturating_sub(environment_label_column()).max(SOURCE_PATH_CELLS);
-                let column = environment_label_column();
-                lines.push(row(palette, SOURCE_LABEL, column, vec![value_span(palette, head_ellipsis(&source, budget))]));
+                // actually leaves after the caret gutter, label and gap, so a short path shows whole.
+                let budget = usize::from(inner.width).saturating_sub(source_value_lead()).max(SOURCE_PATH_CELLS);
+                lines.push(source_row(palette, &source, budget, usize::from(inner.width)));
+                if let SourceFocus::Editing(session) = &source.focus {
+                    // The native cursor marks the caret (cloudy-tui: Text input — the terminal's own
+                    // cursor). The row is the last one pushed.
+                    let (_, caret_cells) = input_window(&session.draft, session.caret, budget);
+                    let value_x = inner.x + u16::try_from(source_value_lead() + caret_cells).unwrap_or(u16::MAX);
+                    let caret_y = inner.y + u16::try_from(lines.len() - 1).unwrap_or(u16::MAX);
+                    frame.set_cursor_position(Position::new(value_x, caret_y));
+                }
             }
             frame.render_widget(Paragraph::new(lines), inner);
         }
@@ -688,36 +743,45 @@ fn render_panel(frame: &mut Frame, palette: &Palette, content: ScreenPanel, area
             // builds.
             frame.render_widget(Paragraph::new(vec![Line::styled(hint, copy), action]).block(empty_block(palette)), frame_area);
         }
-        Body::Input { hint, draft, caret } => {
-            let width = u16::try_from(need).unwrap_or(u16::MAX);
-            let frame_area = inner.centered(Constraint::Length(width), Constraint::Length(EMPTY_STATE_ROWS));
-            let copy = Style::new().fg(palette.text_dim);
-
-            // The input replaces the action line: `✎ ` plus the draft window, the native cursor at
-            // the caret (cloudy-tui: Text input — the terminal's own cursor marks the caret).
-            let budget = usize::from(width).saturating_sub(2 + 2 * EMPTY_STATE_INSET + 2);
-            let (window, caret_cells) = input_window(&draft, caret, budget);
-            let edit = Span::styled(format!("{} ", glyph::EDIT_GLYPH), Style::new().fg(palette.accent).bold());
-            let value = Span::styled(window, Style::new().fg(palette.text));
-            frame.render_widget(
-                Paragraph::new(vec![Line::styled(hint, copy), Line::from(vec![edit, value])]).block(empty_block(palette)),
-                frame_area,
-            );
-
-            // The caret cell: the frame's left border, the inset, the edit glyph, then the caret's
-            // offset within the window. Row 1 is the input (row 0 is the hint).
-            let caret_x = frame_area.x
-                + 1
-                + u16::try_from(EMPTY_STATE_INSET).unwrap_or(u16::MAX)
-                + 2
-                + u16::try_from(caret_cells).unwrap_or(u16::MAX);
-            frame.set_cursor_position(Position::new(caret_x, frame_area.y + 2));
-        }
     }
 }
 
+/// The source input row (cloudy-tui: Input row): `❯` selected / `✎` editing, the label promoting
+/// to `TEXT + bold` on focus, the value `ACCENT` (or the `—` placeholder), and the `BG_HOVER` tint
+/// to the panel edge when focused. The value is ellipsised to `budget`; the draft is windowed so
+/// the caret stays inside it.
+fn source_row(palette: &Palette, source: &SourceRow, budget: usize, width: usize) -> Line<'static> {
+    let focused = !matches!(source.focus, SourceFocus::Blurred);
+    let editing = match &source.focus {
+        SourceFocus::Editing(session) => Some(session),
+        SourceFocus::Blurred | SourceFocus::Selected => None,
+    };
+    let caret_span = if editing.is_some() {
+        Span::styled(format!("{} ", glyph::EDIT_GLYPH), Style::new().fg(palette.accent).bold())
+    } else {
+        caret(palette, focused)
+    };
+    let mut spans = vec![caret_span, form_label(palette, SOURCE_LABEL, focused), Span::raw("  ")];
+    let value_span = if let Some(session) = editing {
+        if session.draft.is_empty() {
+            Span::styled("—", Style::new().fg(palette.text_faint))
+        } else {
+            let (window, _) = input_window(&session.draft, session.caret, budget);
+            Span::styled(window, Style::new().fg(palette.text))
+        }
+    } else {
+        match &source.value {
+            Some(value) => Span::styled(head_ellipsis(value, budget), Style::new().fg(palette.accent)),
+            None => Span::styled("—", Style::new().fg(palette.text_faint)),
+        }
+    };
+    spans.push(value_span);
+    let line = Line::from(spans);
+    if focused { tint_to_edge(line.style(Style::new().bg(palette.bg_hover)), width, palette) } else { line }
+}
+
 /// The empty state's rounded frame (cloudy-tui: Empty state): `LINE` border, the 3-cell inset on
-/// each side, no vertical padding. Shared by the [`Body::Empty`] and [`Body::Input`] arms.
+/// each side, no vertical padding.
 fn empty_block(palette: &Palette) -> Block<'static> {
     let inset = u16::try_from(EMPTY_STATE_INSET).unwrap_or(u16::MAX);
     Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(palette.line)).padding(Padding::new(inset, inset, 0, 0))
@@ -740,10 +804,7 @@ fn summary_panel(palette: &Palette, overview: &Overview) -> ScreenPanel {
         }
     };
 
-    let body = match &overview.editing {
-        Some(session) => Body::Input { hint, draft: session.draft.clone(), caret: session.caret },
-        None => Body::Empty { hint, action: source_action(palette) },
-    };
+    let body = Body::Empty { hint, action: source_action(palette) };
 
     ScreenPanel { title: "export summary", body, source: None }
 }
@@ -756,12 +817,6 @@ fn source_action(palette: &Palette) -> Line<'static> {
         Span::styled(SOURCE_HOTKEY.to_string(), Style::new().fg(palette.accent).bold()),
         Span::styled(" to set source", Style::new().fg(palette.text_dim)),
     ])
-}
-
-/// The action line's cell width, independent of styling: the hotkey is one ascii cell whatever the
-/// letter, so [`source_action`]'s three parts sum the same with or without a palette.
-fn source_action_cells() -> usize {
-    cells("press ") + 1 + cells(" to set source")
 }
 
 fn summary_rows(palette: &Palette, zips: usize, unpacked: usize, missing: usize, counts: Counts) -> Vec<Line<'static>> {
@@ -878,18 +933,12 @@ fn environment_panel(palette: &Palette, overview: &Overview) -> ScreenPanel {
         }],
     ));
 
-    // The source row is deferred when there IS a source: its value is head-ellipsised to the
-    // panel's actual interior width at render time, so a short path shows whole. With no source,
-    // the fixed `—` placeholder stays in the eager rows.
-    let source = match &overview.source {
-        Some(path) => Some(path.display().to_string()),
-        None => {
-            rows.push(row(palette, SOURCE_LABEL, column, vec![Span::styled("—", Style::new().fg(palette.text_faint))]));
-            None
-        }
-    };
+    // The source row is always deferred: its value is head-ellipsised to the panel's actual
+    // interior width at render time, so a short path shows whole, and the row's focus state rides
+    // with it into the render.
+    let source = SourceRow { value: overview.source.as_ref().map(|path| path.display().to_string()), focus: overview.source_focus.clone() };
 
-    ScreenPanel { title: "environment", body: Body::Rows(rows), source }
+    ScreenPanel { title: "environment", body: Body::Rows(rows), source: Some(source) }
 }
 
 /// Status pill (component: Status pill): brackets `TEXT_DIM`, label semantic and bold. A missing
@@ -903,14 +952,16 @@ fn tool_pill(palette: &Palette, environment: &Environment, tool: Tool) -> Vec<Sp
 }
 
 fn environment_label_column() -> usize {
-    Tool::ALL.into_iter().map(|tool| cells(tool.command())).chain([cells(DISK_FREE_LABEL), cells(SOURCE_LABEL)]).max().unwrap_or(0)
-        + LABEL_GAP
+    // The source row is a focusable input row, ragged rather than column-aligned, so its label does
+    // not count toward the static rows' column.
+    Tool::ALL.into_iter().map(|tool| cells(tool.command())).chain([cells(DISK_FREE_LABEL)]).max().unwrap_or(0) + LABEL_GAP
 }
 
 // ---- row building ----
 
 /// One static key:value display row. The key stays `TEXT_DIM + bold` at all times — that bold is a
-/// permanent anchor against the value, not a focus cue, and nothing here is focusable anyway.
+/// permanent anchor against the value, not a focus cue; the screen's one focusable row, the source
+/// input, renders through [`source_row`] instead.
 ///
 /// Values stack in one column: these are non-selectable display rows, the only kind the contract
 /// column-aligns.
@@ -997,64 +1048,81 @@ mod tests {
     }
 
     #[test]
-    fn the_hotkey_opens_the_input_and_enter_commits_a_reprobe() {
+    fn the_hotkey_lands_the_caret_and_enter_commits_a_reprobe() {
         let mut overview = Overview::unloaded();
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
+        // `s` lands the caret on the source row; it does not open an edit.
         assert!(matches!(overview.handle_key(key(KeyCode::Char('s'))), OverviewKey::Handled));
+        assert!(!overview.is_editing(), "s focuses, not edits");
+        assert!(matches!(overview.source_focus, SourceFocus::Selected));
+
+        // `enter` opens the edit; the draft seeds from the (absent) source and starts empty.
+        assert!(matches!(overview.handle_key(key(KeyCode::Enter)), OverviewKey::Handled));
         assert!(overview.is_editing());
 
         for ch in ['/', 't', 'm', 'p'] {
             assert!(matches!(overview.handle_key(key(KeyCode::Char(ch))), OverviewKey::Handled));
         }
         assert!(matches!(overview.handle_key(key(KeyCode::Enter)), OverviewKey::Reprobbed(path) if path.as_path() == Path::new("/tmp")));
-        assert!(!overview.is_editing(), "the commit closes the input");
+        assert!(!overview.is_editing(), "the commit closes the edit");
     }
 
     #[test]
-    fn esc_cancels_the_input_without_reprobing() {
+    fn esc_cancels_the_edit_and_a_second_esc_blurs_the_row() {
         let mut overview = Overview::unloaded();
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         overview.handle_key(key(KeyCode::Char('s')));
+        overview.handle_key(key(KeyCode::Enter));
         overview.handle_key(key(KeyCode::Char('x')));
+        assert!(overview.is_editing());
         assert!(matches!(overview.handle_key(key(KeyCode::Esc)), OverviewKey::Handled));
-        assert!(!overview.is_editing());
+        assert!(!overview.is_editing(), "esc cancels the edit");
+        assert!(matches!(overview.source_focus, SourceFocus::Selected), "the caret stays on the row");
+
+        // A second esc blurs the row, returning the screen to read-only.
+        assert!(matches!(overview.handle_key(key(KeyCode::Esc)), OverviewKey::Handled));
+        assert!(matches!(overview.source_focus, SourceFocus::Blurred));
     }
 
     #[test]
     fn an_alt_digit_while_editing_is_unhandled_so_the_jump_escape_hatch_fires() {
-        // The input must not trap the user: `⌥<digit>` is the escape hatch that jumps tabs while
+        // The edit must not trap the user: `⌥<digit>` is the escape hatch that jumps tabs while
         // live in edit mode (cloudy-tui: `⌥<digit>` never suspends). It comes back `Unhandled`, the
-        // input stays open, and the draft is neither polluted with the digit nor discarded.
+        // edit stays open, and the draft is neither polluted with the digit nor discarded.
         let mut overview = Overview::unloaded();
-        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
-        assert!(matches!(overview.handle_key(key), OverviewKey::Handled));
-        assert!(matches!(overview.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)), OverviewKey::Handled));
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert!(matches!(overview.handle_key(key(KeyCode::Char('s'), KeyModifiers::NONE)), OverviewKey::Handled));
+        assert!(matches!(overview.handle_key(key(KeyCode::Enter, KeyModifiers::NONE)), OverviewKey::Handled));
+        assert!(matches!(overview.handle_key(key(KeyCode::Char('/'), KeyModifiers::NONE)), OverviewKey::Handled));
 
-        let alt_1 = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT);
+        let alt_1 = key(KeyCode::Char('1'), KeyModifiers::ALT);
         assert!(matches!(overview.handle_key(alt_1), OverviewKey::Unhandled), "⌥1 is the shell's jump key, not the field's");
-        assert!(overview.is_editing(), "the input stays open through an unhandled jump key");
+        assert!(overview.is_editing(), "the edit stays open through an unhandled jump key");
 
         // The jump neither inserted the digit nor cancelled the draft: committing still yields just `/`.
         assert!(matches!(
-            overview.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            overview.handle_key(key(KeyCode::Enter, KeyModifiers::NONE)),
             OverviewKey::Reprobbed(path) if path.as_path() == Path::new("/")
         ));
     }
 
     #[test]
-    fn the_hotkey_is_inert_when_the_summary_has_rows() {
+    fn the_hotkey_lands_the_caret_even_when_the_summary_has_rows() {
+        // The source row is a first-class input row, always present in the environment panel, so `s`
+        // reaches it whether or not the summary is showing rows — re-pointing a valid source is as
+        // reachable as setting a first one.
         let mut overview = Overview {
             source: None,
             parts: Parts::One { zips: 1, unpacked: 0, missing: 0 },
             counts: Counts::absent(),
             environment: Environment::default(),
-            editing: None,
+            source_focus: SourceFocus::Blurred,
         };
         let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
-        assert!(matches!(overview.handle_key(key), OverviewKey::Unhandled));
-        assert!(!overview.is_editing());
+        assert!(matches!(overview.handle_key(key), OverviewKey::Handled));
+        assert!(matches!(overview.source_focus, SourceFocus::Selected));
     }
 
     #[test]
@@ -1065,11 +1133,6 @@ mod tests {
         let (text, caret) = input_window(&"a".repeat(20), 20, 10);
         assert!(cells(&text) <= 10, "{text:?}");
         assert!(caret < 10, "caret stays inside the window: {caret}");
-    }
-
-    #[test]
-    fn the_source_action_names_the_hotkey() {
-        assert_eq!(source_action_cells(), 21);
     }
 
     #[test]
