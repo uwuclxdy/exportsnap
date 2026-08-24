@@ -25,12 +25,10 @@ source=("exportsnap-linux-$CARCH-$pkgver::$url/releases/download/v$pkgver/export
         "LICENSE-MIT-$pkgver::$url/raw/v$pkgver/LICENSE-MIT"
         "LICENSE-APACHE-$pkgver::$url/raw/v$pkgver/LICENSE-APACHE"
         "THIRD-PARTY-LICENSES-$pkgver::$url/raw/v$pkgver/THIRD-PARTY-LICENSES")
-# All SKIP: the v0.1.0 release does not exist yet (pre-release scaffold).
-# `updpkgsums` via ./prepare-aur.sh fills them at the first real release.
-sha256sums=('SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP')
+sha256sums=('7f1776c3bcbae55d3cba2735cdfcd042771d507f1394053e995b2467c66d6c22'
+            'f7837932020c82b6f6d5075e43a0312f5cbf631aebb32476f039b3bc47acec43'
+            '429c026d4b5ffeb625f1277ee0fd65d5a7b2808a7ea6399dd0f4534373c58ec5'
+            'b6f59af826756e1e8d4707b3589f2b1e68187fd99d73583bc3faec12770659db')
 
 package() {
   install -Dm755 "$srcdir/exportsnap-linux-$CARCH-$pkgver" "$pkgdir/usr/bin/exportsnap"

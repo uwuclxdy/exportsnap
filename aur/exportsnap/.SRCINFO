@@ -12,9 +12,9 @@ pkgbase = exportsnap
 	source = LICENSE-MIT-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/LICENSE-MIT
 	source = LICENSE-APACHE-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/LICENSE-APACHE
 	source = THIRD-PARTY-LICENSES-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/THIRD-PARTY-LICENSES
-	sha256sums = SKIP
-	sha256sums = SKIP
-	sha256sums = SKIP
-	sha256sums = SKIP
+	sha256sums = 7f1776c3bcbae55d3cba2735cdfcd042771d507f1394053e995b2467c66d6c22
+	sha256sums = f7837932020c82b6f6d5075e43a0312f5cbf631aebb32476f039b3bc47acec43
+	sha256sums = 429c026d4b5ffeb625f1277ee0fd65d5a7b2808a7ea6399dd0f4534373c58ec5
+	sha256sums = b6f59af826756e1e8d4707b3589f2b1e68187fd99d73583bc3faec12770659db
 
 pkgname = exportsnap
