@@ -70,9 +70,13 @@ fn third_party_licenses_is_fresh_against_cargo_lock() {
         println!("SKIPPED: cargo-about failed; regenerate by hand");
         return;
     }
-    let fresh = fs::read_to_string(&dir).unwrap_or_default();
+    // The comparison is content freshness, never byte identity: cargo-about 0.9.2 emits CRLF
+    // license texts, git stores the notice as LF, so a byte-diff false-reds after any checkout
+    // rewrite (measured 2026-08-24: the temp regen carries CRs the committed blob does not).
+    // Strip CR from both sides.
+    let fresh = fs::read_to_string(&dir).unwrap_or_default().replace('\r', "");
     let _ = fs::remove_file(&dir);
-    let committed = fs::read_to_string(notice_path()).unwrap();
+    let committed = fs::read_to_string(notice_path()).unwrap().replace('\r', "");
     assert_eq!(committed, fresh, "THIRD-PARTY-LICENSES is stale; regenerate with `cargo about generate about.hbs -o THIRD-PARTY-LICENSES`");
 }
 
