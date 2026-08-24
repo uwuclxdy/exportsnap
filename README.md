@@ -91,6 +91,8 @@ cd exportsnap
 cargo build --release
 ```
 
+On Windows, run `.\install.bat` in the cloned repo instead: it builds the same release binary and copies it to `%USERPROFILE%\bin`. That dir is off the default PATH, so run `%USERPROFILE%\bin\exportsnap.exe` or add the dir.
+
 ## Usage
 
 **1. Request your export.** Go to [accounts.snapchat.com](https://accounts.snapchat.com) → My Data, tick the Memories and Chat History categories, and request it. The download link arrives by email and expires quickly, so download the zips as soon as it lands. Once they are on disk, exportsnap needs nothing else from Snapchat.
