@@ -91,7 +91,9 @@ cd exportsnap
 cargo build --release
 ```
 
-On Windows, run `.\install.bat` in the cloned repo instead: it builds the same release binary and copies it to `%USERPROFILE%\bin`. That dir is off the default PATH, so run `%USERPROFILE%\bin\exportsnap.exe` or add the dir.
+Building from source needs a C toolchain (rusqlite bundles SQLite): mingw gcc, clang, or Visual Studio Build Tools with the C++ workload.
+
+On Windows, run `.\install.bat` in the cloned repo instead: it builds the same release binary and copies it to `%USERPROFILE%\bin`. That dir is off the default PATH, so run `%USERPROFILE%\bin\exportsnap.exe` or add the dir. The bat checks for the C toolchain first and names what to install when it is missing.
 
 ## Usage
 
