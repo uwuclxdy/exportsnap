@@ -47,11 +47,20 @@ echo %TOOLCHAIN_FIX%
 exit /b 1
 
 :have_c_toolchain
+REM A FILE at %INSTALL_DIR% passes "if not exist" silently and the failure lands
+REM unnamed at the copy step. "if exist ...\" matches directories only, so name the
+REM file collision here, before the expensive build.
+if exist "%INSTALL_DIR%\" goto have_install_dir
+if exist "%INSTALL_DIR%" (
+  echo install.bat: %INSTALL_DIR% is a file. Remove or rename it, then re-run.
+  exit /b 1
+)
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 if not exist "%INSTALL_DIR%" (
   echo install.bat: could not create %INSTALL_DIR%
   exit /b 1
 )
+:have_install_dir
 if exist "%INSTALL_DIR%\%BIN_NAME%.exe\" (
   echo install.bat: %INSTALL_DIR%\%BIN_NAME%.exe is a directory. Remove or rename it, then re-run.
   exit /b 1

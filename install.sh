@@ -62,6 +62,20 @@ case "${OS}" in
         ;;
 esac
 
+# Install dir: /usr/local/bin when writable, else ~/.local/bin.
+if [[ "${OS}" != "windows" && -w /usr/local/bin ]]; then
+    INSTALL_DIR="/usr/local/bin"
+else
+    INSTALL_DIR="${HOME}/.local/bin"
+fi
+
+# Refuse a directory at the install destination: mv would descend into it,
+# exit 0, and the success line would claim an install that never happened.
+if [[ -d "${INSTALL_DIR}/${BINARY}${EXT}" ]]; then
+    echo "install.sh: ${INSTALL_DIR}/${BINARY}${EXT} is a directory. Remove or rename it, then re-run." >&2
+    exit 1
+fi
+
 URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
 SUMS_URL="https://github.com/${REPO}/releases/latest/download/sha256sums.txt"
 
@@ -109,13 +123,6 @@ if [[ "${ACTUAL_HEX}" != "${EXPECTED_HEX}" ]]; then
 fi
 echo "Checksum verified."
 chmod +x "${TMP}"
-
-# Install dir: /usr/local/bin when writable, else ~/.local/bin.
-if [[ "${OS}" != "windows" && -w /usr/local/bin ]]; then
-    INSTALL_DIR="/usr/local/bin"
-else
-    INSTALL_DIR="${HOME}/.local/bin"
-fi
 
 mkdir -p "${INSTALL_DIR}"
 mv "${TMP}" "${INSTALL_DIR}/${BINARY}${EXT}"
