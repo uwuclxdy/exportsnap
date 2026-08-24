@@ -132,16 +132,19 @@ jobs:
         # The ODbL attribution obligation (decision 35) ships with the release:
         # the notice is generated, never hand-edited (tests/attribution.rs pins
         # it), and rides the release as an asset alongside the binaries.
-        # cargo-about is pinned to 0.9.1 — the version the committed
-        # THIRD-PARTY-LICENSES was generated with; a newer one may drift the
-        # output format. `cli` is NOT a default feature: without it cargo
-        # install exits 0 having installed NOTHING (warning only), and the
-        # generate line below then dies on a missing subcommand.
+        # cargo-about is pinned to 0.9.2 — the version the committed
+        # THIRD-PARTY-LICENSES was generated with; any other version drifts
+        # the output and reds tests/attribution.rs on a box whose tool moved
+        # (measured 2026-08-24: 0.9.2 adds the geometry-rs attribution and
+        # trims trailing whitespace in license texts). `cli` is NOT a default
+        # feature: without it cargo install exits 0 having installed NOTHING
+        # (warning only), and the generate line below then dies on a missing
+        # subcommand.
         run: |
           # download-artifact creates no directory when every build leg failed;
           # this step must not be the first one to die on that path.
           mkdir -p artifacts
-          cargo install cargo-about --version 0.9.1 --locked --features cli
+          cargo install cargo-about --version 0.9.2 --locked --features cli
           cargo about --version   # assert the install actually landed a binary
           cargo about generate about.hbs -o artifacts/THIRD-PARTY-LICENSES
       - name: Generate sha256sums.txt
