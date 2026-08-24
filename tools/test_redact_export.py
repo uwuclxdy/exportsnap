@@ -1085,7 +1085,7 @@ class TestOutputChannels(RedactorCase):
 
     def test_a_digit_run_only_gap_fires_the_count_warning_and_still_exits_0(self):
         # vocabulary_gap_other's digit-run branch (task 21 review F2/F12): a
-        # numbered-variant name (the OS-dedup shape docs/design.md records
+        # numbered-variant name (the OS-dedup shape docs/mechanisms.md records
         # for "memories (1)/memories/") mismatches mask_name on a pure digit
         # run, no word token anywhere -- must still warn, and must still be
         # a warning, not an abort (the binding decision: exit stays 0).
