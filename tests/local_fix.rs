@@ -850,8 +850,8 @@ fn a_fixed_memory_lands_under_its_year_and_month_carrying_the_overlay_and_the_de
 #[test]
 fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
     // The dimensions the 2026-08-04 census found on real data: a 1440x2560 main with a
-    // 1080x1920 overlay (38 of 161 real pairs, the modal image shape; see the local-fix
-    // section of docs/design.md). `composite` scales the overlay to fit WITHIN the main and centres
+    // 1080x1920 overlay (38 of 161 real pairs, the modal image shape).
+    // `composite` scales the overlay to fit WITHIN the main and centres
     // it, so an unscaled composite would leave the main's top and bottom 320 rows and its left and
     // right 180 columns unpainted — which is what the bottom-row opaque assert below catches, since
     // the fixture main's red channel never rises past 40 while the overlay's opaque half is 255.
@@ -900,13 +900,13 @@ fn an_overlay_smaller_than_its_main_is_scaled_up_to_cover_the_whole_frame() {
 fn an_overlay_whose_aspect_mismatches_the_main_is_scaled_to_fit_centred_rather_than_stretched() {
     // The shape of the observed export's ninth WebP pair — a portrait 827x1548 overlay over a
     // video whose DECODED frame is 656x1232 portrait (tkhd says 1232x656, a 90° display-rotation
-    // matrix turns it; see docs/domain-knowledge.md). There is no fill answer for that pair:
+    // matrix turns it). There is no fill answer for that pair:
     // scaling the overlay TO the frame would distort the caption. Contain scales it within the
     // frame instead, preserving its aspect and centring it — the user's pick on 2026-08-04
-    // (agent call contain-vs-skip, recorded in docs/design.md) — and the caption is never
+    // (agent call contain-vs-skip) — and the caption is never
     // dropped. No observed pair triggers this: all 161 real pairs are same-aspect, and on their
     // shapes contain and fill agree to within one unpainted row or column (13 pairs leave a
-    // single line; the modal shapes round exactly — see docs/domain-knowledge.md).
+    // single line; the modal shapes round exactly).
     const MAIN_W: u32 = 1232;
     const MAIN_H: u32 = 656;
     const OVERLAY_W: u32 = 827;

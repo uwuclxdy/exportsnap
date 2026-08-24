@@ -616,7 +616,7 @@ pub struct Message {
     /// what the record said, not to decide what survives.
     ///
     /// **[`Self::created`] outranks it, and the ordering costs almost nothing either way.** The two
-    /// agree to the second on every row of the observed export (`docs/design.md`, 13-digit values),
+    /// agree to the second on every row of the observed export (13-digit values),
     /// so where both exist this field adds only sub-second precision — which this crate's own writer
     /// discards before it reaches a file, [`super::local_fix`]'s `system_time` reducing an instant
     /// to `timestamp()` seconds. What it buys is the rows where `Created` is empty and this is not,

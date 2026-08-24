@@ -1,5 +1,4 @@
-//! The chat media tab: a run form and the live per-item progress table (`docs/design.md`, TUI
-//! screen map).
+//! The chat media tab: a run form and the live per-item progress table.
 //!
 //! # This is the first screen whose input holds usernames
 //!

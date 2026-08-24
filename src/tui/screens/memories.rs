@@ -1,5 +1,4 @@
-//! The memories tab: a run form and the live per-item progress table (`docs/design.md`, TUI
-//! screen map).
+//! The memories tab: a run form and the live per-item progress table.
 //!
 //! **Metadata only, exactly like the overview.** The table shows a memory's uuid, its manifest
 //! status and its output file name. The entries' `Location` strings do reach this module, as

@@ -2,8 +2,7 @@
 //! path it is safe on.
 //!
 //! Two measured facts about `little_exif 0.6.23` decide this module's whole shape. Both are
-//! settled in `docs/design.md`'s **Metadata write notes** with crate internals in
-//! `docs/domain-knowledge.md`; neither is re-derived here.
+//! settled in the **Metadata write notes**; neither is re-derived here.
 //!
 //! 1. **`write_to_file` never truncates.** It opens without `.truncate(true)`, seeks to 0 and
 //!    writes with no `set_len`, so a write producing a smaller buffer leaves the old tail on disk
@@ -171,7 +170,7 @@ const GPS_VERSION: [u8; 4] = [2, 3, 0, 0];
 /// so it costs no real value, and far below the point where the sum of two could matter.
 ///
 /// **What it does not close, stated rather than implied.** [`Jpeg::stamp`] is a read-modify-write:
-/// `docs/domain-knowledge.md` records (measured 2026-07-26) that the decode-and-reencode preserves
+/// measured 2026-07-26, the decode-and-reencode preserves
 /// foreign tags and an embedded IFD1 thumbnail byte-identically, so the payload is `preserved
 /// foreign tags + preserved thumbnail + this build's tags` and only the last term is bounded here. A
 /// source carrying a large enough thumbnail can still overflow the segment. How large a real

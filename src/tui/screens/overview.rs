@@ -1,5 +1,4 @@
-//! The overview tab: two read-only panels side by side, an export summary and the environment
-//! (`docs/design.md`, TUI screen map).
+//! The overview tab: two read-only panels side by side, an export summary and the environment.
 //!
 //! **Metadata only.** Counts, year ranges, tool statuses, byte figures and the source path the
 //! user named on the command line. No message text, no filename out of the export, no username, no
@@ -943,7 +942,7 @@ fn environment_panel(palette: &Palette, overview: &Overview) -> ScreenPanel {
 
 /// Status pill (component: Status pill): brackets `TEXT_DIM`, label semantic and bold. A missing
 /// tool is `WARNING` and never `DANGER` — every one of these is optional and the pipeline degrades
-/// without it (`docs/design.md`, decision 2).
+/// without it.
 fn tool_pill(palette: &Palette, environment: &Environment, tool: Tool) -> Vec<Span<'static>> {
     let (label, color) = if environment.tool(tool).is_some() { ("present", palette.success) } else { ("missing", palette.warning) };
     let bracket = Style::new().fg(palette.text_dim);

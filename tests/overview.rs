@@ -2,7 +2,7 @@
 //!
 //! Expectations are cross-checked against the cloudy-tui skill's Panel, Status pill, Empty state,
 //! Forms → Static key:value rows and Patterns → Numeric formatting / Truncation sections, and
-//! against `docs/design.md`'s TUI screen map, not against this crate.
+//! against the TUI screen map, not against this crate.
 //!
 //! The export trees below are written by the tests themselves out of the smallest json each parser
 //! accepts. `fixtures/` is gitignored so CI has none; the one test that reads it goes through

@@ -11,8 +11,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// An external tool the pipeline uses when it is there and degrades without (`docs/design.md`,
-/// decision 2).
+/// An external tool the pipeline uses when it is there and degrades without.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     /// Video overlay burn-in, HEVC transcode, video metadata.

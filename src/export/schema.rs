@@ -14,7 +14,7 @@
 //! on-disk keys, not Rust identifiers — never touch one with a mechanical find-and-replace.
 //!
 //! Every struct carries `#[serde(default)]` and none carries `deny_unknown_fields`. The schema
-//! is observed from ONE real export (`docs/design.md`, "Observed export shape"), so a section
+//! is observed from ONE real export, so a section
 //! Snapchat drops for a given user must arrive empty rather than fatal, and a section this
 //! parser has never seen must not fail the load.
 //!
@@ -413,7 +413,7 @@ pub struct LocationHistory {
     #[serde(rename = "Location History")]
     pub location_history: Vec<Value>,
     /// Keyed by an opaque 22-character business id, so this is a map and not a fixed-shape
-    /// container (`docs/design.md`, "Observed export shape").
+    /// container.
     #[serde(rename = "Businesses and places you may have visited")]
     pub businesses_visited: BTreeMap<String, Vec<Value>>,
     #[serde(rename = "Actiomoji information from places you may have visited")]
@@ -628,7 +628,7 @@ pub struct SubscriptionEntry {
     pub purchase_type: String,
     #[serde(rename = "Purchase Provider")]
     pub purchase_provider: String,
-    /// The only float leaf in the whole export (`docs/design.md`, "Observed export shape").
+    /// The only float leaf in the whole export.
     #[serde(rename = "Price")]
     pub price: f64,
     #[serde(rename = "End Date (if applicable)")]

@@ -196,7 +196,7 @@ const STORIES_ROWS: [RowSpec; 4] = [
 ];
 
 /// The subscriptions section's single row. The one observed export holds an empty list, so the
-/// element shape is unobserved; the count is the whole typed model (`docs/design.md`).
+/// element shape is unobserved; the count is the whole typed model.
 const SUBSCRIPTIONS_ROWS: [RowSpec; 1] = [RowSpec { label: "subscriptions", kind: ValueKind::Count }];
 
 /// The rows a section's detail shows, in display order.

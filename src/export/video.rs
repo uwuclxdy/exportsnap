@@ -17,8 +17,8 @@
 //!
 //! # The two things this module makes structural
 //!
-//! Both are settled in `docs/design.md`'s **Metadata write notes**, with crate internals in
-//! `docs/domain-knowledge.md`. Neither is re-derived here, and neither is left to a comment:
+//! Both are settled in the **Metadata write notes**. Neither is re-derived here, and neither is
+//! left to a comment:
 //!
 //! - **Never a bare `write_to_path`.** Its `WriteConfig::DEFAULT` turns on `write_chapter_list` and
 //!   `write_chapter_track` alongside the meta items, and on input carrying a chapter track those

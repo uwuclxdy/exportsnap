@@ -1,5 +1,4 @@
-//! The history tab: the conversation picker and the formats pane it descends into
-//! (`docs/design.md`, TUI screen map; decisions 58-64).
+//! The history tab: the conversation picker and the formats pane it descends into.
 //!
 //! The master-detail split both run screens use, with the roles swapped: the picker is the master
 //! (it lists the export's conversations) and the formats pane is the detail (the four format

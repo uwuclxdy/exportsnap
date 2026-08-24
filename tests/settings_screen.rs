@@ -238,7 +238,7 @@ fn an_empty_draft_ellipsises_the_effective_value_and_marks_it_as_placeholder() {
     // ghost must stay inside the slot (the idle row ellipsises; the draft must too) and carry
     // a content marker telling it apart from a typed draft: dim-vs-text is the only cue a
     // color-blind render has, and it dies under NO_COLOR, where a content cue survives
-    // (design.md: anything that must stay legible without color needs a content cue, not an
+    // (anything that must stay legible without color needs a content cue, not an
     // attribute). The trailing `…` is that marker.
     let mut settings = settings_in(&dir);
     settings.set_source(PathBuf::from("/export/long/tail"));

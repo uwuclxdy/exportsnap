@@ -783,7 +783,7 @@ fn disabled_row(palette: &Palette, settings: &Settings, row: FormRow, focused: b
 /// The cycle control on a pinned (Disabled) row: every word `TEXT_FAINT`, the selected word always
 /// bracketed. A disabled row carries no color to mark its selection — the whole row is faint — so
 /// the bracket is the content cue that keeps the effective tier readable when the row is blurred
-/// and under `NO_COLOR`, where an attribute dies (design.md: anything that must stay legible
+/// and under `NO_COLOR`, where an attribute dies (anything that must stay legible
 /// without color carries a content cue, not an attribute).
 fn disabled_cycle(palette: &Palette, words: &[&'static str], selected: usize) -> Vec<Span<'static>> {
     let faint = Style::new().fg(palette.text_faint);
@@ -828,7 +828,7 @@ fn input_row(
             // ellipsised to the budget exactly like the idle row, and closed by a trailing `…`
             // marking it as placeholder rather than text the user typed. The marker is a
             // content cue, so it survives NO_COLOR where the dim-vs-text contrast dies
-            // (design.md: anything that must stay legible without color needs a content cue,
+            // (anything that must stay legible without color needs a content cue,
             // not an attribute).
             let placeholder = effective.as_deref().unwrap_or(NOT_FOUND);
             let shown = head_ellipsis(placeholder, budget - 1);

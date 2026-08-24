@@ -41,7 +41,7 @@ pub(crate) const TICK: Duration = Duration::from_millis(80);
 const KITTY_KEYBOARD_FLAGS: KeyboardEnhancementFlags =
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES.union(KeyboardEnhancementFlags::REPORT_EVENT_TYPES);
 
-/// The six top-level screens (design.md: TUI screen map).
+/// The six top-level screens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,

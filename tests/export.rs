@@ -3,12 +3,12 @@
 //!
 //! **Fixture literals die on a regeneration.** Every `user_N` / `conv_N` handle, every
 //! `redacted-xxxxxx` token, and every date below is read from the `fixtures/` tree currently on
-//! disk. The redactor seeds its handles and its one date offset randomly per run
-//! (`docs/handoff-state.md`, decision 20), so re-running it invalidates all of them at once.
+//! disk. The redactor seeds its handles and its one date offset randomly per run,
+//! so re-running it invalidates all of them at once.
 //! That is expected: rewrite the literals from the new fixtures, do not loosen the assertions.
 //!
 //! **Fixture arrays are truncated to their first 25 elements.** No count below is a real export
-//! total; the true lengths live in `fixtures/_redaction_report.json`.
+//! total; the true lengths live in the redaction report.
 //!
 //! `fixtures/` is gitignored, so CI has none. Every test that reads it goes through
 //! `common::fixtures`, which skips it on a box without the tree and fails it on a runner that set
@@ -367,7 +367,7 @@ fn the_word_is_matched_without_regard_to_case_and_other_still_keeps_its_spelling
 }
 
 /// The three real `Media Type` vocabularies, one file at a time
-/// (`docs/design.md`, observed export shape; n=1).
+/// (n=1).
 #[test]
 fn every_media_type_word_the_real_export_writes_lands_where_it_belongs() {
     // chat_history.json. `SHARE` and the whole `STATUS…` family are their own words: the match is
@@ -492,8 +492,8 @@ fn a_section_whose_element_shape_is_unknown_does_not_fail_the_load() {
 
 #[test]
 fn schema_files_is_sorted_deduplicated_and_names_every_observed_file() {
-    // No fixed count here: membership is a union of what's been observed, not a contract
-    // (`docs/design.md`), so a length pinned as a magic number would rot on the next observation.
+    // No fixed count here: membership is a union of what's been observed, not a contract,
+    // so a length pinned as a magic number would rot on the next observation.
     let mut sorted = SCHEMA_FILES;
     sorted.sort_unstable();
     assert_eq!(sorted, SCHEMA_FILES, "SCHEMA_FILES must stay sorted");
@@ -917,7 +917,7 @@ fn every_json_file_in_the_fixture_tree_parses_as_json() {
 #[test]
 fn the_fixture_json_dir_holds_only_known_schema_files() {
     // Subset, not equality: which names appear is the requester's category choice
-    // (`docs/design.md`, n=2), so a fixture built from one export legitimately omits names
+    // (n=2), so a fixture built from one export legitimately omits names
     // another export contributed to the union — the fixture on disk right now is the OLDER
     // export, so it holds no `in_app_reports.json` and that is expected, not a gap to fill.
     let dir = json_dir_or_skip!("the_fixture_json_dir_holds_only_known_schema_files");
@@ -1015,7 +1015,7 @@ fn friends_splits_into_its_eight_relationship_lists() {
     let dir = json_dir_or_skip!("friends_splits_into_its_eight_relationship_lists");
     let friends = load_fixture(&dir).friends.unwrap();
 
-    // Truncated at 25 by the redactor; `_redaction_report.json` says the real list holds 100.
+    // Truncated at 25 by the redactor; the redaction report says the real list holds 100.
     assert_eq!(friends.friends.len(), 25);
     assert_eq!(friends.requests_sent.len(), 25);
     assert_eq!(friends.blocked.len(), 2);

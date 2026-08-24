@@ -152,7 +152,7 @@ impl fmt::Display for ParseError {
     /// is the diagnosis gone rather than trimmed for a tool whose job is reporting schema drift.
     /// A character count separates all three and cannot carry a coordinate: `-33.8688, 151.2093`
     /// and `0.0, 0.0` are both just a number of characters. Shape-over-value is this project's own
-    /// idiom, written into `docs/handoff-state.md` after a real privacy breach.
+    /// idiom, written down after a real privacy breach.
     ///
     /// **Length alone, deliberately — and it diagnoses unevenly across the two kinds, which is worth
     /// naming rather than claiming it is enough everywhere.**
@@ -247,7 +247,7 @@ impl Timestamp {
     /// when it names no instant this type can hold.
     ///
     /// The one caller is the chat-media join reading `Created(microseconds)`, whose values are
-    /// milliseconds despite the key (`docs/design.md`). Fallible for two reasons, both reachable
+    /// milliseconds despite the key. Fallible for two reasons, both reachable
     /// from untrusted json: chrono itself refuses a value outside its representable range, and
     /// [`Self::year`] is a `u16`, so a negative or five-digit year has no [`Timestamp`] even where
     /// chrono has a date. Sub-second precision is DROPPED rather than rounded — every consumer of
@@ -557,7 +557,7 @@ impl MediaKind {
 
 /// A signed memory download url.
 ///
-/// These are secrets with a ~7-day life (`docs/design.md`, privacy invariants): never logged,
+/// These are secrets with a ~7-day life: never logged,
 /// never printed. `Debug` is hand-written so a `{:?}` on any struct holding one — a panic
 /// message, a trace line — cannot leak it, and reading the url takes the deliberately awkward
 /// [`Self::expose`]. There is no `Display` on purpose.
@@ -585,7 +585,7 @@ impl fmt::Debug for DownloadUrl {
 /// The body of a chat message.
 ///
 /// Message text is never rendered in the TUI and reaches disk only through an explicit
-/// user-triggered export (`docs/design.md`, decision 3). Same treatment as [`DownloadUrl`]: a
+/// user-triggered export. Same treatment as [`DownloadUrl`]: a
 /// redacting `Debug`, no `Display`, and [`Self::expose`] to read it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MessageText(String);
@@ -802,7 +802,7 @@ pub struct UserProfile {
     pub time_spent_breakdown: Vec<String>,
     pub web_interactions: Vec<String>,
     pub mobile_ad_id: Option<String>,
-    /// The count of `Subscriptions` entries (`docs/design.md`: that section earns a typed model
+    /// The count of `Subscriptions` entries (that section earns a typed model
     /// when the account screen lands). The one observed export holds an empty list, so the
     /// element shape is unobserved, and the empty-section rule forbids guessing one — a
     /// validated count is the whole typed model.

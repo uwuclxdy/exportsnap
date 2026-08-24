@@ -228,8 +228,8 @@ pub fn failure(test: &str, tool: Tool) -> String {
 /// is a hand-written `const ALL: [Self; N]` that no compiler check ties to the variant count: add
 /// a fifth [`Tool`], give it its three match arms — which the wildcard-free matches DO force — and
 /// leave `ALL` at four, and the whole thing builds with zero warnings and then panics `index out of
-/// bounds: the len is 4 but the index is 4` at the first probe. `docs/handoff-state.md` records
-/// that class already ("`const ALL` is not an exhaustiveness witness, and reads exactly like one").
+/// bounds: the len is 4 but the index is 4` at the first probe. That class is already on
+/// record ("`const ALL` is not an exhaustiveness witness, and reads exactly like one").
 /// Selecting the slot by name has no length to get wrong: a fifth variant cannot compile until it
 /// is given a slot here.
 ///
