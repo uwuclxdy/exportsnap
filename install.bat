@@ -52,6 +52,10 @@ if not exist "%INSTALL_DIR%" (
   echo install.bat: could not create %INSTALL_DIR%
   exit /b 1
 )
+if exist "%INSTALL_DIR%\%BIN_NAME%.exe\" (
+  echo install.bat: %INSTALL_DIR%\%BIN_NAME%.exe is a directory. Remove or rename it, then re-run.
+  exit /b 1
+)
 cargo build --release || exit /b 1
 copy /Y "target\release\%BIN_NAME%.exe" "%INSTALL_DIR%\%BIN_NAME%.exe" >nul || exit /b 1
 echo installed %BIN_NAME% -^> %INSTALL_DIR%\%BIN_NAME%.exe
