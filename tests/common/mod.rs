@@ -1,5 +1,6 @@
 //! The one answer to "can this box run the checks that need an external tool", shared by every
-//! `tests/*.rs` crate that gates on one.
+//! `tests/*.rs` crate that gates on one, and the home of the other halves below, each read by
+//! its own set of crates.
 //!
 //! **The question a gate has to ask is whether a tool is USABLE, not whether a spawn succeeded.**
 //! Each of the three video-touching crates used to answer it by launching `ffmpeg` and reading a
@@ -30,7 +31,9 @@
 //! own module because the two halves are read by disjoint sets of crates and each half is dead code
 //! in the other's, which the allow below is scoped against. [`composite`] is a third half on the
 //! same terms and for the same reason, holding the one spelling of the overlay-transparency
-//! assertion that `local_fix` and `chat_fix` had a copy of each.
+//! assertion that `local_fix` and `chat_fix` had a copy of each. [`main_source`] is a fourth half on
+//! the same terms: the one spelling of the `src/main.rs` read the two witnesses of the binary target
+//! share, dead in every crate but `cli` and `config`.
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -40,26 +43,29 @@ use std::sync::OnceLock;
 /// **Measured under `RUSTFLAGS="--force-warn dead_code"`, which overrides every allow in the tree
 /// and so reports what each crate would warn with none of them.** Stated per HALF rather than as a
 /// per-crate total, because the total moves whenever a half is added and the split is what decides
-/// where an allow goes — re-measured 2026-08-11 when [`composite`] became the third half:
+/// where an allow goes — re-measured 2026-08-24 when [`main_source`] became the fourth half:
 ///
-/// | crate | this module's top level | [`fixtures`] | [`composite`] |
-/// |---|---|---|---|
-/// | `local_fix` | 0 | 6 | 0 |
-/// | `chat_fix` | 0 | 6 | 3 |
-/// | `video` | 1 | 6 | 6 |
-/// | `export` | 11 | 0 | 6 |
-/// | `overview` | 11 | 0 | 6 |
-/// | `history` | 11 | 0 | 6 |
-/// | `fixture_gate` | 11 | 2 | 6 |
-/// | `tool_gate` | 5 | 6 | 6 |
+/// | crate | this module's top level | [`fixtures`] | [`composite`] | [`main_source`] |
+/// |---|---|---|---|---|
+/// | `local_fix` | 0 | 6 | 0 | 1 |
+/// | `chat_fix` | 0 | 6 | 3 | 1 |
+/// | `video` | 1 | 6 | 6 | 1 |
+/// | `export` | 11 | 0 | 6 | 1 |
+/// | `overview` | 11 | 0 | 6 | 1 |
+/// | `history` | 11 | 0 | 6 | 1 |
+/// | `fixture_gate` | 11 | 2 | 6 | 1 |
+/// | `tool_gate` | 5 | 6 | 6 | 1 |
+/// | `cli` | 11 | 6 | 6 | 0 |
+/// | `config` | 11 | 6 | 6 | 0 |
 ///
 /// `video`, `local_fix` and `chat_fix` reach every function out here, which is the zero in the first
 /// column; `video`'s 1 is the [`Tool`] variant its own allow is documented against, not a function.
 /// The alternative placement is a crate-level allow on those three `mod common;` declarations, which
 /// would have taken that zero with it. `export`, `overview`, `history` and `fixture_gate` are the
-/// mirror image at 11 tool-side warnings each and carry that crate-level allow instead. `tool_gate` warns 5 out
-/// here, which is the number its own allow is documented against, and 17 with nothing allowed at
-/// all.
+/// mirror image at 11 tool-side warnings each and carry that crate-level allow instead; `cli` and
+/// `config` carry the same allow for reading only [`main_source`], at 11 tool-side warnings plus
+/// both dead halves. `tool_gate` warns 5 out here, which is the number its own allow is documented
+/// against, and 18 with nothing allowed at all.
 ///
 /// **The cost, stated rather than glossed: an uncalled function under [`fixtures`] warns nowhere.**
 /// All six of its items are live in `export` and `overview` — those two reach the whole chain from
@@ -87,6 +93,28 @@ pub mod fixtures;
 /// added to end.
 #[allow(dead_code, reason = "chat_fix passes only the 64x48 block; the other three are local_fix's fixture sizes")]
 pub mod composite;
+
+/// The source read the two witnesses of the binary target share: `src/main.rs` down to text.
+///
+/// Scoped for the same reason [`fixtures`] is: the readers are `cli` and `config` and every other
+/// crate carries it dead, so at the top level it would have landed on the first column instead —
+/// taking the zero `video`, `local_fix` and `chat_fix` hold there. `main` is the binary target, so
+/// no test crate can call it and a source witness observes its wiring as text, and `src/` is
+/// tracked, so the read works in CI too.
+///
+/// **The cost is [`fixtures`]'s, on the smallest half.** `cli` and `config` both reach the one item,
+/// so a new dead helper here warns in neither, and no other crate reads the module at all.
+#[allow(dead_code, reason = "cli and config are the only readers; every other crate carries it dead")]
+pub mod main_source {
+    use std::fs;
+    use std::path::Path;
+
+    /// `src/main.rs` as text.
+    pub fn read() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
+    }
+}
 
 /// A capability a gating call site depends on, named for exactly what its probe verifies.
 ///

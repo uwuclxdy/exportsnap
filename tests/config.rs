@@ -17,6 +17,11 @@ use exportsnap::export::chat_fix::OverlayMode;
 use exportsnap::tui::theme::{Tier, detect_from_env};
 use tempfile::tempdir;
 
+/// The crate-level allow is scoped here rather than inside `common`: this crate reads the source
+/// witness and no other half. See `tests/common/mod.rs` for what that placement keeps measuring.
+#[allow(dead_code, reason = "this crate reads the source witness and no other half of the module")]
+mod common;
+
 /// Writes `text` as the config file in `dir`, then loads it — the path every happy-path
 /// test goes through.
 fn load_text(dir: &Path, text: &str) -> Result<Config, ConfigError> {
@@ -53,14 +58,6 @@ fn a_config_naming_a_theme_wins_inside_detect_from_env() {
     assert_eq!(detect_from_env(None, config.theme), Tier::Full);
 }
 
-/// `src/main.rs` as text — the one file the witness below can observe, since `main` is the
-/// binary target and no test crate can call it. `src/` is tracked, so the read works in CI
-/// too, the same reason `tests/cli.rs` recovers the flag spellings.
-fn main_source() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
-    fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
-}
-
 /// The startup wiring the review filed as unpinned: `main` passes the loaded config's `theme`
 /// into `detect_from_env`'s config slot (decision 66: flag > config > detection), which is the
 /// call the `--theme` help line's "defaults to the config's theme" claim rests on. A test
@@ -82,7 +79,7 @@ fn main_source() -> String {
 /// claim lies.
 #[test]
 fn the_startup_wiring_passes_the_loaded_configs_theme_into_tier_detection() {
-    let source = main_source();
+    let source = common::main_source::read();
 
     // The named assertion comes first: it is the one the drop-plant must red.
     let wiring = "theme::detect_from_env(cli_tier, config.theme)";

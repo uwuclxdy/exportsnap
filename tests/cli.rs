@@ -10,9 +10,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+
+/// The crate-level allow is scoped here rather than inside `common`: this crate reads the source
+/// witness and no other half. See `tests/common/mod.rs` for what that placement keeps measuring.
+#[allow(dead_code, reason = "this crate reads the source witness and no other half of the module")]
+mod common;
 
 /// Launches the built binary with `args` and hands back its whole run. `output()` gives the child a
 /// captured stdout and no tty, which is the point: every flag pinned here has to work with no
@@ -286,11 +289,9 @@ fn a_single_dash_spelling_of_a_flag_is_refused_rather_than_silently_ignored() {
 }
 
 /// `src/main.rs` down to its inline test module: the parsers and the flag set, without the test
-/// literals below them. `src/` is tracked, so this reaches the file in CI too — the same reason
-/// `tests/export.rs` reads the redactor's tuple through `CARGO_MANIFEST_DIR`.
+/// literals below them. The read itself is the shared [`common::main_source::read`].
 fn parser_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
-    let source = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+    let source = common::main_source::read();
     let (parsers, _tests) = source.split_once("#[cfg(test)]").expect("src/main.rs must still carry its inline test module");
     parsers.to_string()
 }
