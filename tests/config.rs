@@ -2,6 +2,10 @@
 //! settings screen's write-back. Every test runs against scratch dirs only — the platform
 //! config dir is never resolved here: on windows `directories` answers via
 //! `SHGetKnownFolderPath`, so an in-process call would read the operator's real tree.
+//!
+//! The wiring below reaches as far as `detect_from_env` itself; `main`'s call site — the half
+//! that feeds the loaded config into the resolver — is pinned by the source witness at the end
+//! of this file, the only observation a test crate has of the binary target.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
@@ -40,13 +44,53 @@ fn a_missing_file_is_defaults_not_an_error() {
 }
 
 #[test]
-fn a_config_naming_a_theme_is_honoured_through_the_real_wiring() {
+fn a_config_naming_a_theme_wins_inside_detect_from_env() {
     let dir = tempdir().unwrap();
     let config = load_text(dir.path(), "[theme]\nname = \"full\"\n").unwrap();
     assert_eq!(config.theme, Some(Tier::Full));
     // Through `detect_from_env` itself, with no flag set: the config's tier must win over
     // whatever `$COLORTERM` says, so the assertion holds under any environment.
     assert_eq!(detect_from_env(None, config.theme), Tier::Full);
+}
+
+/// `src/main.rs` as text — the one file the witness below can observe, since `main` is the
+/// binary target and no test crate can call it. `src/` is tracked, so the read works in CI
+/// too, the same reason `tests/cli.rs` recovers the flag spellings.
+fn main_source() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
+}
+
+/// The startup wiring the review filed as unpinned: `main` passes the loaded config's `theme`
+/// into `detect_from_env`'s config slot (decision 66: flag > config > detection), which is the
+/// call the `--theme` help line's "defaults to the config's theme" claim rests on. A test
+/// crate can observe that wiring only as text: `main` is the binary target, so no test can
+/// call it, and its call is the one delivery of the resolved tier the app ever reads —
+/// `App::new` stages it into the settings layers too, but `start_with` overwrites those before
+/// anything reads them. Any tier a test reads elsewhere (a palette of an `App` the test
+/// built, the settings row's answer) is one the test composed itself, so re-deriving it pins
+/// nothing about `main`. The behavioral
+/// channels are closed the same way: no in-repo harness renders the TUI (the tests/flows
+/// replay driver is external) and `--print-source` deliberately carries no tier key. The
+/// witness reads the call site instead.
+///
+/// Ceiling, stated rather than assumed: this pins the call's SPELLING, so a semantically
+/// equivalent rewrite of the line reds here and wants this witness updated with it, and a doc
+/// comment in `src/main.rs` quoting the call verbatim would keep this green while the wiring
+/// dropped — none does. What it kills that no behavioral test can is the drop the review named
+/// — `detect_from_env(cli_tier, None)` leaves every other test green while the help text's
+/// claim lies.
+#[test]
+fn the_startup_wiring_passes_the_loaded_configs_theme_into_tier_detection() {
+    let source = main_source();
+
+    // The named assertion comes first: it is the one the drop-plant must red.
+    let wiring = "theme::detect_from_env(cli_tier, config.theme)";
+    assert!(source.contains(wiring), "main must resolve the tier from the loaded config's theme, but {wiring:?} is gone from src/main.rs");
+
+    // The claim that call backs: the help line and the call site can drift apart only if this
+    // reds while the wiring assert above stays green.
+    assert!(source.contains("defaults to the config's theme"), "the --theme help line must keep claiming the config layer");
 }
 
 #[test]
