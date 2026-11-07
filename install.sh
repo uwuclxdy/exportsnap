@@ -111,8 +111,13 @@ else
     echo "Error: sha256sum or shasum is required for integrity verification" >&2; exit 1
 fi
 
-# Lines are "<64-hex>  <asset-name>".
-EXPECTED_HEX=$(grep -E "^[0-9a-f]{64}  ${ASSET}$" "${TMP_SUMS}" | awk '{print $1}')
+# Lines are "<64-hex>  <asset-name>". The pipeline's nonzero status is
+# deliberately discarded here: under set -e + pipefail a missing asset line
+# (grep exits 1) would abort the script before the "not found" guard below
+# runs, so the miss must land as an empty EXPECTED_HEX for that guard to
+# turn into the named error. An unreadable sums file (grep exit 2) lands
+# on the same guard.
+EXPECTED_HEX=$(grep -E "^[0-9a-f]{64}  ${ASSET}$" "${TMP_SUMS}" | awk '{print $1}' || true)
 [[ -n "${EXPECTED_HEX}" ]] \
     || { echo "Error: ${ASSET} not found in sha256sums.txt — aborting install" >&2; exit 1; }
 
