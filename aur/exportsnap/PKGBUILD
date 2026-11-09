@@ -6,7 +6,7 @@
 # Maintainer: uwuclxdy <uwuclxdy@users.noreply.github.com>
 
 pkgname=exportsnap
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="TUI that repairs a Snapchat data export: real capture dates, merged captions, media filed by conversation"
 arch=('x86_64')
@@ -25,10 +25,10 @@ source=("exportsnap-linux-$CARCH-$pkgver::$url/releases/download/v$pkgver/export
         "LICENSE-MIT-$pkgver::$url/raw/v$pkgver/LICENSE-MIT"
         "LICENSE-APACHE-$pkgver::$url/raw/v$pkgver/LICENSE-APACHE"
         "THIRD-PARTY-LICENSES-$pkgver::$url/raw/v$pkgver/THIRD-PARTY-LICENSES")
-sha256sums=('7f1776c3bcbae55d3cba2735cdfcd042771d507f1394053e995b2467c66d6c22'
+sha256sums=('710240adc1d29d1161bbc4d51b73159c442de2f5a3060648e49dc96eba9e3694'
             'f7837932020c82b6f6d5075e43a0312f5cbf631aebb32476f039b3bc47acec43'
             '429c026d4b5ffeb625f1277ee0fd65d5a7b2808a7ea6399dd0f4534373c58ec5'
-            'b6f59af826756e1e8d4707b3589f2b1e68187fd99d73583bc3faec12770659db')
+            'cc76fb2caced8e7ac6d0909c0803a52cab28c8ab1f4ba3e2b2500a871f309e21')
 
 package() {
   install -Dm755 "$srcdir/exportsnap-linux-$CARCH-$pkgver" "$pkgdir/usr/bin/exportsnap"

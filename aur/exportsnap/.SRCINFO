@@ -1,6 +1,6 @@
 pkgbase = exportsnap
 	pkgdesc = TUI that repairs a Snapchat data export: real capture dates, merged captions, media filed by conversation
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/uwuclxdy/exportsnap
 	arch = x86_64
@@ -8,13 +8,13 @@ pkgbase = exportsnap
 	license = Apache-2.0
 	options = !strip
 	options = !debug
-	source = exportsnap-linux-x86_64-0.1.0::https://github.com/uwuclxdy/exportsnap/releases/download/v0.1.0/exportsnap-linux-x86_64
-	source = LICENSE-MIT-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/LICENSE-MIT
-	source = LICENSE-APACHE-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/LICENSE-APACHE
-	source = THIRD-PARTY-LICENSES-0.1.0::https://github.com/uwuclxdy/exportsnap/raw/v0.1.0/THIRD-PARTY-LICENSES
-	sha256sums = 7f1776c3bcbae55d3cba2735cdfcd042771d507f1394053e995b2467c66d6c22
+	source = exportsnap-linux-x86_64-0.2.0::https://github.com/uwuclxdy/exportsnap/releases/download/v0.2.0/exportsnap-linux-x86_64
+	source = LICENSE-MIT-0.2.0::https://github.com/uwuclxdy/exportsnap/raw/v0.2.0/LICENSE-MIT
+	source = LICENSE-APACHE-0.2.0::https://github.com/uwuclxdy/exportsnap/raw/v0.2.0/LICENSE-APACHE
+	source = THIRD-PARTY-LICENSES-0.2.0::https://github.com/uwuclxdy/exportsnap/raw/v0.2.0/THIRD-PARTY-LICENSES
+	sha256sums = 710240adc1d29d1161bbc4d51b73159c442de2f5a3060648e49dc96eba9e3694
 	sha256sums = f7837932020c82b6f6d5075e43a0312f5cbf631aebb32476f039b3bc47acec43
 	sha256sums = 429c026d4b5ffeb625f1277ee0fd65d5a7b2808a7ea6399dd0f4534373c58ec5
-	sha256sums = b6f59af826756e1e8d4707b3589f2b1e68187fd99d73583bc3faec12770659db
+	sha256sums = cc76fb2caced8e7ac6d0909c0803a52cab28c8ab1f4ba3e2b2500a871f309e21
 
 pkgname = exportsnap
