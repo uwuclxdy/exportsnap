@@ -125,7 +125,8 @@ The overview screen tells you what it found. Move to the memories tab, press <kb
 | <kbd>↵</kbd> | start the run, or descend into the pane below |
 | <kbd>space</kbd> | toggle the focused checkbox |
 | <kbd>x</kbd> | dismiss a completion alert |
-| <kbd>q</kbd> | go back, or press twice to quit |
+| <kbd>ctrl</kbd>+<kbd>c</kbd> | quit from anywhere, even mid-edit or inside a menu, press once to arm, again to quit (changed work asks first) |
+| <kbd>q</kbd> | go back, or press twice to quit; while a text field is open, <kbd>q</kbd> types into it |
 
 ### Flags
 
