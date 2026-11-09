@@ -5,7 +5,11 @@
 //! Tab bar → Switching tabs sections, not against this crate.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use exportsnap::app::{App, Tab};
+use std::path::{Path, PathBuf};
+
+use exportsnap::app::{App, RunDefaults, Tab};
+use exportsnap::config::Config;
+use exportsnap::tui::screens::settings::SettingsLayers;
 use exportsnap::tui::theme::Tier;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
 
@@ -216,23 +220,29 @@ fn disarming_then_pressing_q_again_only_rearms() {
     assert!(app.is_running());
 }
 
-// ---- ctrl+c (skill: Keyboard grammar — quit immediately, from anywhere) ----
+// ---- ctrl+c (skill: Keyboard grammar — quit from anywhere in two presses) ----
 
 #[test]
-fn ctrl_c_quits_immediately() {
+fn ctrl_c_quits_in_two_presses() {
     // Also the shape legacy-encoded `ctrl+shift+c` arrives in — the terminal sends the bare byte
-    // 0x03 for both — so this must keep quitting however the copy chord is guarded below.
+    // 0x03 for both — so the legacy shape must still reach the quit binding however the copy
+    // chord is guarded below.
     let mut app = app();
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(app.is_running(), "the first press only arms");
+    assert!(app.is_quit_armed());
     press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(!app.is_running());
 }
 
 #[test]
 fn ctrl_c_still_quits_with_extra_modifiers_held() {
-    // "quit immediately, from anywhere" — the binding tests for CONTROL rather than equality,
-    // so a stray alt or super held alongside must not swallow the one guaranteed way out.
-    // SHIFT is the one exception, carved out below.
+    // "quit from anywhere" — the binding tests for CONTROL rather than equality, so a stray alt
+    // or super held alongside must not swallow the one guaranteed way out. SHIFT is the one
+    // exception, carved out below.
     let mut app = app();
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+    assert!(app.is_running(), "the first press only arms");
     press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::ALT);
     assert!(!app.is_running());
 }
@@ -621,4 +631,440 @@ fn x_dismissing_a_live_toast_disarms_the_quit() {
     assert!(!app.settings().toast_live(), "x dismisses the toast");
     assert!(!app.is_quit_armed(), "x dismissing the toast must also disarm the armed quit");
     assert!(app.is_running());
+}
+
+// ---- the loss warning (cloudy-tui: Loss warning; Keyboard grammar) ----
+//
+// Changed work is an open text edit whose draft differs from the value it opened from: the
+// settings form's two path rows and the overview's source row are the crate's only text inputs.
+// While such an edit is open, `q` types the letter into the field and every other key disarms an
+// armed quit, so a completing `q` can never see changed work — the reachable triggers are the
+// second ctrl+c (which arms inside an open edit) and a screen switch. The q completion carries
+// the same check defensively, for a screen whose changed work is not an open edit.
+//
+// The suspended drafts a switch leaves behind can only ever be UNCHANGED ones, so the ACTIVE
+// screen is the only holder of changed work any of these checks inspect.
+
+fn ctrl_c(app: &mut App) {
+    press_with(app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+}
+
+/// The settings tab, with an out-dir draft that differs from the value it opened from.
+fn changed_settings_draft(app: &mut App, typed: &str) {
+    jump(app, '6'); // settings
+    press(app, KeyCode::Enter); // begin editing the output-dir row, the form's first
+    for ch in typed.chars() {
+        press(app, KeyCode::Char(ch));
+    }
+    assert!(app.settings().is_editing(), "the draft must be open before the quit is attempted");
+}
+
+/// The overview tab, with a source draft that differs from the value it opened from.
+fn changed_overview_draft(app: &mut App, typed: &str) {
+    press(app, KeyCode::Char('s')); // focus the source row
+    press(app, KeyCode::Enter); // open the edit
+    for ch in typed.chars() {
+        press(app, KeyCode::Char(ch));
+    }
+    assert!(app.overview().is_editing(), "the draft must be open before the quit is attempted");
+}
+
+/// An app whose settings screen writes a real config file, so a save can succeed and be read
+/// back. The temp dir outlives the call, so the tuple must be kept for the assertion to see it.
+fn app_with_config_dir() -> (App, tempfile::TempDir) {
+    let config_dir = tempfile::TempDir::new().unwrap();
+    let layers = SettingsLayers { config_dir: Some(config_dir.path().to_path_buf()), ..SettingsLayers::defaults_for(Tier::Full) };
+    let app = App::start(Tier::Full, PathBuf::from("/nope"), RunDefaults::resolve(None, &Config::default(), Path::new("/nope")), layers);
+    (app, config_dir)
+}
+
+#[test]
+fn ctrl_c_past_a_changed_settings_draft_opens_the_loss_warning() {
+    let mut app = app();
+    changed_settings_draft(&mut app, "x");
+
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+
+    assert!(app.is_running(), "quitting past changed work must warn first, never drop it");
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => assert_eq!(warning.pending, exportsnap::app::PendingExit::Quit),
+        other => panic!("expected the loss warning over the quit, got {other:?}"),
+    }
+    assert!(app.settings().is_editing(), "the warning keeps the draft open behind it");
+}
+
+#[test]
+fn ctrl_c_past_a_changed_overview_draft_opens_the_loss_warning() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "/warned/src");
+
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+
+    assert!(app.is_running(), "quitting past changed work must warn first, never drop it");
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => assert_eq!(warning.pending, exportsnap::app::PendingExit::Quit),
+        other => panic!("expected the loss warning over the quit, got {other:?}"),
+    }
+    assert!(app.overview().is_editing(), "the warning keeps the draft open behind it");
+}
+
+#[test]
+fn the_loss_warning_save_button_commits_the_draft_then_quits() {
+    let (mut app, _config_dir) = app_with_config_dir();
+    changed_settings_draft(&mut app, "/warned/out");
+
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+    press(&mut app, KeyCode::Enter); // save is default-focused
+
+    assert!(!app.is_running(), "a valid save commits, then performs the quit");
+    assert!(app.modal().is_none());
+    assert!(!app.settings().is_editing(), "the commit closes the edit");
+    assert_eq!(app.settings().effective_out_root(), Path::new("/warned/out"), "the draft landed in the config");
+}
+
+#[test]
+fn the_loss_warning_discard_button_drops_the_draft_then_quits() {
+    // No config dir, so any commit would fail loudly and raise the toast — discard must write
+    // nothing at all.
+    let mut app = app();
+    changed_settings_draft(&mut app, "/dropped/out");
+
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+    press(&mut app, KeyCode::Up); // save -> discard
+    press(&mut app, KeyCode::Enter);
+
+    assert!(!app.is_running(), "discard drops the work, then performs the quit");
+    assert!(app.modal().is_none());
+    assert!(!app.settings().is_editing(), "discard drops the edit");
+    assert!(!app.settings().toast_live(), "discard commits nothing");
+}
+
+#[test]
+fn the_loss_warning_go_back_button_keeps_the_draft_and_the_app() {
+    let (mut app, _config_dir) = app_with_config_dir();
+    changed_settings_draft(&mut app, "/kept/out");
+
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+    press(&mut app, KeyCode::Up); // save -> discard
+    press(&mut app, KeyCode::Up); // discard -> go back
+    press(&mut app, KeyCode::Enter);
+
+    assert!(app.is_running());
+    assert!(app.modal().is_none());
+    assert!(!app.is_quit_armed(), "opening the warning disarms the quit; go back must not re-arm it");
+    assert!(app.settings().is_editing(), "go back keeps the edit open");
+    // The draft survived whole: committing it through the normal enter path writes it.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.settings().effective_out_root(), Path::new("/kept/out"), "the draft carried go back untouched");
+}
+
+#[test]
+fn esc_and_q_close_the_loss_warning_without_quitting() {
+    for closer in [KeyCode::Esc, KeyCode::Char('q')] {
+        let mut app = app();
+        changed_settings_draft(&mut app, "x");
+        ctrl_c(&mut app);
+        ctrl_c(&mut app);
+        assert!(matches!(app.modal(), Some(exportsnap::app::Modal::LossWarning(_))));
+
+        press(&mut app, closer);
+        assert!(app.modal().is_none(), "{closer:?} closes the warning");
+        assert!(app.is_running(), "closing the warning never quits");
+        assert!(app.settings().is_editing(), "the work stays as it was");
+        assert!(!app.is_quit_armed(), "closing the warning never re-arms the quit");
+    }
+}
+
+#[test]
+fn a_failing_save_closes_the_warning_without_quitting_or_dropping() {
+    // No config dir: the commit's write fails, and the contract's save rule is all-or-nothing —
+    // nothing commits or drops, the modal closes, nothing quits, and the failure surfaces.
+    let mut app = app();
+    changed_settings_draft(&mut app, "/failing/out");
+
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+    press(&mut app, KeyCode::Enter); // save, which cannot write
+
+    assert!(app.is_running(), "a failed save never quits");
+    assert!(app.modal().is_none(), "the modal closes on a failed save");
+    assert!(app.settings().is_editing(), "nothing commits or drops: the edit stays open");
+    assert!(app.settings().toast_live(), "the failure surfaces as this crate's DANGER toast");
+}
+
+// ---- switch away from changed work (cloudy-tui: Tab bar → Switching tabs; todo §21 row 3) ----
+//
+// The jump and the arrows share one switch path: unchanged work suspends silently as today, a
+// changed draft opens the loss warning in its switch form, and an `⌥<digit>` naming the screen
+// already shown is no switch at all. A completing ctrl+c over a switch warning turns it to its
+// quit form; `q` closes it like any modal.
+
+#[test]
+fn a_jump_away_from_an_unchanged_draft_suspends_it_silently() {
+    // The guard: the contract's suspension for unchanged work is untouched by the warning.
+    let mut app = app();
+    changed_overview_draft(&mut app, "");
+    assert!(app.overview().is_editing(), "the edit is open with nothing typed");
+
+    jump(&mut app, '3');
+
+    assert_eq!(app.active(), Tab::ChatMedia, "the jump completed");
+    assert!(app.overview().is_editing(), "the unchanged draft suspends with the screen it left");
+    assert!(app.modal().is_none(), "unchanged work never warns");
+}
+
+#[test]
+fn a_jump_away_from_a_changed_draft_opens_the_loss_warning_in_its_switch_form() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "/warned/src");
+
+    jump(&mut app, '3');
+
+    assert_eq!(app.active(), Tab::Overview, "the switch waits behind the warning");
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => {
+            assert_eq!(warning.pending, exportsnap::app::PendingExit::Switch(Tab::ChatMedia))
+        }
+        other => panic!("expected the loss warning over the jump, got {other:?}"),
+    }
+    assert!(app.overview().is_editing(), "the draft stays open behind the warning");
+}
+
+#[test]
+fn the_switch_warning_save_commits_and_completes_the_jump() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "/committed/src");
+
+    jump(&mut app, '3');
+    press(&mut app, KeyCode::Enter); // save is default-focused
+
+    assert_eq!(app.active(), Tab::ChatMedia, "a valid save commits, then performs the jump");
+    assert!(app.modal().is_none());
+    assert!(!app.overview().is_editing(), "the commit closes the edit");
+    assert_eq!(app.account().source(), Path::new("/committed/src"), "the committed source reached the re-probe");
+}
+
+#[test]
+fn the_switch_warning_discard_drops_the_draft_and_completes_the_jump() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "/dropped/src");
+
+    jump(&mut app, '3');
+    press(&mut app, KeyCode::Up); // save -> discard
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.active(), Tab::ChatMedia, "discard drops the work, then performs the jump");
+    assert!(app.modal().is_none());
+    assert!(!app.overview().is_editing(), "discard drops the edit");
+    assert_eq!(app.account().source(), Path::new(""), "the source was never committed");
+}
+
+#[test]
+fn the_switch_warning_go_back_cancels_the_jump() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "/kept/src");
+
+    jump(&mut app, '3');
+    press(&mut app, KeyCode::Up); // save -> discard
+    press(&mut app, KeyCode::Up); // discard -> go back
+    press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.active(), Tab::Overview, "go back cancels the switch");
+    assert!(app.modal().is_none());
+    assert!(app.overview().is_editing(), "the draft stays as it was");
+    assert!(!app.is_quit_armed());
+    // The draft survived whole: committing it through the normal enter path re-probes it.
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.account().source(), Path::new("/kept/src"), "the draft carried go back untouched");
+}
+
+#[test]
+fn an_arrow_mid_edit_stays_with_the_field_instead_of_switching() {
+    // The contract gives the arrows to the field while an input is being edited ("in edit mode
+    // ←/→ move the caret"; switching is "suspended while editing a text input"), so an open
+    // changed draft must not convert the caret keys into switches — the escape from an edit is
+    // the never-trapped ⌥<digit> jump. The switch path's own changed-work check stays live for
+    // the jump and defensive for the arrows.
+    let mut app = app();
+    changed_settings_draft(&mut app, "x");
+
+    press(&mut app, KeyCode::Right);
+
+    assert_eq!(app.active(), Tab::Settings, "the arrow never switched");
+    assert!(app.modal().is_none(), "the arrow never opened the loss warning");
+    assert!(app.settings().is_editing(), "the field keeps its caret keys");
+    assert!(app.is_running());
+}
+
+#[test]
+fn an_alt_digit_naming_the_active_screen_neither_switches_nor_warns() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "x");
+    ctrl_c(&mut app);
+    assert!(app.is_quit_armed(), "the ctrl+c arm is live");
+
+    jump(&mut app, '1'); // overview's own digit
+
+    assert_eq!(app.active(), Tab::Overview, "no switch happened");
+    assert!(app.modal().is_none(), "no warning either — an ⌥<digit> naming the shown screen is no switch");
+    assert!(!app.is_quit_armed(), "the arm disarms, as on any key");
+    assert!(app.overview().is_editing(), "the draft stays open");
+}
+
+#[test]
+fn a_second_ctrl_c_over_a_switch_warning_turns_it_to_its_quit_form() {
+    let mut app = app();
+    changed_overview_draft(&mut app, "/warned/src");
+    jump(&mut app, '3');
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => {
+            assert_eq!(warning.pending, exportsnap::app::PendingExit::Switch(Tab::ChatMedia))
+        }
+        other => panic!("expected the switch warning, got {other:?}"),
+    }
+
+    ctrl_c(&mut app); // arms; the modal keeps its state
+    ctrl_c(&mut app); // completes: the switch warning becomes the quit warning
+
+    assert!(app.is_running(), "the morphed warning still resolves the quit");
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => assert_eq!(warning.pending, exportsnap::app::PendingExit::Quit),
+        other => panic!("expected the quit form after the morph, got {other:?}"),
+    }
+    assert!(app.overview().is_editing(), "the draft stays open behind the morphed warning");
+}
+
+// ---- two-press ctrl+c (cloudy-tui: Keyboard grammar — the audit's quit row) ----
+
+#[test]
+fn any_other_key_disarms_a_ctrl_c_arm() {
+    for disarming in [KeyCode::Right, KeyCode::Char('z'), KeyCode::Esc] {
+        let mut app = app();
+        ctrl_c(&mut app);
+        assert!(app.is_quit_armed());
+
+        press(&mut app, disarming);
+        assert!(!app.is_quit_armed(), "{disarming:?} should disarm");
+        assert!(app.is_running());
+    }
+}
+
+#[test]
+fn a_q_arm_and_a_ctrl_c_arm_are_independent() {
+    // A completing press must be the SAME key that armed: a q arm completed by ctrl+c, or a
+    // ctrl+c arm completed by q, is the contract's named anti-pattern. The other key disarms and
+    // does its own job, so three presses total either way. Each direction scopes its own app.
+    {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.is_quit_armed());
+        ctrl_c(&mut app);
+        assert!(app.is_running(), "ctrl+c must not complete a q arm");
+        ctrl_c(&mut app);
+        assert!(!app.is_running(), "the ctrl+c arm completes on its own second press");
+    }
+
+    {
+        let mut app = app();
+        ctrl_c(&mut app);
+        assert!(app.is_quit_armed());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.is_running(), "q must not complete a ctrl+c arm");
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.is_running(), "the q arm completes on its own second press");
+    }
+}
+
+#[test]
+fn the_first_ctrl_c_keeps_a_modal_and_an_open_edit_intact() {
+    // The first press only arms — a modal keeps its state and an open edit is not touched, per
+    // the contract (Keyboard grammar: ctrl+c quits from anywhere in two presses). Each half
+    // scopes its own app.
+    {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.modal().is_some());
+        ctrl_c(&mut app);
+        assert!(app.modal().is_some(), "the modal keeps its state through the arm");
+        assert!(app.is_quit_armed());
+        assert!(app.is_running());
+        ctrl_c(&mut app);
+        assert!(!app.is_running());
+    }
+
+    {
+        let mut app = app();
+        jump(&mut app, '6');
+        press(&mut app, KeyCode::Enter); // begin editing the output-dir row
+        assert!(app.settings().is_editing());
+        ctrl_c(&mut app);
+        assert!(app.settings().is_editing(), "the open edit keeps its state through the arm");
+        assert!(app.is_quit_armed());
+        assert!(app.is_running());
+        ctrl_c(&mut app);
+        assert!(!app.is_running(), "an unchanged edit quits clean");
+    }
+}
+
+#[test]
+fn a_modal_key_disarms_an_armed_quit() {
+    // "any other key (q included) disarms and does its own job" holds for the keys a modal
+    // consumes too: an arm taken inside the help modal dies with the modal's esc, and the next
+    // ctrl+c only arms again. Each half scopes its own app.
+    {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.modal().is_some());
+        ctrl_c(&mut app);
+        assert!(app.is_quit_armed(), "ctrl+c arms inside the modal");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.modal().is_none());
+        assert!(!app.is_quit_armed(), "esc closed the modal and disarmed the arm with it");
+        assert!(app.is_running());
+        ctrl_c(&mut app);
+        assert!(app.is_quit_armed(), "the next ctrl+c only arms again");
+        assert!(app.is_running());
+    }
+
+    // The loss warning's own keys disarm as well: an arm taken inside the warning dies with go
+    // back instead of surviving into the resolved state.
+    {
+        let mut app = app();
+        changed_overview_draft(&mut app, "x");
+        jump(&mut app, '3');
+        ctrl_c(&mut app);
+        assert!(app.is_quit_armed());
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter); // go back
+        assert!(!app.is_quit_armed(), "go back did not carry the in-warning arm out");
+        assert!(app.overview().is_editing(), "the draft stays as it was");
+        assert!(app.is_running());
+    }
+}
+
+#[test]
+fn a_second_ctrl_c_over_the_quit_warning_does_nothing_more() {
+    let mut app = app();
+    changed_settings_draft(&mut app, "x");
+    ctrl_c(&mut app);
+    ctrl_c(&mut app);
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => assert_eq!(warning.pending, exportsnap::app::PendingExit::Quit),
+        other => panic!("expected the quit warning, got {other:?}"),
+    }
+
+    ctrl_c(&mut app); // arms again
+    ctrl_c(&mut app); // over a quit's warning: nothing more
+
+    assert!(app.is_running(), "the completing press does not bypass the open warning");
+    match app.modal() {
+        Some(exportsnap::app::Modal::LossWarning(warning)) => assert_eq!(warning.pending, exportsnap::app::PendingExit::Quit),
+        other => panic!("the warning stays as it was, got {other:?}"),
+    }
 }

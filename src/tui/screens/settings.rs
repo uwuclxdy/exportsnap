@@ -234,6 +234,19 @@ impl Settings {
         self.toast.is_some()
     }
 
+    /// Whether the open edit's draft differs from the value it opened from — the changed-work
+    /// query the app's loss-warning checks dispatch on (cloudy-tui: Tab bar → Switching tabs).
+    /// This screen's two path rows and the overview's source row are the crate's only text
+    /// inputs, so changed work exists here and there and nowhere else. No open edit, no changed
+    /// work.
+    #[must_use]
+    pub(crate) fn has_changed_work(&self) -> bool {
+        match &self.editing {
+            Some(session) => session.draft != session.opened,
+            None => false,
+        }
+    }
+
     /// The live toast, for the shell to render last.
     #[must_use]
     pub(crate) fn toast(&self) -> Option<&Toast> {
@@ -329,7 +342,27 @@ impl Settings {
         }
         .unwrap_or_default();
         let caret = draft.chars().count();
-        self.editing = Some(EditSession { row, draft, caret });
+        self.editing = Some(EditSession { row, opened: draft.clone(), draft, caret });
+    }
+
+    /// Cancels the open edit exactly as `esc` does — the draft dropped, the edit closed. The
+    /// loss warning's discard runs this same path, so the two can never disagree about what a
+    /// dropped draft leaves behind.
+    pub(crate) fn discard_edit(&mut self) {
+        self.editing = None;
+    }
+
+    /// The `enter` path's commit, for the loss warning's save: takes the open session and commits
+    /// its draft exactly as `enter` does, answering whether it landed. A failed write restores
+    /// the session — nothing commits or drops, the contract's save rule is all-or-nothing — and
+    /// the failure surfaces as this screen's own DANGER toast.
+    pub(crate) fn commit_open_edit(&mut self) -> bool {
+        let Some(session) = self.editing.take() else { return true };
+        if self.commit_input(session.row, session.draft.clone()) {
+            return true;
+        }
+        self.editing = Some(session);
+        false
     }
 
     /// One editing key against the live session: printable chars insert at the caret,
@@ -340,13 +373,12 @@ impl Settings {
     fn handle_edit_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-                let Some(session) = self.editing.take() else { return false };
-                self.commit_input(session.row, session.draft);
+                self.commit_open_edit();
                 true
             }
             KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
                 // Cancel: the draft is discarded; the next `enter` starts from the file layer.
-                self.editing = None;
+                self.discard_edit();
                 true
             }
             KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
@@ -369,17 +401,18 @@ impl Settings {
     /// The write-level half of the flag pin, and the backstop: `begin_edit` refuses to open a
     /// session on a pinned row, so a live session on one cannot exist — the guard still
     /// refuses the write itself, so no route gains the file a line from a pinned row's commit.
-    fn commit_input(&mut self, row: FormRow, draft: String) {
+    /// Answers whether the draft landed, so the `enter` path can restore it when it did not.
+    fn commit_input(&mut self, row: FormRow, draft: String) -> bool {
         if self.pin_reason(row).is_some() {
-            return;
+            return false;
         }
         let mut config = self.layers.config.clone();
         match row {
             FormRow::OutputDir => config.out_dir = option_path(&draft),
             FormRow::Ffmpeg => config.ffmpeg_path = option_path(&draft),
-            FormRow::Theme | FormRow::Transcode | FormRow::Overlay => return,
+            FormRow::Theme | FormRow::Transcode | FormRow::Overlay => return false,
         }
-        self.write(config);
+        self.write(config)
     }
 
     /// Cycles the focused state row, writing the next value after the EFFECTIVE one. A row the
@@ -411,21 +444,23 @@ impl Settings {
     /// the rows keep reading the file state they wrote. A failed write is a DANGER toast,
     /// never silent; a successful one clears any live failure toast, because the DANGER
     /// resolves with the cause that raised it (cloudy-tui: a failed write is a surfaced
-    /// error, and the toast is this app's one notification surface).
-    fn write(&mut self, config: Config) {
+    /// error, and the toast is this app's one notification surface). Answers success, so the
+    /// `enter` path can keep the draft when the write did not land.
+    fn write(&mut self, config: Config) -> bool {
         let message = match &self.layers.config_dir {
             Some(dir) => match config::write(dir, &config) {
                 Ok(()) => {
                     self.layers.config = config;
                     self.toast = None;
                     self.committed = true;
-                    return;
+                    return true;
                 }
                 Err(error) => error.to_string(),
             },
             None => "no config dir to write; run exportsnap with a home dir set".to_owned(),
         };
         self.toast = Some(Toast { message, ticks_left: DANGER_TOAST_TICKS });
+        false
     }
 
     // ---- the effective values ----
@@ -519,11 +554,15 @@ impl SettingsLayers {
     }
 }
 
-/// One live text edit: the row being edited, the draft, and the caret as a CHAR index into
-/// it. Chars rather than bytes so a wide or multi-byte character never splits a grapheme.
+/// One live text edit: the row being edited, the draft, the value the draft opened from, and
+/// the caret as a CHAR index into it. Chars rather than bytes so a wide or multi-byte
+/// character never splits a grapheme.
 #[derive(Debug)]
 struct EditSession {
     row: FormRow,
+    /// The value the edit opened from — the seeded draft itself. Changed work is an open edit
+    /// whose draft differs from this ([`Settings::has_changed_work`]).
+    opened: String,
     draft: String,
     caret: usize,
 }
@@ -975,7 +1014,7 @@ mod tests {
 
     #[test]
     fn the_edit_keys_insert_delete_and_move_the_caret() {
-        let mut session = EditSession { row: FormRow::OutputDir, draft: String::new(), caret: 0 };
+        let mut session = EditSession { row: FormRow::OutputDir, opened: String::new(), draft: String::new(), caret: 0 };
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         assert!(edit_session_key(&mut session, key(KeyCode::Char('a'))));
         assert!(edit_session_key(&mut session, key(KeyCode::Char('b'))));
@@ -999,7 +1038,8 @@ mod tests {
 
     #[test]
     fn ctrl_w_kills_the_word_before_the_caret() {
-        let mut session = EditSession { row: FormRow::OutputDir, draft: "one two three".to_owned(), caret: 13 };
+        let mut session =
+            EditSession { row: FormRow::OutputDir, opened: "one two three".to_owned(), draft: "one two three".to_owned(), caret: 13 };
         let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert!(edit_session_key(&mut session, ctrl_w));
         assert_eq!(session.draft, "one two ", "the word and the space before it, like readline");
@@ -1054,7 +1094,7 @@ mod tests {
     fn a_multi_byte_character_never_splits() {
         // The caret is a char index: a wide char is 2 display cells but one caret step, so
         // backspacing over it removes it whole, and the draft is intact between edits.
-        let mut session = EditSession { row: FormRow::OutputDir, draft: "a中b".to_owned(), caret: 3 };
+        let mut session = EditSession { row: FormRow::OutputDir, opened: "a中b".to_owned(), draft: "a中b".to_owned(), caret: 3 };
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         assert!(edit_session_key(&mut session, key(KeyCode::Backspace)));
         assert_eq!(session.draft, "a中");

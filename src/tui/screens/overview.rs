@@ -231,6 +231,16 @@ impl Overview {
         matches!(self.source_focus, SourceFocus::Editing(_))
     }
 
+    /// Whether the open source draft differs from the value it opened from — the changed-work
+    /// query the app's loss-warning checks dispatch on (cloudy-tui: Tab bar → Switching tabs).
+    /// This screen's source row and the settings form's two path rows are the crate's only text
+    /// inputs, so changed work exists here and there and nowhere else. Merely holding the caret
+    /// is not editing, so a selected row answers false.
+    #[must_use]
+    pub(crate) fn has_changed_work(&self) -> bool {
+        matches!(&self.source_focus, SourceFocus::Editing(session) if session.draft != session.opened)
+    }
+
     /// This screen's keys. While the source row is being edited, its editing keys are consumed and a
     /// key it does not own — a `⌥<digit>` jump above all — comes back unhandled so the shell sees it.
     /// Otherwise [`SOURCE_HOTKEY`] lands the caret on the row, and on the row `enter` opens the edit
@@ -252,7 +262,7 @@ impl Overview {
                     // retyped; a first-time open has no source and starts empty.
                     let draft = self.source.as_ref().map_or_else(String::new, |path| path.to_string_lossy().into_owned());
                     let caret = draft.chars().count();
-                    self.source_focus = SourceFocus::Editing(EditSession { draft, caret });
+                    self.source_focus = SourceFocus::Editing(EditSession { opened: draft.clone(), draft, caret });
                     OverviewKey::Handled
                 }
                 KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
@@ -273,14 +283,12 @@ impl Overview {
     /// suspended instead of trapping the user until `esc` discards it.
     fn handle_edit_key(&mut self, key: KeyEvent) -> OverviewKey {
         match key.code {
-            KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-                let SourceFocus::Editing(session) = std::mem::replace(&mut self.source_focus, SourceFocus::Selected) else {
-                    return OverviewKey::Unhandled;
-                };
-                if session.draft.is_empty() { OverviewKey::Handled } else { OverviewKey::Reprobbed(PathBuf::from(session.draft)) }
-            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::NONE => match self.commit_open_edit() {
+                Some(path) => OverviewKey::Reprobbed(path),
+                None => OverviewKey::Handled,
+            },
             KeyCode::Esc if key.modifiers == KeyModifiers::NONE => {
-                self.source_focus = SourceFocus::Selected;
+                self.discard_edit();
                 OverviewKey::Handled
             }
             _ => {
@@ -288,6 +296,23 @@ impl Overview {
                 if edit_session_key(session, key) { OverviewKey::Handled } else { OverviewKey::Unhandled }
             }
         }
+    }
+
+    /// Commits the open source draft exactly as `enter` does — the edit closes, and a non-empty
+    /// draft comes back as the path to re-probe. The loss warning's save runs this same path; a
+    /// closed edit or an empty draft has nothing to commit and answers `None`.
+    pub(crate) fn commit_open_edit(&mut self) -> Option<PathBuf> {
+        let SourceFocus::Editing(session) = std::mem::replace(&mut self.source_focus, SourceFocus::Selected) else {
+            return None;
+        };
+        (!session.draft.is_empty()).then(|| PathBuf::from(session.draft))
+    }
+
+    /// Cancels the open source edit exactly as `esc` does — the draft dropped, the row back to
+    /// selected. The loss warning's discard runs this same path, so the two can never disagree
+    /// about what a dropped draft leaves behind.
+    pub(crate) fn discard_edit(&mut self) {
+        self.source_focus = SourceFocus::Selected;
     }
 }
 
@@ -444,11 +469,15 @@ enum SourceFocus {
     Editing(EditSession),
 }
 
-/// One live source-path edit: the draft and the caret as a CHAR index into it. Chars rather than
-/// bytes so a wide or multi-byte character never splits a grapheme (the same model the settings
-/// form keeps; that one is private to settings.rs, which is out of scope for this screen).
+/// One live source-path edit: the draft, the value the draft opened from, and the caret as a
+/// CHAR index into it. Chars rather than bytes so a wide or multi-byte character never splits a
+/// grapheme (the same model the settings form keeps; that one is private to settings.rs, which
+/// is out of scope for this screen).
 #[derive(Debug, Clone)]
 struct EditSession {
+    /// The value the edit opened from — the seeded draft itself. Changed work is an open edit
+    /// whose draft differs from this ([`Overview::has_changed_work`]).
+    opened: String,
     draft: String,
     caret: usize,
 }

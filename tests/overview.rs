@@ -586,10 +586,12 @@ fn a_committed_path_reprobes_the_source_through_the_startup_composition() {
 }
 
 #[test]
-fn an_alt_digit_jumps_away_from_the_open_path_input_without_discarding_it() {
-    // `⌥<digit>` never suspends (cloudy-tui: Tab bar → Switching tabs), so the jump must leave the
-    // open path input and switch tabs, keeping the draft suspended rather than discarded. The
-    // overview's input must not swallow the jump the way it used to.
+fn a_jump_away_from_a_changed_path_draft_waits_behind_the_loss_warning() {
+    // `⌥<digit>` never suspends CHANGED work (cloudy-tui: Tab bar → Switching tabs): the jump
+    // waits behind the loss warning instead of switching, and go back returns to the input with
+    // its draft — the survival the old silent suspend handed over, now behind the warning the
+    // contract requires. An unchanged draft still suspends silently; that half is pinned by
+    // tests/app.rs's a_jump_away_from_an_unchanged_draft_suspends_it_silently.
     let mut app = App::new(Tier::Full);
     let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
 
@@ -599,17 +601,26 @@ fn an_alt_digit_jumps_away_from_the_open_path_input_without_discarding_it() {
     app.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
 
     app.handle_event(&key(KeyCode::Char('2'), KeyModifiers::ALT));
-    assert_eq!(app.active(), Tab::Memories, "⌥2 jumps tabs even with the input open");
+    assert_eq!(app.active(), Tab::Overview, "the changed draft waits behind the warning");
+    assert!(
+        matches!(
+            app.modal(),
+            Some(exportsnap::app::Modal::LossWarning(warning)) if warning.pending == exportsnap::app::PendingExit::Switch(Tab::Memories)
+        ),
+        "the warning names the jump it is holding"
+    );
 
-    // Jump back: the draft survived the round trip, so the input is still open.
-    app.handle_event(&key(KeyCode::Char('1'), KeyModifiers::ALT));
-    assert_eq!(app.active(), Tab::Overview);
+    // Go back: the draft survived, so the input is still open.
+    app.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.modal().is_none());
 
     let mut terminal = Terminal::new(TestBackend::new(WIDE, TALL)).unwrap();
     terminal.draw(|frame| shell::render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     let frame: String = (0..TALL).map(|y| row(buffer, y)).collect();
-    assert!(frame.contains("✎"), "the input is still open after the jump round trip: {frame}");
+    assert!(frame.contains("✎"), "the input is still open after go back: {frame}");
 }
 
 // ---- the environment half ----

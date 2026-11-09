@@ -73,6 +73,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Modal::Help { .. } => {
                 footer::help_hints(&palette, widgets::help_scrollable(&app.help_sections(), area.height), footer_area.width)
             }
+            Modal::LossWarning(_) => footer::loss_warning_hints(&palette, footer_area.width),
         }
     } else if app.descended() {
         // The history formats pane binds keys the generic descended set does not advertise —
@@ -97,7 +98,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             _ => footer::plain_hints(&palette, app.has_actions(), footer_area.width),
         }
     };
-    frame.render_widget(footer::render(&palette, app.is_quit_armed(), app.alert(), hints, footer_area.width), footer_area);
+    frame.render_widget(footer::render(&palette, app.quit_armed_key(), app.alert(), hints, footer_area.width), footer_area);
 
     // Recomputed from the live frame size every draw, so it self-clears on resize rather than
     // living on as a stored notification. At most one banner per frame (skill: Banner), so a
@@ -133,6 +134,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         match modal {
             Modal::ActionMenu(menu) => widgets::render_action_menu(frame, &palette, &menu.labels, &menu.hotkeys, menu.selected, area),
             Modal::Help { scroll } => widgets::render_help_modal(frame, &palette, &app.help_sections(), *scroll, area),
+            // The warning names the screen holding the work, which is the ACTIVE one: while the
+            // modal is open no switch can complete, so the screen it opened over cannot change.
+            Modal::LossWarning(warning) => widgets::render_loss_warning(frame, &palette, warning, app.active().label(), area),
         }
     }
 }

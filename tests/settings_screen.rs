@@ -742,19 +742,30 @@ fn x_types_a_letter_while_editing_and_dismisses_afterwards() {
 }
 
 #[test]
-fn a_jump_away_and_back_preserves_the_edit_session() {
+fn a_jump_away_from_a_changed_draft_waits_behind_the_loss_warning_and_go_back_keeps_it() {
+    // The old silent suspend dropped a changed draft behind an unguarded jump; the contract
+    // (Tab bar → Switching tabs) holds the switch behind the loss warning, and go back keeps the
+    // session exactly as the suspend did.
     let mut app = on_settings();
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('a'));
     press_alt(&mut app, KeyCode::Char('1'));
-    assert_eq!(app.active(), Tab::Overview);
-    assert!(app.settings().is_editing(), "a jump away does not cancel the edit");
+    assert_eq!(app.active(), Tab::Settings, "the changed draft waits behind the warning");
+    assert!(
+        matches!(
+            app.modal(),
+            Some(exportsnap::app::Modal::LossWarning(warning)) if warning.pending == exportsnap::app::PendingExit::Switch(Tab::Overview)
+        ),
+        "the warning names the jump it is holding"
+    );
 
-    press_alt(&mut app, KeyCode::Char('6'));
-    assert_eq!(app.active(), Tab::Settings);
-    assert!(app.settings().is_editing(), "the session survives the round trip");
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.modal().is_none());
+    assert!(app.settings().is_editing(), "go back does not cancel the edit");
     let terminal = draw(&mut app, 80, 20);
-    assert!(row(terminal.backend().buffer(), 2).starts_with("│ ✎ output dir  a"), "the draft survived the round trip");
+    assert!(row(terminal.backend().buffer(), 2).starts_with("│ ✎ output dir  a"), "the draft survived go back");
 }
 
 #[test]

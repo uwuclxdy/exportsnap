@@ -11,6 +11,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::theme::{Palette, glyph};
+use crate::app::QuitKey;
 use crate::tui::alert::{AlertKind, RunAlert};
 use crate::tui::format::{cells, truncate_prose};
 
@@ -20,12 +21,15 @@ const HINT_GAP: &str = "   ";
 /// The footer row for this frame: the caller's hint set, unless an alert or the armed-quit prompt
 /// claims the row. The hint set is computed per tab by the shell (cloudy-tui: a hint advertises
 /// only keys that do something), so `render` takes it ready-made rather than choosing between
-/// hardcoded sets here. `width` is the footer row's cells: the run alert fits its message into
-/// them, since a `Line` past the row clips at the terminal edge with no marker.
+/// hardcoded sets here. `armed` carries the key the 2-step quit is armed with, so the prompt can
+/// name the key that would complete it. `width` is the footer row's cells: the run alert fits its
+/// message into them, since a `Line` past the row clips at the terminal edge with no marker.
 #[must_use]
-pub fn render(palette: &Palette, quit_armed: bool, alert: Option<&RunAlert>, hints: Line<'static>, width: u16) -> Line<'static> {
-    if quit_armed {
-        quit_alert(palette)
+pub(crate) fn render(
+    palette: &Palette, armed: Option<QuitKey>, alert: Option<&RunAlert>, hints: Line<'static>, width: u16,
+) -> Line<'static> {
+    if let Some(key) = armed {
+        quit_alert(palette, key)
     } else if let Some(alert) = alert {
         completion_alert(palette, alert, width)
     } else {
@@ -163,6 +167,16 @@ pub(crate) fn help_hints(palette: &Palette, scrollable: bool, width: u16) -> Lin
     hint_line(palette, &trim_hints(&groups, width))
 }
 
+/// The hint set while the loss warning owns input: arrows move the button caret, `↵` applies the
+/// focused button, `esc` and `q` both go back — the action menu's set with the warning's verbs,
+/// and like it no switch/quit group while the modal owns every key but `ctrl+c` (cloudy-tui:
+/// Modals — the footer hint bar is context-aware while a modal is open).
+pub(crate) fn loss_warning_hints(palette: &Palette, width: u16) -> Line<'static> {
+    let up_down = format!("{}{}", glyph::KEY_UP, glyph::KEY_DOWN);
+    let enter = glyph::KEY_ENTER.to_string();
+    hint_line(palette, &trim_hints(&[(&up_down, "move"), (&enter, "apply"), ("esc", "cancel"), ("q", "back")], width))
+}
+
 /// The history tab's top-level hint set: the shell's switch and quit groups, plus the picker's
 /// own keys. The toggle hints are DERIVED from the picker holding rows for them to act on —
 /// derived, never copied per branch — so a failed or empty load leaves a row that advertises
@@ -190,12 +204,18 @@ pub(crate) fn settings_edit_hints(palette: &Palette, width: u16) -> Line<'static
     hint_line(palette, &trim_hints(&[(&arrows, "move"), (&enter, "commit"), ("esc", "cancel")], width))
 }
 
-/// The armed 2-step quit prompt: glyph-only line on the base `BG`; the absent background tint is
-/// what tells it apart from a banner. Short by construction, so it needs no cut.
-fn quit_alert(palette: &Palette) -> Line<'static> {
+/// The armed 2-step quit prompt, naming the key that armed it — a `ctrl+c` arm completes only on
+/// `⌃c`, so the copy must never send the reader to a key that would disarm instead (cloudy-tui:
+/// Keyboard grammar — one arm per key). Glyph-only line on the base `BG`; the absent background
+/// tint is what tells it apart from a banner. Short by construction, so it needs no cut.
+fn quit_alert(palette: &Palette, armed: QuitKey) -> Line<'static> {
+    let named = match armed {
+        QuitKey::Q => "q",
+        QuitKey::CtrlC => "⌃c",
+    };
     Line::from(vec![
         Span::styled(format!(" {} ", glyph::ALERT_MARKER), Style::new().fg(palette.warning)),
-        Span::styled("press q again to quit", Style::new().fg(palette.text_dim)),
+        Span::styled(format!("press {named} again to quit"), Style::new().fg(palette.text_dim)),
     ])
 }
 

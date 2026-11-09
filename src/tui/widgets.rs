@@ -18,6 +18,7 @@ use ratatui::widgets::{
 
 use super::format::{binary_bytes, cells, middle_ellipsis, right_pad};
 use super::theme::{Palette, glyph};
+use crate::app::{LossWarning, PendingExit, WarningButton};
 use crate::export::env::Environment;
 use crate::export::manifest::ItemStatus;
 
@@ -668,6 +669,70 @@ pub(crate) fn render_help_modal(frame: &mut Frame, palette: &Palette, sections: 
 /// past 80% of the terminal height makes the modal scrollable).
 fn modal_height_cap(area_height: u16) -> u16 {
     u16::try_from(u32::from(area_height) * 4 / 5).unwrap_or(u16::MAX)
+}
+
+/// The loss warning (cloudy-tui: Modals → Loss warning), rendered through the shared modal shell:
+/// two body lines — the screen holding the work, then the question its buttons answer — over the
+/// blank row and the three-button group the shell's example keeps between them. Sized adaptively
+/// with the shell's own 60% width cap.
+pub(crate) fn render_loss_warning(frame: &mut Frame, palette: &Palette, warning: &LossWarning, tab_label: &str, area: Rect) {
+    let body = format!("there are unsaved edits on the {tab_label} tab.");
+    let question = match warning.pending {
+        // The contract glosses the quit question terse — "turns it to its quit form
+        // (`quitting?`)" — while the switch form's names what its buttons save.
+        PendingExit::Quit => "quitting?",
+        PendingExit::Switch(_) => "save them before switching?",
+    };
+    let (button_spans, button_cells) = warning_buttons(palette, warning.selected);
+
+    let content_width = cells(&body).max(cells(question)).max(button_cells);
+    // Two body lines, the blank row, the button group — the shell example's four content rows.
+    let content_height = 4;
+    let inner = modal_shell(frame, palette, "warning", u16::try_from(content_width).unwrap_or(u16::MAX), content_height, area);
+
+    // The buttons are right-aligned as a group to the modal's inner-right edge; a plain filler
+    // span carries the leftover gap on the left, exactly like the selected-row tint's filler.
+    let pad = " ".repeat(usize::from(inner.width).saturating_sub(button_cells));
+    let mut buttons = vec![Span::raw(pad)];
+    buttons.extend(button_spans);
+
+    let body_style = Style::new().fg(palette.text);
+    let rows = vec![
+        Line::from(Span::styled(body, body_style)),
+        Line::from(Span::styled(question.to_owned(), body_style)),
+        Line::default(),
+        Line::from(buttons),
+    ];
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// The loss warning's three buttons as one group: always-on ` label ` insets, a 1-cell gap
+/// between buttons, and only the highlight background toggling on focus — every button's column
+/// position is fixed across selection moves (cloudy-tui: Modals → Buttons). Focused is the neutral
+/// inverse block (`fg = BG`, `bg = TEXT`, no bold — the `▐ ▌` are notation, never printed glyphs);
+/// `discard` is the destructive button and stays `DANGER` while unfocused, its siblings `TEXT_DIM`.
+/// Answers the group's total cell width, the right-alignment pad's other term.
+fn warning_buttons(palette: &Palette, selected: WarningButton) -> (Vec<Span<'static>>, usize) {
+    const GAP: &str = " ";
+    let mut spans = Vec::new();
+    let mut total = 0;
+    for (index, button) in WarningButton::ALL.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(GAP));
+            total += GAP.len();
+        }
+        let style = if button == selected {
+            Style::new().fg(palette.contrast_text()).bg(palette.text)
+        } else if button.destructive() {
+            Style::new().fg(palette.danger)
+        } else {
+            Style::new().fg(palette.text_dim)
+        };
+        let label = format!(" {} ", button.label());
+        total += cells(&label);
+        spans.push(Span::styled(label, style));
+    }
+    (spans, total)
 }
 
 /// The number of lines a help modal's sections render as: one header row plus its rows per section,

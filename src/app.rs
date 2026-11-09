@@ -159,8 +159,11 @@ impl RunDefaults {
 }
 
 /// A modal that owns input while open (cloudy-tui: Modals). Exactly one at a time: `a` opens the
-/// action menu, `?` the help modal, and `q`/`esc`/`?` close whichever is open. While one is up,
-/// every key but `ctrl+c` is the modal's — no tab switch, no quit arming, no `⌥<digit>` jump.
+/// action menu, `?` the help modal, a quit or switch past changed work opens the loss warning,
+/// and `q`/`esc`/`?` close whichever is open. While one is up, every key but `ctrl+c` is the
+/// modal's — no tab switch, no `⌥<digit>` jump, and each of its keys disarms an armed quit before
+/// its own job; `ctrl+c` is the one exception, handled ahead of the router so it arms and
+/// completes inside an open modal.
 #[derive(Debug)]
 pub enum Modal {
     ActionMenu(ActionMenuState),
@@ -169,6 +172,67 @@ pub enum Modal {
     Help {
         scroll: u16,
     },
+    LossWarning(LossWarning),
+}
+
+/// What the loss warning resolves before performing it: the quit, or the switch to the tab fixed
+/// at the keypress that opened the warning (cloudy-tui: Modals → Loss warning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingExit {
+    Quit,
+    Switch(Tab),
+}
+
+/// Which loss-warning button holds the caret. `save` is default-focused; `discard` is the
+/// destructive one and stays `DANGER` while unfocused. Left to right: `go back · discard · save`
+/// (cloudy-tui: Modals → Loss warning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningButton {
+    GoBack,
+    Discard,
+    Save,
+}
+
+impl WarningButton {
+    /// Button order left to right, which is also the wrap order the `↑`/`↓` keys walk.
+    pub(crate) const ALL: [Self; 3] = [Self::GoBack, Self::Discard, Self::Save];
+
+    /// The lowercase label the button renders; the caller adds the always-on ` label ` insets.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::GoBack => "go back",
+            Self::Discard => "discard",
+            Self::Save => "save",
+        }
+    }
+
+    /// Whether the button is the destructive one: `DANGER` while unfocused, a `DANGER` inverse
+    /// block when focused (cloudy-tui: Modals — the destructive cue persists either way).
+    pub(crate) const fn destructive(self) -> bool {
+        matches!(self, Self::Discard)
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|button| *button == self).unwrap_or(0)
+    }
+}
+
+/// The changed-work warning a quit or a screen switch raises (cloudy-tui: Modals → Loss warning).
+/// This crate's drafts are all savable, so the contract's two-button form — for changed work none
+/// of which can save — has no instance here.
+#[derive(Debug)]
+pub struct LossWarning {
+    pub pending: PendingExit,
+    pub selected: WarningButton,
+}
+
+/// The key a 2-step quit is armed with: the completing press must be the SAME key that armed
+/// (cloudy-tui: a `ctrl+c` arm completed by `q`, or a `q` arm by `ctrl+c`, is the named
+/// anti-pattern). Any other key disarms and does its own job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuitKey {
+    Q,
+    CtrlC,
 }
 
 /// The action menu's captured state: the actions available when `a` was pressed, their
@@ -210,7 +274,9 @@ pub struct App {
     /// `KeyCode::Modifier` press/release events the kitty keyboard protocol reports; absent
     /// those (an unsupported terminal) it never leaves `false` and the overlay never renders.
     alt_held: bool,
-    quit_armed: bool,
+    /// The key the 2-step quit is armed with, `None` when disarmed. The completing press must be
+    /// the same key ([`QuitKey`]); `is_quit_armed` is the boolean shape the shell's footer reads.
+    quit_armed: Option<QuitKey>,
     running: bool,
     /// The open modal, if any. `None` while input goes to the active screen.
     modal: Option<Modal>,
@@ -246,7 +312,7 @@ impl App {
             palette: Palette::new(tier),
             active: Tab::Overview,
             alt_held: false,
-            quit_armed: false,
+            quit_armed: None,
             running: true,
             modal: None,
             activity: [None; Tab::ALL.len()],
@@ -589,7 +655,27 @@ impl App {
 
     #[must_use]
     pub const fn is_quit_armed(&self) -> bool {
+        self.quit_armed.is_some()
+    }
+
+    /// Which key the 2-step quit is armed with, for the footer's per-key prompt — the copy must
+    /// name the key that would complete the arm, never a key that would disarm it (cloudy-tui:
+    /// one arm per key).
+    #[must_use]
+    pub(crate) const fn quit_armed_key(&self) -> Option<QuitKey> {
         self.quit_armed
+    }
+
+    /// Whether the ACTIVE screen holds changed work: an open text edit whose draft differs from
+    /// the value it opened from (cloudy-tui: Tab bar → Switching tabs). Only the settings form's
+    /// two path rows and the overview's source row are text inputs, so only those two screens can
+    /// answer true; every other screen has no edit to hold and answers false.
+    fn has_changed_work(&self) -> bool {
+        match self.active {
+            Tab::Settings => self.settings.has_changed_work(),
+            Tab::Overview => self.overview.has_changed_work(),
+            _ => false,
+        }
     }
 
     #[must_use]
@@ -793,7 +879,7 @@ impl App {
         // parser routes around the case fixup. Doing better needs a signal crossterm does not
         // carry.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::SHIFT) {
-            self.running = false;
+            self.handle_ctrl_c();
             return;
         }
 
@@ -805,11 +891,13 @@ impl App {
         // is being edited it is a letter the field types — the dismissal keys are suspended exactly
         // like `q`. The dismissal stays live while a modal owns input: a toast or footer alert can
         // be live beneath an open action menu or help modal, and `x` must still reach them
-        // (cloudy-tui: Dismissal precedence) without disturbing the modal's own keys below.
+        // (cloudy-tui: Dismissal precedence) without disturbing the modal's own keys below — no
+        // field receives the letter then, even when the work behind the modal is mid-edit (the
+        // loss warning keeps its draft open).
         if matches!(key.code, KeyCode::Char('x' | 'X')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             let editing_input = self.editing_text();
-            if (!editing_input && self.settings.dismiss_toast()) || self.dismiss_alert() {
-                self.quit_armed = false;
+            if (self.modal.is_some() || !editing_input) && (self.settings.dismiss_toast() || self.dismiss_alert()) {
+                self.quit_armed = None;
                 return;
             }
         }
@@ -828,27 +916,42 @@ impl App {
         if matches!(key.code, KeyCode::Char('q' | 'Q')) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             if self.descended() {
                 self.ascend_active();
-                self.quit_armed = false;
+                self.quit_armed = None;
+                return;
+            }
+            // A completing press must be the same key that armed (cloudy-tui: a `q` arm completed
+            // by `ctrl+c`, or the reverse, is the named anti-pattern). The changed-work check is
+            // defensive: while a text input is open `q` is a letter the field types — the branch
+            // below — so no arm is ever laid down there, and every other key disarms before an
+            // edit could open over an armed quit. No reachable state carries changed work into
+            // this branch; it ships so the two arms answer the same question.
+            if self.quit_armed == Some(QuitKey::Q) {
+                self.quit_armed = None;
+                if self.has_changed_work() {
+                    self.modal = Some(Modal::LossWarning(LossWarning { pending: PendingExit::Quit, selected: WarningButton::Save }));
+                } else {
+                    self.running = false;
+                }
                 return;
             }
             // While a text input is being edited (settings or the overview's path input), `q` is a
             // letter the field types — the same suspension a descended pane gets, without the
             // ascend step because neither screen has a pane. The screen must receive the key, so
-            // this falls through.
-            let editing_input = self.editing_text();
-            if !editing_input {
+            // this falls through, and no arm is laid while the field owns the key.
+            if !self.editing_text() {
                 // `q` at the top level arms a 2-step quit and never quits in one press. Hotkeys are
                 // case-insensitive, so caps lock can't strand a user with no way out.
-                if self.quit_armed {
-                    self.running = false;
-                } else {
-                    self.quit_armed = true;
-                }
+                self.quit_armed = Some(QuitKey::Q);
                 return;
             }
         }
 
-        self.quit_armed = false;
+        // `←`/`→` fall through to the screen, which consumes them while an input is being edited —
+        // in edit mode they are the field's caret keys, and switching is suspended there
+        // (cloudy-tui: edit mode; Tab bar → Switching tabs). An edit is left by the never-trapped
+        // `⌥<digit>` jump, below, whose switch still asks first over changed work.
+
+        self.quit_armed = None;
 
         // `?` opens the help modal and `a` the action menu (cloudy-tui: Action menu; Help modal).
         // Both are suspended while a text input is being edited, where they are letters the field
@@ -897,23 +1000,63 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
-                self.switch_to(self.active.previous());
-            }
-            KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
-                self.switch_to(self.active.next());
-            }
+            KeyCode::Left if key.modifiers == KeyModifiers::NONE => self.request_switch(self.active.previous()),
+            KeyCode::Right if key.modifiers == KeyModifiers::NONE => self.request_switch(self.active.next()),
             KeyCode::Char(c) if key.modifiers == KeyModifiers::ALT => {
                 if let Some(tab) = c.to_digit(10).and_then(Tab::from_jump_digit) {
-                    // A jump ascends the pane it is LEAVING (cloudy-tui: the jump ascends
-                    // implicitly), and moving focus away disarms the quit like any other key.
-                    // Ascending every screen instead would reset a pane the user is not on.
-                    self.ascend_active();
-                    self.switch_to(tab);
+                    self.request_switch(tab);
                 }
             }
             _ => {}
         }
+    }
+
+    /// The one switch path: the shell's `←`/`→` arms and the `⌥<digit>` jump both route through
+    /// it (cloudy-tui: Tab bar → Switching tabs). An `⌥<digit>` naming the screen already shown
+    /// is no switch — it neither switches nor opens the warning. Changed work is never suspended:
+    /// the loss warning holds the switch with the target fixed at this keypress. Unchanged work
+    /// suspends exactly as before — the pane being left ascends (the jump ascends implicitly;
+    /// ascending every screen instead would reset a pane the user is not on), the draft keeps its
+    /// text and caret. The changed-work check is live for the jump, which is never trapped in an
+    /// edit; for the arrows it is defensive, because while an input is open the screen consumes
+    /// them as caret keys and they never reach this path.
+    fn request_switch(&mut self, target: Tab) {
+        self.quit_armed = None;
+        if target == self.active {
+            return;
+        }
+        if self.has_changed_work() {
+            self.modal = Some(Modal::LossWarning(LossWarning { pending: PendingExit::Switch(target), selected: WarningButton::Save }));
+            return;
+        }
+        self.ascend_active();
+        self.switch_to(target);
+    }
+
+    /// The `ctrl+c` chord, armed by its first press and completed by its second (cloudy-tui:
+    /// Keyboard grammar — quit from anywhere in two presses). The first press only arms: a modal
+    /// and an open edit keep their state. The completing press quits a clean state and opens the
+    /// loss warning over changed work; it never bypasses a loss warning that is already open —
+    /// a pending switch morphs to the quit form, a pending quit does nothing more.
+    fn handle_ctrl_c(&mut self) {
+        if self.quit_armed == Some(QuitKey::CtrlC) {
+            self.quit_armed = None;
+            if let Some(Modal::LossWarning(warning)) = &mut self.modal {
+                warning.pending = PendingExit::Quit;
+                return;
+            }
+            // The assignment below reads like a modal replacement, but no non-warning modal can
+            // sit beneath the arm here: changed work is an open edit, and while an edit is open
+            // `?` and `a` type into the field, so no help or action-menu modal can be open. The
+            // only modal the completing press can meet is the warning itself, handled above.
+            if self.has_changed_work() {
+                self.modal = Some(Modal::LossWarning(LossWarning { pending: PendingExit::Quit, selected: WarningButton::Save }));
+                return;
+            }
+            self.running = false;
+            return;
+        }
+        self.quit_armed = Some(QuitKey::CtrlC);
     }
 
     /// Captures the ACTIVE screen's actions into a menu, or `None` when it has none (`a` is inert
@@ -944,13 +1087,21 @@ impl App {
     }
 
     /// One key while a modal is open. The action menu wraps its caret and picks on `↵` or an
-    /// assigned hotkey; both modals close on `esc`/`q`, and help also closes on `?`. Everything
-    /// else is inert.
+    /// assigned hotkey; the loss warning moves its button caret on `↑`/`↓` and fires the focused
+    /// button on `↵`; `esc`/`q` close whichever modal is up, and help also closes on `?`.
+    /// Everything else is inert.
     fn handle_modal_key(&mut self, key: KeyEvent) {
+        // "any other key (`q` included) disarms and does its own job" reaches in here too: the
+        // keys a modal consumes are key presses like any other, so an arm taken by the `ctrl+c`
+        // that preceded them dies with the first of them, and a completing `ctrl+c` can never
+        // arrive through this path (that chord is handled ahead of the router, above).
+        self.quit_armed = None;
+
         enum Outcome {
             Keep,
             Close,
             Pick(&'static str),
+            ResolveWarning(PendingExit, WarningButton),
         }
 
         // The help modal's scroll clamp is read before the modal is borrowed mutably, so the arm
@@ -998,6 +1149,20 @@ impl App {
                 }
                 _ => Outcome::Keep,
             },
+            Some(Modal::LossWarning(warning)) => match key.code {
+                KeyCode::Up | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+                    let delta: isize = if key.code == KeyCode::Up { -1 } else { 1 };
+                    let current = warning.selected.index() as isize;
+                    warning.selected = WarningButton::ALL[(current + delta).rem_euclid(WarningButton::ALL.len() as isize) as usize];
+                    Outcome::Keep
+                }
+                KeyCode::Enter if key.modifiers == KeyModifiers::NONE => Outcome::ResolveWarning(warning.pending, warning.selected),
+                // Both close like `go back`: nothing quits or switches, the arm stays disarmed
+                // (it was disarmed when the warning opened), and the work stays as it was.
+                KeyCode::Esc => Outcome::Close,
+                KeyCode::Char('q' | 'Q') if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => Outcome::Close,
+                _ => Outcome::Keep,
+            },
             None => Outcome::Keep,
         };
 
@@ -1007,7 +1172,77 @@ impl App {
                 self.modal = None;
                 self.dispatch_action(label);
             }
+            Outcome::ResolveWarning(pending, button) => {
+                self.modal = None;
+                self.resolve_warning(pending, button);
+            }
             Outcome::Keep => {}
+        }
+    }
+
+    /// Fires the focused loss-warning button (cloudy-tui: Modals → Loss warning). `go back`
+    /// closes and does nothing more; `discard` runs the screen's esc path — the draft dropped,
+    /// the edit closed — then performs what opened the warning; `save` runs the screen's enter
+    /// path and performs it only once the commit landed. A failed save closes the modal,
+    /// performs nothing, drops nothing.
+    fn resolve_warning(&mut self, pending: PendingExit, button: WarningButton) {
+        match button {
+            WarningButton::GoBack => {}
+            WarningButton::Discard => {
+                self.discard_active_edit();
+                self.perform_pending_exit(pending);
+            }
+            WarningButton::Save => {
+                if self.save_active_edit() {
+                    self.perform_pending_exit(pending);
+                }
+            }
+        }
+    }
+
+    /// What the warning was holding: the quit, or the switch to the target fixed at the keypress
+    /// that opened it. The switch is the proceed branch of the switch path — the work is resolved,
+    /// so it ascends and moves exactly as an unchanged switch would.
+    fn perform_pending_exit(&mut self, pending: PendingExit) {
+        match pending {
+            PendingExit::Quit => self.running = false,
+            PendingExit::Switch(target) => {
+                self.ascend_active();
+                self.switch_to(target);
+            }
+        }
+    }
+
+    /// Runs the ACTIVE screen's esc path for the loss warning's discard — the draft dropped, the
+    /// edit closed. Only the two text-input screens can hold the work; every other screen has
+    /// nothing to drop.
+    fn discard_active_edit(&mut self) {
+        match self.active {
+            Tab::Settings => self.settings.discard_edit(),
+            Tab::Overview => self.overview.discard_edit(),
+            _ => {}
+        }
+    }
+
+    /// Runs the ACTIVE screen's enter path for the loss warning's save, answering whether the
+    /// commit landed. Settings: the config write plus the same `take_config_commit` →
+    /// `refresh_run_defaults` the routing branch does; overview: the commit that re-probes the
+    /// source. A failed commit answers false and performs nothing.
+    fn save_active_edit(&mut self) -> bool {
+        match self.active {
+            Tab::Settings => {
+                let saved = self.settings.commit_open_edit();
+                if saved && self.settings.take_config_commit() {
+                    self.refresh_run_defaults();
+                }
+                saved
+            }
+            Tab::Overview => {
+                let Some(path) = self.overview.commit_open_edit() else { return true };
+                self.reprobe_source(path);
+                true
+            }
+            _ => true,
         }
     }
 }

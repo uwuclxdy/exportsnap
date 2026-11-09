@@ -75,6 +75,11 @@ fn press(app: &mut App, code: KeyCode) {
     app.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
 }
 
+/// [`press`] with modifiers, for the ctrl+c chord and the `⌥<digit>` jump.
+fn press_with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    app.handle_event(&Event::Key(KeyEvent::new(code, modifiers)));
+}
+
 /// A fresh app on `tab`, walked there with `→`. [`on_tab_in`] carries the bound and the reason
 /// for it.
 ///
@@ -641,6 +646,90 @@ fn the_footer_alert_replaces_the_hint_bar_in_place_while_armed() {
     assert_eq!(buffer[(1, 19)].style().bg, palette.surface(), "an alert sits on the base surface");
     assert_ne!(buffer[(1, 19)].style().bg, Some(palette.warning), "an alert carries no tint");
     assert_eq!(buffer[(3, 19)].style().fg, Some(palette.text_dim));
+}
+
+#[test]
+fn the_loss_warning_renders_its_body_its_buttons_and_the_save_focus() {
+    // The quit form: two body lines — the screen named, then the question its buttons answer —
+    // and the three-button group right-aligned, `save` default-focused in the neutral inverse
+    // block, `discard` carrying DANGER while unfocused (cloudy-tui: Modals → Loss warning,
+    // Buttons; Inverse block). The drive is ctrl+c twice: q types into an open edit, so it can
+    // never reach the quit while the draft is open.
+    let mut app = App::new(Tier::Full);
+    on_tab_in(&mut app, Tab::Settings);
+    press(&mut app, KeyCode::Enter); // begin editing the output-dir row
+    press(&mut app, KeyCode::Char('x'));
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::LossWarning(_))));
+
+    // 90 columns: the modal's content width (the 44-cell body line plus padding) must clear the
+    // 60%-of-terminal cap, or the body clips mid-sentence and the pins read a cut, not the copy.
+    let terminal = draw(&mut app, 90, 24);
+    let buffer = terminal.backend().buffer();
+    let palette = Palette::new(Tier::Full);
+    let rows = grid(buffer);
+
+    assert!(
+        rows.iter().any(|r| r.contains("there are unsaved edits on the settings tab.")),
+        "the body names the screen holding the work: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.split('│').any(|cell| cell.trim() == "quitting?")),
+        "the quit form asks the contract's terse question in its own cell: {rows:?}"
+    );
+
+    let button_row = rows.iter().position(|r| r.contains("go back")).expect("the buttons render");
+    let line = &rows[button_row];
+    for label in ["go back", "discard", "save"] {
+        assert!(line.contains(label), "the {label} button renders: {line}");
+    }
+
+    let y = button_row as u16;
+    let save_block: String =
+        (0..buffer.area.width).filter(|x| buffer[(*x, y)].style().bg == Some(palette.text)).map(|x| buffer[(x, y)].symbol()).collect();
+    assert_eq!(save_block, " save ", "exactly the save button carries the inverse block, insets included: {save_block:?}");
+    assert!(
+        (0..buffer.area.width).any(|x| buffer[(x, y)].style().fg == Some(palette.danger)),
+        "the destructive discard stays DANGER while unfocused"
+    );
+}
+
+#[test]
+fn the_switch_warning_body_asks_about_switching() {
+    // The switch form names the screen and asks the question its buttons answer — switching, not
+    // quitting (cloudy-tui: Loss warning, "save them before switching?").
+    let mut app = App::new(Tier::Full);
+    press(&mut app, KeyCode::Char('s')); // focus the overview's source row
+    press(&mut app, KeyCode::Enter); // open the edit
+    press(&mut app, KeyCode::Char('x'));
+    press_with(&mut app, KeyCode::Char('3'), KeyModifiers::ALT);
+    assert!(matches!(app.modal(), Some(exportsnap::app::Modal::LossWarning(_))));
+
+    // 90 columns, for the same cap reason as the quit-form render test above.
+    let terminal = draw(&mut app, 90, 24);
+    let rows = grid(terminal.backend().buffer());
+
+    assert!(
+        rows.iter().any(|r| r.contains("there are unsaved edits on the overview tab.")),
+        "the body names the screen holding the work: {rows:?}"
+    );
+    assert!(rows.iter().any(|r| r.contains("save them before switching?")), "the question names the pending switch: {rows:?}");
+}
+
+#[test]
+fn the_armed_quit_prompt_names_the_key_that_armed_it() {
+    // One arm per key: the q prompt keeps its copy, and a ctrl+c arm shows the contract's own
+    // `press ⌃c again to quit` instead of naming a key that would not complete it.
+    let mut app = App::new(Tier::Full);
+    press(&mut app, KeyCode::Char('q'));
+    let terminal = draw(&mut app, 40, 20);
+    assert_eq!(row(terminal.backend().buffer(), 19), " ! press q again to quit                ");
+
+    let mut app = App::new(Tier::Full);
+    press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let terminal = draw(&mut app, 40, 20);
+    assert_eq!(row(terminal.backend().buffer(), 19), " ! press ⌃c again to quit               ");
 }
 
 /// A run failure's message joins its statement to its fix with "; ", and the fix half is the
