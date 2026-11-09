@@ -378,7 +378,9 @@ fn plan_entries<R: io::Read + io::Seek>(archive: &mut ::zip::ZipArchive<R>, zip_
         // Metadata only: `by_index` builds a decompressor and fails on an unsupported method
         // before the method can be named in the error.
         let entry = archive.by_index_raw(index).map_err(|source| ExtractError::Archive { zip: zip_path.to_path_buf(), source })?;
-        let name = entry.name().to_owned();
+        // 9.4.2 decodes the entry name lazily here instead of during central-directory parse, where
+        // 8.6.0 decoded it; Archive is the variant a zip-structure failure already takes.
+        let name = entry.name().map_err(|source| ExtractError::Archive { zip: zip_path.to_path_buf(), source })?.into_owned();
         let Some(path) = entry.enclosed_name().filter(|path| !path.as_os_str().is_empty() && !is_rooted(&name)) else {
             return Err(ExtractError::Escape { zip: zip_path.to_path_buf(), entry: name });
         };
